@@ -449,9 +449,9 @@ vlib_buffer_alloc_size (uword ext_hdr_size, uword data_size)
   return alloc_size;
 }
 
-u8
-vlib_buffer_pool_create (vlib_main_t *vm, u32 data_size, u32 physmem_map_index,
-			 char *fmt, ...)
+static u8
+vlib_buffer_pool_create_from_map (vlib_main_t *vm, u32 data_size,
+				  u32 physmem_map_index, char *fmt, ...)
 {
   vlib_buffer_main_t *bm = vm->buffer_main;
   vlib_buffer_pool_t *bp;
@@ -552,6 +552,42 @@ vlib_buffer_pool_create (vlib_main_t *vm, u32 data_size, u32 physmem_map_index,
   bp->n_buffers = bp->n_avail;
 
   return bp->index;
+}
+
+clib_error_t *
+vlib_buffer_pool_create (vlib_main_t *vm, u32 data_size, u32 n_buffers,
+			 u32 numa_node, char *name, u8 *buffer_pool_index)
+{
+  uword alloc_size;
+  uword map_size;
+  u32 physmem_map_index;
+  clib_error_t *error;
+  u8 index;
+
+  if (vm == 0 || vm->buffer_main == 0 || buffer_pool_index == 0 ||
+      name == 0 || data_size == 0 || n_buffers == 0 ||
+      numa_node >= VLIB_BUFFER_MAX_NUMA_NODES)
+    return clib_error_return (0, "invalid buffer-pool creation request");
+  if (vlib_get_n_threads () == 0)
+    return clib_error_return (0, "vlib main threads are not initialized");
+
+  alloc_size = vlib_buffer_alloc_size (vm->buffer_main->ext_hdr_size,
+				       data_size);
+  map_size = round_pow2 ((uword) (n_buffers + 2) * alloc_size,
+			 CLIB_MEM_PAGE_SZ_2M);
+  error = vlib_physmem_shared_map_create (vm, name, map_size,
+					   CLIB_MEM_PAGE_SZ_2M, numa_node,
+					   &physmem_map_index);
+  if (error)
+    return error;
+
+  index = vlib_buffer_pool_create_from_map (vm, data_size, physmem_map_index,
+					     "%s", name);
+  if (index == (u8) ~0)
+    return clib_error_return (0, "VPP has no available buffer-pool index");
+
+  *buffer_pool_index = index;
+  return 0;
 }
 
 static u8 *
@@ -731,8 +767,9 @@ vlib_buffer_main_init_numa_node (struct vlib_main_t *vm, u32 numa_node,
 
 buffer_pool_create:
   *index =
-    vlib_buffer_pool_create (vm, vlib_buffer_get_default_data_size (vm),
-			     physmem_map_index, "default-numa-%d", numa_node);
+    vlib_buffer_pool_create_from_map (vm,
+				      vlib_buffer_get_default_data_size (vm),
+				      physmem_map_index, "default-numa-%d", numa_node);
 
   if (*index == (u8) ~ 0)
     error = clib_error_return (0, "maximum number of buffer pools reached");

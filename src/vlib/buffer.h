@@ -495,6 +495,11 @@ typedef struct
 
 clib_error_t *vlib_buffer_main_init (struct vlib_main_t *vm);
 
+/* Create a process-lifetime buffer pool backed by a dedicated physmem map. */
+clib_error_t *vlib_buffer_pool_create (struct vlib_main_t *vm, u32 data_size,
+				       u32 n_buffers, u32 numa_node, char *name,
+				       u8 *buffer_pool_index);
+
 format_function_t format_vlib_buffer_pool_all;
 
 int vlib_buffer_set_alloc_free_callback (
