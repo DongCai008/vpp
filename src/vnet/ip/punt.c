@@ -15,7 +15,9 @@
 #include <vnet/ip/ip.h>
 #include <vlib/vlib.h>
 #include <vnet/udp/udp.h>
+#ifndef VPP_REPLACE_TCP
 #include <vnet/tcp/tcp.h>
+#endif
 #include <vnet/ip/punt.h>
 #include <vlib/file.h>
 
@@ -385,7 +387,13 @@ punt_l4_add_del (vlib_main_t * vm,
       if (protocol == IP_PROTOCOL_UDP)
 	udp_punt_unknown (vm, is_ip4, is_add);
       else if (protocol == IP_PROTOCOL_TCP)
-	tcp_punt_unknown (vm, is_ip4, is_add);
+	{
+#ifndef VPP_REPLACE_TCP
+	  tcp_punt_unknown (vm, is_ip4, is_add);
+#else
+	  return clib_error_return (0, "TCP punt is unavailable in replacement VPP");
+#endif
+	}
 
       return 0;
     }

@@ -17,6 +17,7 @@ unset(VNET_API_FILES)
 unset(VNET_MULTIARCH_SOURCES)
 
 option(VPP_IP_FIB_MTRIE_16 "IP FIB's MTRIE Stride is 16-8-8 (if not set it's 8-8-8-8)" ON)
+option(VPP_REPLACE_TCP "Exclude the native TCP transport for an external replacement" OFF)
 
 ##############################################################################
 # Generic stuff
@@ -579,7 +580,8 @@ list(APPEND VNET_HEADERS
 ##############################################################################
 # Layer 4 protocol: tcp
 ##############################################################################
-list(APPEND VNET_SOURCES
+if(NOT VPP_REPLACE_TCP)
+  list(APPEND VNET_SOURCES
   tcp/tcp_api.c
   tcp/tcp_format.c
   tcp/tcp_pg.c
@@ -596,13 +598,13 @@ list(APPEND VNET_SOURCES
   tcp/tcp.c
 )
 
-list(APPEND VNET_MULTIARCH_SOURCES
+  list(APPEND VNET_MULTIARCH_SOURCES
   tcp/tcp_input.c
   tcp/tcp_output.c
   tcp/tcp_syn_filter4.c
 )
 
-list(APPEND VNET_HEADERS
+  list(APPEND VNET_HEADERS
   tcp/tcp_packet.h
   tcp/tcp_timer.h
   tcp/tcp_bt.h
@@ -616,7 +618,8 @@ list(APPEND VNET_HEADERS
   tcp/tcp_error.def
 )
 
-list(APPEND VNET_API_FILES tcp/tcp.api)
+  list(APPEND VNET_API_FILES tcp/tcp.api)
+endif()
 
 ##############################################################################
 # Layer 4 protocol: udp
@@ -1445,6 +1448,10 @@ add_vpp_library(vnet
   LINK_LIBRARIES vppinfra svm vlibapi vlibmemory vlib
   DEPENDS vpp_version_h api_headers
 )
+
+if(VPP_REPLACE_TCP)
+  set_source_files_properties(ip/punt.c PROPERTIES COMPILE_DEFINITIONS VPP_REPLACE_TCP=1)
+endif()
 
 ##############################################################################
 # vpp api test client library
