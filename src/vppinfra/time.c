@@ -235,7 +235,6 @@ clib_time_verify_frequency (clib_time_t * c)
       c->last_cpu_time = now_clock;
       c->last_verify_cpu_time = now_clock;
       c->last_verify_reference_time = now_reference;
-      clib_warning ("CPU time went backward, resyncing timestamps");
       return;
     }
 
@@ -290,8 +289,6 @@ clib_time_verify_frequency (clib_time_t * c)
   /* If rate change > 1%, reject this sample */
   if (PREDICT_FALSE ((delta / c->clocks_per_second) > .01))
     {
-      clib_warning ("Rejecting large frequency change of %.2f%%",
-		    (delta / c->clocks_per_second) * 100.0);
       return;
     }
 
