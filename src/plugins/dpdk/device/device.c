@@ -106,6 +106,12 @@ dpdk_validate_rte_mbuf (vlib_main_t * vm, vlib_buffer_t * b,
 			int maybe_multiseg)
 {
   struct rte_mbuf *mb, *first_mb, *last_mb;
+  vlib_buffer_chain_view_t view;
+  vlib_buffer_chain_view_segment_t segment;
+
+  vlib_buffer_chain_view_init (&view, vm, b, 0);
+  ASSERT (vlib_buffer_chain_view_next (&view, &segment));
+
   last_mb = first_mb = mb = rte_mbuf_from_vlib_buffer (b);
 
   /* buffer is coming from non-dpdk source so we need to init
@@ -114,22 +120,21 @@ dpdk_validate_rte_mbuf (vlib_main_t * vm, vlib_buffer_t * b,
     rte_pktmbuf_reset (mb);
 
   first_mb->nb_segs = 1;
-  mb->data_len = b->current_length;
-  mb->pkt_len = maybe_multiseg ? vlib_buffer_length_in_chain (vm, b) :
-    b->current_length;
-  mb->data_off = VLIB_BUFFER_PRE_DATA_SIZE + b->current_data;
+  mb->data_len = segment.data_length;
+  mb->pkt_len = maybe_multiseg ? vlib_buffer_chain_view_length (vm, b, 0) : segment.data_length;
+  mb->data_off = VLIB_BUFFER_PRE_DATA_SIZE + segment.data - b->data;
 
-  while (maybe_multiseg && (b->flags & VLIB_BUFFER_NEXT_PRESENT))
+  while (maybe_multiseg && vlib_buffer_chain_view_next (&view, &segment))
     {
-      b = vlib_get_buffer (vm, b->next_buffer);
+      b = segment.buffer;
       mb = rte_mbuf_from_vlib_buffer (b);
       if (PREDICT_FALSE ((b->flags & VLIB_BUFFER_EXT_HDR_VALID) == 0))
 	rte_pktmbuf_reset (mb);
       last_mb->next = mb;
       last_mb = mb;
-      mb->data_len = b->current_length;
-      mb->pkt_len = b->current_length;
-      mb->data_off = VLIB_BUFFER_PRE_DATA_SIZE + b->current_data;
+      mb->data_len = segment.data_length;
+      mb->pkt_len = segment.data_length;
+      mb->data_off = VLIB_BUFFER_PRE_DATA_SIZE + segment.data - b->data;
       first_mb->nb_segs++;
       if (PREDICT_FALSE (b->ref_count > 1))
 	mb->pool =

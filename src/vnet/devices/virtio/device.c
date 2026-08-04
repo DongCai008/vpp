@@ -393,8 +393,13 @@ add_buffer_to_slot (vlib_main_t *vm, vlib_node_runtime_t *node,
   vnet_virtio_vring_desc_t *d;
   d = &vring->desc[next];
   vlib_buffer_t *b = vlib_get_buffer (vm, bi);
+  vlib_buffer_chain_view_t view;
+  vlib_buffer_chain_view_segment_t segment;
   vnet_virtio_net_hdr_v1_t *hdr = vlib_buffer_get_current (b) - hdr_sz;
   u32 drop_inline = ~0;
+
+  vlib_buffer_chain_view_init (&view, vm, b, 0);
+  ASSERT (vlib_buffer_chain_view_next (&view, &segment));
 
   clib_memset_u8 (hdr, 0, hdr_sz);
 
@@ -428,7 +433,7 @@ add_buffer_to_slot (vlib_main_t *vm, vlib_node_runtime_t *node,
   if (PREDICT_TRUE ((b->flags & VLIB_BUFFER_NEXT_PRESENT) == 0))
     {
       d->addr = vlib_buffer_get_current_pa (vm, b) - hdr_sz;
-      d->len = b->current_length + hdr_sz;
+      d->len = segment.data_length + hdr_sz;
       d->flags = 0;
     }
   else if (is_indirect)
@@ -466,7 +471,7 @@ add_buffer_to_slot (vlib_main_t *vm, vlib_node_runtime_t *node,
        * from next descriptor.
        */
       if (is_any_layout)
-	id->len = b->current_length + hdr_sz;
+	id->len = segment.data_length + hdr_sz;
       else
 	{
 	  id->len = hdr_sz;
@@ -474,26 +479,25 @@ add_buffer_to_slot (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  id->next = count;
 	  count++;
 	  id++;
-	  id->addr = vlib_buffer_get_current_pa (vm, b);
-	  id->len = b->current_length;
+	  id->addr = vlib_buffer_get_current_pa (vm, b) + segment.data_skip;
+	  id->len = segment.data_length;
 	}
-	  while (b->flags & VLIB_BUFFER_NEXT_PRESENT)
+      while (vlib_buffer_chain_view_next (&view, &segment))
+	{
+	  id->flags = VRING_DESC_F_NEXT;
+	  id->next = count;
+	  count++;
+	  id++;
+	  b = segment.buffer;
+	  id->addr = vlib_buffer_get_current_pa (vm, b) + segment.data_skip;
+	  id->len = segment.data_length;
+	  if (PREDICT_FALSE (count == VIRTIO_TX_MAX_CHAIN_LEN))
 	    {
-	      id->flags = VRING_DESC_F_NEXT;
-	      id->next = count;
-	      count++;
-	      id++;
-	      b = vlib_get_buffer (vm, b->next_buffer);
-	      id->addr = vlib_buffer_get_current_pa (vm, b);
-	      id->len = b->current_length;
-	      if (PREDICT_FALSE (count == VIRTIO_TX_MAX_CHAIN_LEN))
-		{
-		  if (b->flags & VLIB_BUFFER_NEXT_PRESENT)
-		    vlib_error_count (vm, node->node_index,
-				      VIRTIO_TX_ERROR_TRUNC_PACKET, 1);
-		  break;
-		}
+	      if (b->flags & VLIB_BUFFER_NEXT_PRESENT)
+		vlib_error_count (vm, node->node_index, VIRTIO_TX_ERROR_TRUNC_PACKET, 1);
+	      break;
 	    }
+	}
       id->flags = 0;
       id->next = 0;
       d->len = count * sizeof (vnet_virtio_vring_desc_t);
@@ -520,9 +524,9 @@ add_buffer_to_slot (vlib_main_t *vm, vlib_node_runtime_t *node,
 	return n_buffers_in_chain;
 
       d->addr = vlib_buffer_get_current_pa (vm, b) - hdr_sz;
-      d->len = b->current_length + hdr_sz;
+      d->len = segment.data_length + hdr_sz;
 
-      while (b->flags & VLIB_BUFFER_NEXT_PRESENT)
+      while (vlib_buffer_chain_view_next (&view, &segment))
 	{
 	  d->flags = VRING_DESC_F_NEXT;
 	  vring->buffers[count] = bi;
@@ -534,9 +538,9 @@ add_buffer_to_slot (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  count = (count + 1) & mask;
 	  d->next = count;
 	  d = &vring->desc[count];
-	  b = vlib_get_buffer (vm, bi);
-	  d->addr = vlib_buffer_get_current_pa (vm, b);
-	  d->len = b->current_length;
+	  b = segment.buffer;
+	  d->addr = vlib_buffer_get_current_pa (vm, b) + segment.data_skip;
+	  d->len = segment.data_length;
 	}
       d->flags = 0;
       vring->buffers[count] = bi;
@@ -566,8 +570,13 @@ add_buffer_to_slot_packed (vlib_main_t *vm, vlib_node_runtime_t *node,
   u16 n_added = 0, flags = 0;
   vnet_virtio_vring_packed_desc_t *d = &vring->packed_desc[next];
   vlib_buffer_t *b = vlib_get_buffer (vm, bi);
+  vlib_buffer_chain_view_t view;
+  vlib_buffer_chain_view_segment_t segment;
   vnet_virtio_net_hdr_v1_t *hdr = vlib_buffer_get_current (b) - hdr_sz;
   u32 drop_inline = ~0;
+
+  vlib_buffer_chain_view_init (&view, vm, b, 0);
+  ASSERT (vlib_buffer_chain_view_next (&view, &segment));
 
   clib_memset (hdr, 0, hdr_sz);
 
@@ -601,7 +610,7 @@ add_buffer_to_slot_packed (vlib_main_t *vm, vlib_node_runtime_t *node,
   if (PREDICT_TRUE ((b->flags & VLIB_BUFFER_NEXT_PRESENT) == 0))
     {
       d->addr = vlib_buffer_get_current_pa (vm, b) - hdr_sz;
-      d->len = b->current_length + hdr_sz;
+      d->len = segment.data_length + hdr_sz;
     }
   else if (is_indirect)
     {
@@ -639,7 +648,7 @@ add_buffer_to_slot_packed (vlib_main_t *vm, vlib_node_runtime_t *node,
        * from next descriptor.
        */
       if (is_any_layout)
-	id->len = b->current_length + hdr_sz;
+	id->len = segment.data_length + hdr_sz;
       else
 	{
 	  id->len = hdr_sz;
@@ -647,26 +656,25 @@ add_buffer_to_slot_packed (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  id->id = 0;
 	  count++;
 	  id++;
-	  id->addr = vlib_buffer_get_current_pa (vm, b);
-	  id->len = b->current_length;
+	  id->addr = vlib_buffer_get_current_pa (vm, b) + segment.data_skip;
+	  id->len = segment.data_length;
 	}
-	  while (b->flags & VLIB_BUFFER_NEXT_PRESENT)
+      while (vlib_buffer_chain_view_next (&view, &segment))
+	{
+	  id->flags = 0;
+	  id->id = 0;
+	  count++;
+	  id++;
+	  b = segment.buffer;
+	  id->addr = vlib_buffer_get_current_pa (vm, b) + segment.data_skip;
+	  id->len = segment.data_length;
+	  if (PREDICT_FALSE (count == VIRTIO_TX_MAX_CHAIN_LEN))
 	    {
-	      id->flags = 0;
-	      id->id = 0;
-	      count++;
-	      id++;
-	      b = vlib_get_buffer (vm, b->next_buffer);
-	      id->addr = vlib_buffer_get_current_pa (vm, b);
-	      id->len = b->current_length;
-	      if (PREDICT_FALSE (count == VIRTIO_TX_MAX_CHAIN_LEN))
-		{
-		  if (b->flags & VLIB_BUFFER_NEXT_PRESENT)
-		    vlib_error_count (vm, node->node_index,
-				      VIRTIO_TX_ERROR_TRUNC_PACKET, 1);
-		  break;
-		}
+	      if (b->flags & VLIB_BUFFER_NEXT_PRESENT)
+		vlib_error_count (vm, node->node_index, VIRTIO_TX_ERROR_TRUNC_PACKET, 1);
+	      break;
 	    }
+	}
       id->flags = 0;
       id->id = 0;
       d->len = count * sizeof (vnet_virtio_vring_packed_desc_t);
