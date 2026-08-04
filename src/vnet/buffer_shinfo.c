@@ -287,6 +287,9 @@ vnet_buffer_shinfo_cow (vlib_main_t *vm, u32 *buffer_index)
     return -1;
 
   copy_index = vlib_get_buffer_index (vm, copy);
+  copy->flow_id = buffer->flow_id;
+  copy->error = buffer->error;
+  copy->current_config_index = buffer->current_config_index;
 
   while (1)
     {

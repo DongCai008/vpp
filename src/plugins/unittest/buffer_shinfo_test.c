@@ -27,6 +27,9 @@ buffer_shinfo_cow_test (vlib_main_t *vm)
   u32 root_cow;
   u32 root_view_index;
   u32 saved_next;
+  u32 descriptor_flow_id;
+  u32 descriptor_current_config_index;
+  vlib_error_t descriptor_error;
   u32 i;
 
   if (vlib_buffer_alloc (vm, buffers, ARRAY_LEN (buffers)) != ARRAY_LEN (buffers))
@@ -39,6 +42,9 @@ buffer_shinfo_cow_test (vlib_main_t *vm)
   root->next_buffer = buffers[1];
   root->total_length_not_including_first_buffer = 11;
   root->flags |= (VLIB_BUFFER_NEXT_PRESENT | VLIB_BUFFER_TOTAL_LENGTH_VALID | VNET_BUFFER_F_IS_IP4);
+  root->flow_id = 0x12345678;
+  root->error = 47;
+  root->current_config_index = 93;
   vnet_buffer (root)->sw_if_index[VLIB_RX] = 123;
   vnet_buffer (root)->sw_if_index[VLIB_TX] = 456;
   tail->current_data = 7;
@@ -51,6 +57,12 @@ buffer_shinfo_cow_test (vlib_main_t *vm)
   SHINFO_TEST (vnet_buffer_shinfo_clone (vm, buffers[0], &descriptor_index) == 0,
 	       "COW descriptor clone failed");
   descriptor = vlib_get_buffer (vm, descriptor_index);
+  descriptor->flow_id = 0x87654321;
+  descriptor->error = 19;
+  descriptor->current_config_index = 61;
+  descriptor_flow_id = descriptor->flow_id;
+  descriptor_error = descriptor->error;
+  descriptor_current_config_index = descriptor->current_config_index;
   SHINFO_TEST (descriptor->next_buffer == buffers[0] && root->ref_count == 2 &&
 		 tail->ref_count == 2,
 	       "COW descriptor did not retain the canonical root");
@@ -61,7 +73,11 @@ buffer_shinfo_cow_test (vlib_main_t *vm)
 	       "descriptor COW failed");
   copy = vlib_get_buffer (vm, descriptor_cow);
   SHINFO_TEST ((copy->flags & (VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR)) == 0 &&
-		 (copy->flags & VNET_BUFFER_F_IS_IP4) &&
+		 (copy->flags & VNET_BUFFER_F_IS_IP4) && copy->flow_id == root->flow_id &&
+		 copy->error == root->error &&
+		 copy->current_config_index == root->current_config_index &&
+		 copy->flow_id != descriptor_flow_id && copy->error != descriptor_error &&
+		 copy->current_config_index != descriptor_current_config_index &&
 		 vnet_buffer (copy)->sw_if_index[VLIB_RX] == 123 &&
 		 vnet_buffer (copy)->sw_if_index[VLIB_TX] == 456,
 	       "descriptor COW did not preserve root metadata");
