@@ -210,8 +210,8 @@ vnet_buffer_shinfo_clone (vlib_main_t *vm, u32 source_buffer_index, u32 *clone_b
   if (vnet_buffer_shinfo_walk (vm, root_index, &shinfo, 0, 0, 1))
     return -1;
 
-  /* A descriptor has no private packet header for the GSO path to consume. */
-  if (shinfo.gso_enabled)
+  /* A descriptor has no private packet header for GSO or offload paths. */
+  if (shinfo.gso_enabled || root->flags & VNET_BUFFER_F_OFFLOAD)
     return -1;
 
   if (vlib_buffer_alloc_from_pool (vm, &clone_index, 1, root->buffer_pool_index) != 1)
