@@ -5,6 +5,7 @@
 
 #include <vlib/vlib.h>
 #include <vlib/buffer_funcs.h>
+#include <vnet/ip/ip.h>
 
 #define TEST_I(_cond, _comment, _args...)                                     \
   ({                                                                          \
@@ -247,6 +248,109 @@ VLIB_CLI_COMMAND (test_chain_view_command, static) = {
   .path = "test buffer-chain-view",
   .short_help = "test buffer-chain-view",
   .function = test_chain_view_fn,
+};
+
+static ip_csum_t
+checksum_chain_raw (vlib_main_t *vm, vlib_buffer_t *first_buffer, u32 first_buffer_offset,
+		    u32 n_bytes_to_checksum, ip_csum_t sum)
+{
+  vlib_buffer_t *buffer = first_buffer;
+  u32 n_bytes_left = n_bytes_to_checksum;
+  u32 n;
+
+  n = clib_min (n_bytes_left, buffer->current_length - first_buffer_offset);
+  sum = ip_incremental_checksum (sum, vlib_buffer_get_current (buffer) + first_buffer_offset, n);
+  if (PREDICT_FALSE (buffer->flags & VLIB_BUFFER_NEXT_PRESENT))
+    {
+      while (1)
+	{
+	  n_bytes_left -= n;
+	  if (n_bytes_left == 0)
+	    break;
+	  buffer = vlib_get_buffer (vm, buffer->next_buffer);
+	  n = clib_min (n_bytes_left, buffer->current_length);
+	  sum = ip_incremental_checksum (sum, vlib_buffer_get_current (buffer), n);
+	}
+    }
+
+  return sum;
+}
+
+static int
+checksum_chain_view_test (vlib_main_t *vm)
+{
+  const chained_buffer_template_t tmpl[] = {
+    { 0, 31, 1 },
+    { 0, 23, 1 },
+    { 0, 17, 1 },
+  };
+  ip4_header_t *ip4;
+  vlib_buffer_t *b = 0;
+  u8 *contents = 0;
+  uword length;
+  uword offset = 0;
+  u32 bi;
+  ip_csum_t actual;
+  ip_csum_t expected;
+  u16 actual_l4;
+  u16 expected_l4;
+  int ret = 0;
+
+  if (!build_chain (vm, tmpl, ARRAY_LEN (tmpl), 0, 0, &b, &bi))
+    goto err;
+
+  length = vlib_buffer_length_in_chain (vm, b);
+  for (vlib_buffer_t *segment = b; segment; segment = vlib_get_next_buffer (vm, segment))
+    {
+      u8 *data = vlib_buffer_get_current (segment);
+
+      for (uword i = 0; i < segment->current_length; i++)
+	data[i] = offset + i;
+      offset += segment->current_length;
+    }
+  ip4 = vlib_buffer_get_current (b);
+  ip4->ip_version_and_header_length = 0x45;
+  ip4->length = clib_host_to_net_u16 (length);
+  ip4->protocol = IP_PROTOCOL_TCP;
+  ip4->src_address.as_u32 = clib_host_to_net_u32 (0xc0000201);
+  ip4->dst_address.as_u32 = clib_host_to_net_u32 (0xc6336402);
+
+  vec_validate (contents, length - 1);
+  TEST (vlib_buffer_contents (vm, bi, contents) == length,
+	"checksum test copies the ordinary chain view");
+
+  expected = checksum_chain_raw (vm, b, 7, length - 7, 0);
+  actual = ip_incremental_checksum_buffer (vm, b, 7, length - 7, 0);
+  TEST (actual == expected, "incremental checksum matches the raw chain walk");
+
+  expected = clib_host_to_net_u32 ((length - sizeof (*ip4)) + (IP_PROTOCOL_TCP << 16));
+  expected = ip_csum_with_carry (expected, clib_mem_unaligned (&ip4->src_address, u64));
+  expected = ip_incremental_checksum (expected, contents + sizeof (*ip4), length - sizeof (*ip4));
+  expected_l4 = ~ip_csum_fold (expected);
+  actual_l4 = ip4_tcp_udp_compute_checksum (vm, b, ip4);
+  TEST (actual_l4 == expected_l4, "L4 checksum matches contiguous ordinary chain data");
+
+  ret = 1;
+err:
+  if (b)
+    vlib_buffer_free_one (vm, bi);
+  vec_free (contents);
+  return ret;
+}
+
+static clib_error_t *
+test_checksum_chain_view_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
+{
+  if (!checksum_chain_view_test (vm))
+    return clib_error_return (0, "checksum chain-view test failed");
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (test_checksum_chain_view_command, static) = {
+  .path = "test checksum-chain-view",
+  .short_help = "test checksum-chain-view",
+  .function = test_checksum_chain_view_fn,
 };
 
 static int

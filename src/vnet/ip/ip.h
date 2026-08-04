@@ -121,27 +121,24 @@ ip_incremental_checksum_buffer (vlib_main_t * vm,
 				u32 first_buffer_offset,
 				u32 n_bytes_to_checksum, ip_csum_t sum)
 {
-  vlib_buffer_t *b = first_buffer;
+  vlib_buffer_chain_view_t view;
+  vlib_buffer_chain_view_segment_t segment;
   u32 n_bytes_left = n_bytes_to_checksum;
-  ASSERT (b->current_length >= first_buffer_offset);
+  u32 data_offset = first_buffer_offset;
   void *h;
   u32 n;
 
-  n = clib_min (n_bytes_left, b->current_length - first_buffer_offset);
-  h = vlib_buffer_get_current (b) + first_buffer_offset;
-  sum = ip_incremental_checksum (sum, h, n);
-  if (PREDICT_FALSE (b->flags & VLIB_BUFFER_NEXT_PRESENT))
+  ASSERT (first_buffer->current_length >= first_buffer_offset);
+  vlib_buffer_chain_view_init (&view, vm, first_buffer, 0);
+  while (vlib_buffer_chain_view_next (&view, &segment))
     {
-      while (1)
-	{
-	  n_bytes_left -= n;
-	  if (n_bytes_left == 0)
-	    break;
-	  b = vlib_get_buffer (vm, b->next_buffer);
-	  n = clib_min (n_bytes_left, b->current_length);
-	  h = vlib_buffer_get_current (b);
-	  sum = ip_incremental_checksum (sum, h, n);
-	}
+      n = clib_min (n_bytes_left, segment.data_length - data_offset);
+      h = segment.data + data_offset;
+      sum = ip_incremental_checksum (sum, h, n);
+      n_bytes_left -= n;
+      if (n_bytes_left == 0)
+	break;
+      data_offset = 0;
     }
 
   return sum;
@@ -155,6 +152,8 @@ ip_calculate_l4_checksum (vlib_main_t * vm, vlib_buffer_t * p0,
   u16 sum16;
   u8 *data_this_buffer, length_odd;
   u32 n_bytes_left, n_this_buffer, n_ip_bytes_this_buffer;
+  vlib_buffer_chain_view_t view;
+  vlib_buffer_chain_view_segment_t segment;
 
   n_bytes_left = payload_length;
 
@@ -167,13 +166,15 @@ ip_calculate_l4_checksum (vlib_main_t * vm, vlib_buffer_t * p0,
   else
     {
       ASSERT (p0);
+      vlib_buffer_chain_view_init (&view, vm, p0, 0);
+      ASSERT (vlib_buffer_chain_view_next (&view, &segment));
       if (iph)			/* ip header pointer set to packet in buffer */
 	{
 	  ASSERT (ip_header_size);
 	  n_this_buffer = payload_length;
 	  data_this_buffer = iph + ip_header_size;	/* at l4 header */
 	  n_ip_bytes_this_buffer =
-	    p0->current_length - (((u8 *) iph - p0->data) - p0->current_data);
+	    segment.data_length - ((u8 *) iph - segment.data);
 	  if (PREDICT_FALSE (payload_length + ip_header_size >
 			     n_ip_bytes_this_buffer))
 	    {
@@ -186,8 +187,8 @@ ip_calculate_l4_checksum (vlib_main_t * vm, vlib_buffer_t * p0,
 	}
       else			/* packet in buffer with no ip header  */
 	{			/* buffer current pointer at l4 header */
-	  n_this_buffer = p0->current_length;
-	  data_this_buffer = vlib_buffer_get_current (p0);
+	  n_this_buffer = segment.data_length;
+	  data_this_buffer = segment.data;
 	}
       n_this_buffer = clib_min (n_this_buffer, n_bytes_left);
     }
@@ -199,16 +200,15 @@ ip_calculate_l4_checksum (vlib_main_t * vm, vlib_buffer_t * p0,
       if (n_bytes_left == 0)
 	break;
 
-      if (!(p0->flags & VLIB_BUFFER_NEXT_PRESENT))
+      if (!vlib_buffer_chain_view_next (&view, &segment))
 	{
 	  return 0xfefe;
 	}
 
       length_odd = (n_this_buffer & 1);
 
-      p0 = vlib_get_buffer (vm, p0->next_buffer);
-      data_this_buffer = vlib_buffer_get_current (p0);
-      n_this_buffer = clib_min (p0->current_length, n_bytes_left);
+      data_this_buffer = segment.data;
+      n_this_buffer = clib_min (segment.data_length, n_bytes_left);
 
       if (PREDICT_FALSE (length_odd))
 	{

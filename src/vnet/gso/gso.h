@@ -190,6 +190,8 @@ gso_segment_buffer_inline (vlib_main_t *vm,
 			   vlib_buffer_t *b, int is_l2)
 {
   vlib_buffer_t **bufs = 0;
+  vlib_buffer_chain_view_t view;
+  vlib_buffer_chain_view_segment_t segment;
   u32 n_tx_bytes = 0;
 
   u8 oflags = vnet_buffer (b)->oflags;
@@ -202,7 +204,7 @@ gso_segment_buffer_inline (vlib_main_t *vm,
     b->flags & ~(VNET_BUFFER_F_GSO | VLIB_BUFFER_NEXT_PRESENT);
   u16 hdr_sz = (l4_hdr_offset - b->current_data) + l4_hdr_sz;
   u32 next_tcp_seq = 0, tcp_seq = 0;
-  u32 data_size = vlib_buffer_length_in_chain (vm, b) - hdr_sz;
+  u32 data_size = vlib_buffer_chain_view_length (vm, b, 0) - hdr_sz;
   u16 size =
     clib_min (gso_size, vlib_buffer_get_default_data_size (vm) - hdr_sz);
   u16 n_alloc = 0, n_bufs = ((data_size + size - 1) / size);
@@ -232,8 +234,10 @@ gso_segment_buffer_inline (vlib_main_t *vm,
 
   gso_init_bufs_from_template_base (bufs, b, default_bflags, n_bufs, hdr_sz);
 
-  src_ptr = vlib_buffer_get_current (b) + hdr_sz;
-  src_left = b->current_length - hdr_sz;
+  vlib_buffer_chain_view_init (&view, vm, b, 0);
+  ASSERT (vlib_buffer_chain_view_next (&view, &segment));
+  src_ptr = segment.data + hdr_sz;
+  src_left = segment.data_length - hdr_sz;
   dst_ptr = vlib_buffer_get_current (bufs[i]) + hdr_sz;
   dst_left = size;
 
@@ -253,11 +257,10 @@ gso_segment_buffer_inline (vlib_main_t *vm,
       if (0 == src_left)
 	{
 	  /* init src to the next buffer in chain */
-	  if (b->flags & VLIB_BUFFER_NEXT_PRESENT)
+	  if (vlib_buffer_chain_view_next (&view, &segment))
 	    {
-	      b = vlib_get_buffer (vm, b->next_buffer);
-	      src_left = b->current_length;
-	      src_ptr = vlib_buffer_get_current (b);
+	      src_left = segment.data_length;
+	      src_ptr = segment.data;
 	    }
 	  else
 	    {

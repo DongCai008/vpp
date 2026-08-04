@@ -262,6 +262,21 @@ gso_segment_buffer_test (vlib_main_t *vm, u32 bi,
   return n_tx_bytes;
 }
 
+static u32
+gso_expected_segmented_length (vlib_main_t *vm, vlib_buffer_t *b)
+{
+  u16 l4_hdr_offset = vnet_buffer (b)->l4_hdr_offset;
+  u16 l4_hdr_sz = vnet_buffer2 (b)->gso_l4_hdr_sz;
+  u16 hdr_sz = (l4_hdr_offset - b->current_data) + l4_hdr_sz;
+  u16 segment_size =
+    clib_min (vnet_buffer2 (b)->gso_size, vlib_buffer_get_default_data_size (vm) - hdr_sz);
+  u32 packet_length = vlib_buffer_chain_view_length (vm, b, 0);
+  u32 payload_length = packet_length - hdr_sz;
+  u32 n_segments = (payload_length + segment_size - 1) / segment_size;
+
+  return payload_length + n_segments * hdr_sz;
+}
+
 static clib_error_t *
 test_gso_perf (vlib_main_t *vm, gso_test_main_t *gtm)
 {
@@ -322,6 +337,26 @@ test_gso_perf (vlib_main_t *vm, gso_test_main_t *gtm)
 			       buffer_size, packet_size, gso_size);
 
       u8 is_l2 = gso_test_data->is_l2;
+
+      for (j = 0; j < n_filled; j++)
+	{
+	  vlib_buffer_t *b = vlib_get_buffer (vm, buffer_indices[j]);
+	  u32 expected_length = gso_expected_segmented_length (vm, b);
+	  u32 actual_length = gso_segment_buffer_test (vm, buffer_indices[j], &ptd[j], is_l2);
+
+	  if (actual_length != expected_length)
+	    {
+	      err = clib_error_return (0, "GSO chain-view length %u does not match expected %u",
+				       actual_length, expected_length);
+	      goto done;
+	    }
+	}
+
+      for (j = 0; j < n_filled; j++)
+	{
+	  vlib_buffer_free (vm, ptd[j].split_buffers, vec_len (ptd[j].split_buffers));
+	  vec_free (ptd[j].split_buffers);
+	}
 
       for (k = 0; k < warmup_rounds; k++)
 	{
