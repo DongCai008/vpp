@@ -24,6 +24,7 @@ option(VPP_REPLACE_TCP "Exclude the native TCP transport for an external replace
 ##############################################################################
 list(APPEND VNET_SOURCES
   buffer.c
+  buffer_shinfo.c
   config.c
   devices/devices.c
   devices/netlink.c
@@ -71,6 +72,7 @@ list(APPEND VNET_HEADERS
   api_errno.h
   error.h
   buffer.h
+  buffer_shinfo.h
   config.h
   devices/devices.h
   devices/netlink.h

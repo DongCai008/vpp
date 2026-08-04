@@ -124,6 +124,47 @@ vlib_get_buffer (vlib_main_t * vm, u32 buffer_index)
   return b;
 }
 
+/** \brief Translate and validate a live buffer index without locking
+
+    This accessor is intended for guarded traversal of buffer chains whose
+    next-buffer index may be malformed.  It avoids the buffer-known hash and
+    its lock, and therefore must not be used to establish ownership.  A
+    successful return only establishes that the index addresses a buffer in a
+    current pool and that the buffer has a native reference.
+*/
+static_always_inline vlib_buffer_t *
+vlib_get_buffer_checked (vlib_main_t *vm, u32 buffer_index)
+{
+  vlib_buffer_main_t *bm = vm->buffer_main;
+  vlib_buffer_pool_t *bp;
+  vlib_buffer_t *b;
+  uword b_addr, bp_end, max_index;
+
+  if (PREDICT_FALSE (bm == 0 || bm->buffer_mem_size < sizeof (*b)))
+    return 0;
+
+  max_index = (bm->buffer_mem_size - sizeof (*b)) >> CLIB_LOG2_CACHE_LINE_BYTES;
+  if (PREDICT_FALSE (buffer_index > max_index))
+    return 0;
+
+  b = vlib_buffer_ptr_from_index (bm->buffer_mem_start, buffer_index, 0);
+  if (PREDICT_FALSE (b->ref_count == 0 || b->buffer_pool_index >= vec_len (bm->buffer_pools)))
+    return 0;
+
+  bp = vec_elt_at_index (bm->buffer_pools, b->buffer_pool_index);
+  if (PREDICT_FALSE (bp->alloc_size == 0 || bp->size < sizeof (*b) + bp->data_size ||
+		     bp->start > ~((uword) 0) - bp->size))
+    return 0;
+
+  b_addr = pointer_to_uword (b);
+  bp_end = bp->start + bp->size;
+  if (PREDICT_FALSE (b_addr < bp->start || b_addr > bp_end - sizeof (*b) - bp->data_size ||
+		     (b_addr - bm->ext_hdr_size) % bp->alloc_size != 0))
+    return 0;
+
+  return b;
+}
+
 static_always_inline u32
 vlib_buffer_get_default_data_size (vlib_main_t * vm)
 {
