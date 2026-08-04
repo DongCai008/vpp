@@ -30,17 +30,11 @@ STATIC_ASSERT_FITS_IN (vlib_buffer_t, buffer_pool_index, 16);
 u16 __vlib_buffer_external_hdr_size = 0;
 
 uword
-vlib_buffer_length_in_chain_slow_path (vlib_main_t * vm,
-				       vlib_buffer_t * b_first)
+vlib_buffer_length_in_chain_slow_path (vlib_main_t *vm, vlib_buffer_t *b_first)
 {
-  vlib_buffer_t *b = b_first;
   uword l_first = b_first->current_length;
-  uword l = 0;
-  while (b->flags & VLIB_BUFFER_NEXT_PRESENT)
-    {
-      b = vlib_get_buffer (vm, b->next_buffer);
-      l += b->current_length;
-    }
+  uword l = vlib_buffer_chain_view_length (vm, b_first, 0) - l_first;
+
   b_first->total_length_not_including_first_buffer = l;
   b_first->flags |= VLIB_BUFFER_TOTAL_LENGTH_VALID;
   return l + l_first;

@@ -402,6 +402,127 @@ vlib_get_next_buffer (vlib_main_t * vm, vlib_buffer_t * b)
 	  ? vlib_get_buffer (vm, b->next_buffer) : 0);
 }
 
+/** \brief Return the data skip associated with one buffer-chain link.
+
+    A chain view uses this callback to omit private header data from the
+    following physical segment. The first segment has no incoming link and is
+    never passed to the callback.
+*/
+typedef uword (vlib_buffer_chain_view_link_skip_fn_t) (vlib_main_t *vm, vlib_buffer_t *previous,
+						       vlib_buffer_t *current);
+
+/** \brief A physical buffer-chain segment.
+
+    Physical iteration follows every link and is therefore appropriate for
+    reference-count and free traversal.
+*/
+typedef struct
+{
+  vlib_buffer_t *buffer;
+  u32 buffer_index;
+} vlib_buffer_chain_physical_segment_t;
+
+/** \brief Iterator for physical buffer-chain segments. */
+typedef struct
+{
+  vlib_main_t *vm;
+  vlib_buffer_t *buffer;
+} vlib_buffer_chain_physical_t;
+
+static_always_inline void
+vlib_buffer_chain_physical_init (vlib_buffer_chain_physical_t *iterator, vlib_main_t *vm,
+				 vlib_buffer_t *first)
+{
+  iterator->vm = vm;
+  iterator->buffer = first;
+}
+
+static_always_inline int
+vlib_buffer_chain_physical_next (vlib_buffer_chain_physical_t *iterator,
+				 vlib_buffer_chain_physical_segment_t *segment)
+{
+  vlib_buffer_t *buffer = iterator->buffer;
+
+  if (buffer == 0)
+    return 0;
+
+  segment->buffer = buffer;
+  segment->buffer_index = vlib_get_buffer_index (iterator->vm, buffer);
+  iterator->buffer = vlib_get_next_buffer (iterator->vm, buffer);
+  return 1;
+}
+
+/** \brief A logical data range from one physical buffer-chain segment. */
+typedef struct
+{
+  vlib_buffer_t *buffer;
+  u8 *data;
+  uword data_skip;
+  uword data_length;
+} vlib_buffer_chain_view_segment_t;
+
+/** \brief Iterator for logical buffer-chain data ranges.
+
+    A NULL link-skip callback produces the ordinary VLIB view: every physical
+    segment contributes its complete current-data range.
+*/
+typedef struct
+{
+  vlib_main_t *vm;
+  vlib_buffer_t *previous;
+  vlib_buffer_t *buffer;
+  vlib_buffer_chain_view_link_skip_fn_t *link_skip_fn;
+} vlib_buffer_chain_view_t;
+
+static_always_inline void
+vlib_buffer_chain_view_init (vlib_buffer_chain_view_t *iterator, vlib_main_t *vm,
+			     vlib_buffer_t *first,
+			     vlib_buffer_chain_view_link_skip_fn_t *link_skip_fn)
+{
+  iterator->vm = vm;
+  iterator->previous = 0;
+  iterator->buffer = first;
+  iterator->link_skip_fn = link_skip_fn;
+}
+
+static_always_inline int
+vlib_buffer_chain_view_next (vlib_buffer_chain_view_t *iterator,
+			     vlib_buffer_chain_view_segment_t *segment)
+{
+  vlib_buffer_t *buffer = iterator->buffer;
+  uword data_skip = 0;
+
+  if (buffer == 0)
+    return 0;
+
+  if (iterator->previous && iterator->link_skip_fn)
+    data_skip = iterator->link_skip_fn (iterator->vm, iterator->previous, buffer);
+
+  ASSERT (data_skip <= buffer->current_length);
+  segment->buffer = buffer;
+  segment->data = vlib_buffer_get_current (buffer) + data_skip;
+  segment->data_skip = data_skip;
+  segment->data_length = buffer->current_length - data_skip;
+  iterator->previous = buffer;
+  iterator->buffer = vlib_get_next_buffer (iterator->vm, buffer);
+  return 1;
+}
+
+static_always_inline uword
+vlib_buffer_chain_view_length (vlib_main_t *vm, vlib_buffer_t *first,
+			       vlib_buffer_chain_view_link_skip_fn_t *link_skip_fn)
+{
+  vlib_buffer_chain_view_t iterator;
+  vlib_buffer_chain_view_segment_t segment;
+  uword length = 0;
+
+  vlib_buffer_chain_view_init (&iterator, vm, first, link_skip_fn);
+  while (vlib_buffer_chain_view_next (&iterator, &segment))
+    length += segment.data_length;
+
+  return length;
+}
+
 uword vlib_buffer_length_in_chain_slow_path (vlib_main_t * vm,
 					     vlib_buffer_t * b_first);
 
@@ -448,19 +569,15 @@ vlib_buffer_index_length_in_chain (vlib_main_t * vm, u32 bi)
 always_inline uword
 vlib_buffer_contents (vlib_main_t * vm, u32 buffer_index, u8 * contents)
 {
+  vlib_buffer_chain_view_t iterator;
+  vlib_buffer_chain_view_segment_t segment;
   uword content_len = 0;
-  uword l;
-  vlib_buffer_t *b;
 
-  while (1)
+  vlib_buffer_chain_view_init (&iterator, vm, vlib_get_buffer (vm, buffer_index), 0);
+  while (vlib_buffer_chain_view_next (&iterator, &segment))
     {
-      b = vlib_get_buffer (vm, buffer_index);
-      l = b->current_length;
-      clib_memcpy_fast (contents + content_len, b->data + b->current_data, l);
-      content_len += l;
-      if (!(b->flags & VLIB_BUFFER_NEXT_PRESENT))
-	break;
-      buffer_index = b->next_buffer;
+      clib_memcpy_fast (contents + content_len, segment.data, segment.data_length);
+      content_len += segment.data_length;
     }
 
   return content_len;

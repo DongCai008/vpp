@@ -160,6 +160,96 @@ err0:
 }
 
 static int
+chain_view_test (vlib_main_t *vm)
+{
+  const chained_buffer_template_t tmpl[] = {
+    { 11, 3, 1 },
+    { -7, 5, 1 },
+    { 23, 7, 1 },
+  };
+  vlib_buffer_chain_physical_t physical_iterator;
+  vlib_buffer_chain_physical_segment_t physical_segment;
+  vlib_buffer_chain_view_t view_iterator;
+  vlib_buffer_chain_view_segment_t view_segment;
+  clib_random_buffer_t randbuf;
+  vlib_buffer_t *b = 0;
+  u8 *contents = 0;
+  u8 *rand = 0;
+  u32 bi;
+  uword logical_length = 0;
+  uword physical_length = 0;
+  uword n_logical = 0;
+  uword n_physical = 0;
+  int ret = 0;
+
+  clib_random_buffer_init (&randbuf, 0);
+  if (!build_chain (vm, tmpl, ARRAY_LEN (tmpl), &randbuf, &rand, &b, &bi))
+    goto err;
+
+  b->flags &= ~VLIB_BUFFER_TOTAL_LENGTH_VALID;
+  vlib_buffer_chain_physical_init (&physical_iterator, vm, b);
+  vlib_buffer_chain_view_init (&view_iterator, vm, b, 0);
+  while (vlib_buffer_chain_view_next (&view_iterator, &view_segment))
+    {
+      TEST (vlib_buffer_chain_physical_next (&physical_iterator, &physical_segment),
+	    "physical iterator covers each logical segment");
+      TEST (view_segment.buffer == physical_segment.buffer,
+	    "logical and physical iterators select the same buffer");
+      TEST (view_segment.data_skip == 0, "ordinary buffer-chain view has no data skip");
+      TEST (view_segment.data == vlib_buffer_get_current (physical_segment.buffer),
+	    "logical range starts at the physical current data");
+      TEST (view_segment.data_length == physical_segment.buffer->current_length,
+	    "logical range covers the physical segment");
+
+      logical_length += view_segment.data_length;
+      physical_length += physical_segment.buffer->current_length;
+      n_logical++;
+      n_physical++;
+    }
+
+  TEST (!vlib_buffer_chain_physical_next (&physical_iterator, &physical_segment),
+	"physical iterator ends with the logical iterator");
+  TEST (n_logical == ARRAY_LEN (tmpl) && n_physical == ARRAY_LEN (tmpl),
+	"iterators report all chain segments");
+  TEST (logical_length == physical_length,
+	"logical and physical lengths agree for an ordinary chain");
+  TEST (logical_length == vlib_buffer_chain_view_length (vm, b, 0),
+	"view aggregate length matches the iterator ranges");
+  TEST (logical_length == vlib_buffer_length_in_chain (vm, b),
+	"view aggregate length matches VLIB chain length");
+
+  vec_validate (contents, logical_length - 1);
+  TEST (logical_length == vlib_buffer_contents (vm, bi, contents),
+	"contents reader returns the logical chain length");
+  TEST (clib_memcmp (contents, rand, logical_length) == 0,
+	"contents reader copies all logical ranges");
+
+  ret = 1;
+err:
+  if (b)
+    vlib_buffer_free_one (vm, bi);
+  vec_free (contents);
+  vec_free (rand);
+  clib_random_buffer_free (&randbuf);
+  return ret;
+}
+
+static clib_error_t *
+test_chain_view_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
+{
+  if (!chain_view_test (vm))
+    return clib_error_return (0, "buffer-chain view test failed");
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (test_chain_view_command, static) = {
+  .path = "test buffer-chain-view",
+  .short_help = "test buffer-chain-view",
+  .function = test_chain_view_fn,
+};
+
+static int
 linearize_test (vlib_main_t *vm)
 {
   chained_buffer_template_t tmpl[VLIB_BUFFER_LINEARIZE_MAX];
