@@ -263,6 +263,23 @@ gso_segment_buffer_test (vlib_main_t *vm, u32 bi,
 }
 
 static u32
+gso_raw_chain_length (vlib_main_t *vm, vlib_buffer_t *b)
+{
+  u32 length = 0;
+
+  do
+    {
+      length += b->current_length;
+      if (!(b->flags & VLIB_BUFFER_NEXT_PRESENT))
+	break;
+      b = vlib_get_buffer (vm, b->next_buffer);
+    }
+  while (1);
+
+  return length;
+}
+
+static u32
 gso_expected_segmented_length (vlib_main_t *vm, vlib_buffer_t *b)
 {
   u16 l4_hdr_offset = vnet_buffer (b)->l4_hdr_offset;
@@ -270,7 +287,7 @@ gso_expected_segmented_length (vlib_main_t *vm, vlib_buffer_t *b)
   u16 hdr_sz = (l4_hdr_offset - b->current_data) + l4_hdr_sz;
   u16 segment_size =
     clib_min (vnet_buffer2 (b)->gso_size, vlib_buffer_get_default_data_size (vm) - hdr_sz);
-  u32 packet_length = vlib_buffer_chain_view_length (vm, b, 0);
+  u32 packet_length = gso_raw_chain_length (vm, b);
   u32 payload_length = packet_length - hdr_sz;
   u32 n_segments = (payload_length + segment_size - 1) / segment_size;
 
@@ -341,6 +358,14 @@ test_gso_perf (vlib_main_t *vm, gso_test_main_t *gtm)
       for (j = 0; j < n_filled; j++)
 	{
 	  vlib_buffer_t *b = vlib_get_buffer (vm, buffer_indices[j]);
+
+	  if (!(b->flags & VNET_BUFFER_F_GSO))
+	    continue;
+	  if (PREDICT_FALSE (vnet_buffer2 (b)->gso_size == 0))
+	    {
+	      err = clib_error_return (0, "GSO buffer has zero segment size");
+	      goto done;
+	    }
 	  u32 expected_length = gso_expected_segmented_length (vm, b);
 	  u32 actual_length = gso_segment_buffer_test (vm, buffer_indices[j], &ptd[j], is_l2);
 
