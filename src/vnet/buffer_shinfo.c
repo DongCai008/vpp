@@ -258,3 +258,45 @@ vnet_buffer_shinfo_clone (vlib_main_t *vm, u32 source_buffer_index, u32 *clone_b
   *clone_buffer_index = clone_index;
   return 0;
 }
+
+int
+vnet_buffer_shinfo_cow (vlib_main_t *vm, u32 *buffer_index)
+{
+  vlib_buffer_t *buffer;
+  vlib_buffer_t *copy;
+  vnet_buffer_shinfo_t shinfo;
+  u32 copy_index, input_index, root_index;
+
+  if (buffer_index == 0)
+    return -1;
+
+  input_index = *buffer_index;
+  buffer = vlib_get_buffer_checked (vm, input_index);
+  if (buffer == 0)
+    return -1;
+
+  if ((buffer->flags & (VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR)) == 0)
+    return 0;
+
+  if (vnet_buffer_shinfo_root (vm, input_index, &root_index, &buffer) ||
+      vnet_buffer_shinfo_walk (vm, root_index, &shinfo, 0, 0, 0))
+    return -1;
+
+  copy = vlib_buffer_copy (vm, buffer);
+  if (copy == 0)
+    return -1;
+
+  copy_index = vlib_get_buffer_index (vm, copy);
+
+  while (1)
+    {
+      copy->flags &= ~(VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR);
+      if ((copy->flags & VLIB_BUFFER_NEXT_PRESENT) == 0)
+	break;
+      copy = vlib_get_buffer (vm, copy->next_buffer);
+    }
+
+  *buffer_index = copy_index;
+  vlib_buffer_free_one (vm, input_index);
+  return 0;
+}

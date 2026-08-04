@@ -46,4 +46,6 @@ int vnet_buffer_shinfo_get_span (vlib_main_t *vm, u32 buffer_index, u32 span_ind
 
 int vnet_buffer_shinfo_clone (vlib_main_t *vm, u32 source_buffer_index, u32 *clone_buffer_index);
 
+int vnet_buffer_shinfo_cow (vlib_main_t *vm, u32 *buffer_index);
+
 #endif /* included_vnet_buffer_shinfo_h */
