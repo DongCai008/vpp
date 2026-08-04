@@ -105,6 +105,19 @@ buffer_shinfo_test (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t
 	       "dual-family GSO was accepted");
   root->flags &= ~VNET_BUFFER_F_IS_IP6;
 
+  invalid_index = 0xdecafbad;
+  SHINFO_TEST (vnet_buffer_shinfo_clone (vm, buffers[0], &invalid_index) != 0 &&
+		 invalid_index == 0xdecafbad && root->ref_count == 1 && tail->ref_count == 1 &&
+		 (root->flags & VNET_BUFFER_F_SHARED_ROOT) == 0,
+	       "GSO clone changed root state or published a descriptor");
+  root->flags &= ~(VNET_BUFFER_F_GSO | VNET_BUFFER_F_IS_IP4 | VNET_BUFFER_F_OFFLOAD |
+		   VNET_BUFFER_F_L3_HDR_OFFSET_VALID | VNET_BUFFER_F_L4_HDR_OFFSET_VALID);
+  vnet_buffer (root)->oflags = 0;
+  vnet_buffer (root)->l3_hdr_offset = 0;
+  vnet_buffer (root)->l4_hdr_offset = 0;
+  vnet_buffer2 (root)->gso_size = 0;
+  vnet_buffer2 (root)->gso_l4_hdr_sz = 0;
+
   SHINFO_TEST (vnet_buffer_shinfo_clone (vm, buffers[0], &clones[n_clones]) == 0,
 	       "root clone failed");
   n_clones++;
@@ -119,8 +132,9 @@ buffer_shinfo_test (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t
 	       "clone root resolution is wrong");
   SHINFO_TEST (vnet_buffer_shinfo_get (vm, clones[1], &shinfo) == 0 &&
 		 shinfo.root_buffer_index == buffers[0] && shinfo.data_bytes == 1300 &&
-		 vnet_buffer2 (vlib_get_buffer (vm, clones[1]))->gso_size == 1200,
-	       "clone query or GSO materialization is wrong");
+		 (vlib_get_buffer (vm, clones[1])->flags & VNET_BUFFER_F_GSO) == 0 &&
+		 vnet_buffer2 (vlib_get_buffer (vm, clones[1]))->gso_size == 0,
+	       "clone query or GSO rejection is wrong");
   SHINFO_TEST (root->ref_count == 3 && tail->ref_count == 3, "clone native references are wrong");
 
   saved_next = vlib_get_buffer (vm, clones[0])->next_buffer;
