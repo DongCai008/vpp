@@ -21,6 +21,28 @@ typedef enum session_lookup_result_
   SESSION_LOOKUP_RESULT_FILTERED
 } session_lookup_result_t;
 
+typedef enum session_lookup_connection_type_
+{
+  SESSION_LOOKUP_CONNECTION_TYPE_NONE,
+  SESSION_LOOKUP_CONNECTION_TYPE_ESTABLISHED,
+  SESSION_LOOKUP_CONNECTION_TYPE_HALF_OPEN,
+  SESSION_LOOKUP_CONNECTION_TYPE_LISTENER,
+} session_lookup_connection_type_t;
+
+/* Scalar tuple lookup result. Never exposes a transport connection pointer.
+ *
+ * Established and listener results carry a session handle and owner worker;
+ * connection_index stays invalid until the owner validates the result. A
+ * half-open result has no session and carries its local connection index. */
+typedef struct session_lookup_connection4_result_
+{
+  session_handle_t session_handle;
+  u32 connection_index;
+  clib_thread_index_t thread_index; /* owner worker */
+  u8 transport_proto;
+  session_lookup_connection_type_t type;
+} session_lookup_connection4_result_t;
+
 typedef struct session_lookup_main_
 {
   clib_spinlock_t st_alloc_lock;
@@ -41,6 +63,16 @@ transport_connection_t *session_lookup_connection4 (u32 fib_index,
 						    ip4_address_t * rmt,
 						    u16 lcl_port,
 						    u16 rmt_port, u8 proto);
+/* Returns identities encoded in the session-table hashes. Rule actions are
+ * excluded because resolving one requires following an app/listener pointer. */
+int session_lookup_connection4_result (u32 fib_index, ip4_address_t * lcl,
+				       ip4_address_t * rmt, u16 lcl_port,
+				       u16 rmt_port, u8 proto,
+				       session_lookup_connection4_result_t * result);
+/* Must run on result->thread_index. Validates a session identity and fills its
+ * connection_index without accessing a foreign worker's session pool. */
+int session_lookup_connection4_result_validate_owner (
+  session_lookup_connection4_result_t * result);
 transport_connection_t *session_lookup_connection_wt6 (
   u32 fib_index, ip6_address_t *lcl, ip6_address_t *rmt, u16 lcl_port,
   u16 rmt_port, u8 proto, clib_thread_index_t thread_index, u8 *is_filtered);

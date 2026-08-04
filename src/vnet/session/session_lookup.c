@@ -1099,6 +1099,125 @@ session_lookup_connection4 (u32 fib_index, ip4_address_t * lcl,
   return 0;
 }
 
+static void
+session_lookup_connection4_result_init (session_lookup_connection4_result_t *result)
+{
+  *result = (session_lookup_connection4_result_t){
+    .session_handle = SESSION_INVALID_HANDLE,
+    .connection_index = ~0,
+    .thread_index = CLIB_INVALID_THREAD_INDEX,
+    .transport_proto = TRANSPORT_PROTO_NONE,
+    .type = SESSION_LOOKUP_CONNECTION_TYPE_NONE,
+  };
+}
+
+static int
+session_lookup_connection4_result_set_session_handle (session_handle_t handle, u8 proto,
+						      session_lookup_connection_type_t type,
+						      session_lookup_connection4_result_t *result)
+{
+  if (handle == SESSION_INVALID_HANDLE)
+    return -1;
+  result->session_handle = handle;
+  result->thread_index = session_thread_from_handle (handle);
+  result->transport_proto = proto;
+  result->type = type;
+  return 0;
+}
+
+static session_handle_t
+session_lookup_connection4_result_listener_handle (session_table_t *st, ip4_address_t *lcl,
+						   u16 lcl_port, u8 proto)
+{
+  session_kv4_t kv4;
+  int rv;
+
+  make_v4_listener_kv (&kv4, lcl, lcl_port, proto);
+  rv = clib_bihash_search_inline_16_8 (&st->v4_session_hash, &kv4);
+  if (rv == 0)
+    return kv4.value;
+
+  kv4.key[0] = 0;
+  rv = clib_bihash_search_inline_16_8 (&st->v4_session_hash, &kv4);
+  if (rv == 0)
+    return kv4.value;
+
+  make_v4_proxy_kv (&kv4, lcl, proto);
+  rv = clib_bihash_search_inline_16_8 (&st->v4_session_hash, &kv4);
+  if (rv == 0)
+    return session_make_handle ((u32) kv4.value, 0);
+
+  return SESSION_INVALID_HANDLE;
+}
+
+/**
+ * Lookup an IPv4 tuple and return only its scalar transport/session identity.
+ *
+ * Unlike session_lookup_connection4(), this API never returns a transport
+ * connection pointer. This allows an input worker to discover the owner of an
+ * established session without dereferencing that owner's transport state.
+ *
+ * @return 0 on success, -1 if the tuple has no matching connection
+ */
+int
+session_lookup_connection4_result (u32 fib_index, ip4_address_t *lcl, ip4_address_t *rmt,
+				   u16 lcl_port, u16 rmt_port, u8 proto,
+				   session_lookup_connection4_result_t *result)
+{
+  session_table_t *st;
+  session_kv4_t kv4;
+  session_handle_t handle;
+  int rv;
+
+  if (PREDICT_FALSE (!result))
+    return -1;
+  session_lookup_connection4_result_init (result);
+
+  st = session_table_get_for_fib_index (FIB_PROTOCOL_IP4, fib_index);
+  if (PREDICT_FALSE (!st))
+    return -1;
+
+  make_v4_ss_kv (&kv4, lcl, rmt, lcl_port, rmt_port, proto);
+  rv = clib_bihash_search_inline_16_8 (&st->v4_session_hash, &kv4);
+  if (rv == 0)
+    return session_lookup_connection4_result_set_session_handle (
+      kv4.value, proto, SESSION_LOOKUP_CONNECTION_TYPE_ESTABLISHED, result);
+
+  rv = clib_bihash_search_inline_16_8 (&st->v4_half_open_hash, &kv4);
+  if (rv == 0)
+    {
+      result->connection_index = kv4.value & 0xFFFFFFFF;
+      result->thread_index = vlib_get_thread_index ();
+      result->transport_proto = proto;
+      result->type = SESSION_LOOKUP_CONNECTION_TYPE_HALF_OPEN;
+      return 0;
+    }
+
+  handle = session_lookup_connection4_result_listener_handle (st, lcl, lcl_port, proto);
+  if (handle != SESSION_INVALID_HANDLE)
+    return session_lookup_connection4_result_set_session_handle (
+      handle, proto, SESSION_LOOKUP_CONNECTION_TYPE_LISTENER, result);
+
+  return -1;
+}
+
+int
+session_lookup_connection4_result_validate_owner (session_lookup_connection4_result_t *result)
+{
+  session_t *s;
+
+  if (!result || result->type == SESSION_LOOKUP_CONNECTION_TYPE_HALF_OPEN ||
+      result->session_handle == SESSION_INVALID_HANDLE ||
+      result->thread_index != vlib_get_thread_index ())
+    return -1;
+  s =
+    session_get_if_valid (session_index_from_handle (result->session_handle), result->thread_index);
+  if (!s || session_handle (s) != result->session_handle)
+    return -1;
+  result->connection_index = s->connection_index;
+  return 0;
+}
+
 /**
  * Lookup session with ip4 and transport layer information
  *

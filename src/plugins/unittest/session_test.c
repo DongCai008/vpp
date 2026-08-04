@@ -166,6 +166,7 @@ session_test_endpoint_cfg (vlib_main_t * vm, unformat_input_t * input)
   u32 client_vrf = 0, server_vrf = 1;
   ip4_address_t intf_addr[3];
   transport_connection_t *tc;
+  session_lookup_connection4_result_t lookup_result;
   session_t *s;
   u8 *appns_id;
   int error;
@@ -286,6 +287,19 @@ session_test_endpoint_cfg (vlib_main_t * vm, unformat_input_t * input)
 			 sizeof (tc->lcl_ip)) == 0), "ips should be equal");
   SESSION_TEST ((tc->lcl_port == placeholder_client_port),
 		"ports should be equal");
+  error = session_lookup_connection4_result (
+    0, &tc->lcl_ip.ip4, &tc->rmt_ip.ip4, tc->lcl_port, tc->rmt_port,
+    tc->proto, &lookup_result);
+  SESSION_TEST ((error == 0 &&
+		 lookup_result.type == SESSION_LOOKUP_CONNECTION_TYPE_ESTABLISHED &&
+		 lookup_result.session_handle == session_handle (s) &&
+		 lookup_result.connection_index == ~0 &&
+		 lookup_result.thread_index == tc->thread_index &&
+		 lookup_result.transport_proto == tc->proto),
+		"scalar lookup should return established identity");
+  SESSION_TEST ((session_lookup_connection4_result_validate_owner (&lookup_result) == 0 &&
+		 lookup_result.connection_index == tc->c_index),
+		"owner validation should return established transport identity");
 
   /* Disconnect server session, should lead to faster port cleanup on client */
   vnet_disconnect_args_t disconnect_args = {
@@ -1177,6 +1191,7 @@ session_test_rules (vlib_main_t * vm, unformat_input_t * input)
   u32 server_index, server_index2;
   u32 placeholder_server_api_index = ~0;
   transport_connection_t *tc;
+  session_lookup_connection4_result_t lookup_result;
   u32 placeholder_port = 1111;
   u8 is_filtered = 0, *ns_id = format (0, "appns1");
   session_t *listener, *s;
@@ -1277,19 +1292,23 @@ session_test_rules (vlib_main_t * vm, unformat_input_t * input)
   SESSION_TEST ((error == 0), "Add 1.2.3.4/16 1234 5.6.7.8/16 4321 action %d",
 		args.table_args.action_index);
 
-  tc = session_lookup_connection4 (0, &lcl_pref.fp_addr.ip4,
-				   &rmt_pref.fp_addr.ip4, lcl_port, rmt_port,
-				   TRANSPORT_PROTO_TCP);
+  tc = session_lookup_connection4 (0, &lcl_pref.fp_addr.ip4, &rmt_pref.fp_addr.ip4, lcl_port,
+				   rmt_port, TRANSPORT_PROTO_TCP);
   SESSION_TEST ((tc->c_index == listener->connection_index),
 		"optimized lookup should return the listener");
-  tc = session_lookup_connection_wt4 (0, &lcl_pref.fp_addr.ip4,
-				      &rmt_pref.fp_addr.ip4, lcl_port,
-				      rmt_port, TRANSPORT_PROTO_TCP, 0,
-				      &is_filtered);
-  SESSION_TEST ((tc->c_index == listener->connection_index),
-		"lookup should return the listener");
-  s = session_lookup_safe4 (0, &lcl_pref.fp_addr.ip4, &rmt_pref.fp_addr.ip4,
-			    lcl_port, rmt_port, TRANSPORT_PROTO_TCP);
+  error =
+    session_lookup_connection4_result (0, &lcl_pref.fp_addr.ip4, &rmt_pref.fp_addr.ip4, lcl_port,
+				       rmt_port, TRANSPORT_PROTO_TCP, &lookup_result);
+  SESSION_TEST ((error != 0 && lookup_result.type == SESSION_LOOKUP_CONNECTION_TYPE_NONE &&
+		 lookup_result.session_handle == SESSION_INVALID_HANDLE &&
+		 lookup_result.connection_index == ~0 &&
+		 lookup_result.thread_index == CLIB_INVALID_THREAD_INDEX),
+		"scalar lookup should not follow a rule action to a listener");
+  tc = session_lookup_connection_wt4 (0, &lcl_pref.fp_addr.ip4, &rmt_pref.fp_addr.ip4, lcl_port,
+				      rmt_port, TRANSPORT_PROTO_TCP, 0, &is_filtered);
+  SESSION_TEST ((tc->c_index == listener->connection_index), "lookup should return the listener");
+  s = session_lookup_safe4 (0, &lcl_pref.fp_addr.ip4, &rmt_pref.fp_addr.ip4, lcl_port, rmt_port,
+			    TRANSPORT_PROTO_TCP);
   SESSION_TEST ((s->connection_index == listener->connection_index),
 		"safe lookup should return the listener");
   session_endpoint_t sep = {
@@ -1300,14 +1319,25 @@ session_test_rules (vlib_main_t * vm, unformat_input_t * input)
   };
   handle = session_lookup_local_endpoint (local_ns_index, &sep);
   SESSION_TEST ((handle != server_index), "local session endpoint lookup "
-		"should not work (global scope)");
+					  "should not work (global scope)");
 
-  tc = session_lookup_connection_wt4 (0, &lcl_pref.fp_addr.ip4,
-				      &rmt_pref.fp_addr.ip4, lcl_port + 1,
-				      rmt_port, TRANSPORT_PROTO_TCP, 0,
-				      &is_filtered);
-  SESSION_TEST ((tc == 0),
-		"optimized lookup for wrong lcl port + 1 should not work");
+  tc = session_lookup_connection_wt4 (0, &lcl_pref.fp_addr.ip4, &rmt_pref.fp_addr.ip4, lcl_port + 1,
+				      rmt_port, TRANSPORT_PROTO_TCP, 0, &is_filtered);
+  SESSION_TEST ((tc == 0), "optimized lookup for wrong lcl port + 1 should not work");
+  lookup_result.session_handle = 0;
+  lookup_result.connection_index = 0;
+  lookup_result.thread_index = 0;
+  lookup_result.transport_proto = ~0;
+  lookup_result.type = SESSION_LOOKUP_CONNECTION_TYPE_ESTABLISHED;
+  error =
+    session_lookup_connection4_result (0, &lcl_pref.fp_addr.ip4, &rmt_pref.fp_addr.ip4,
+				       lcl_port + 1, rmt_port, TRANSPORT_PROTO_TCP, &lookup_result);
+  SESSION_TEST ((error != 0 && lookup_result.type == SESSION_LOOKUP_CONNECTION_TYPE_NONE &&
+		 lookup_result.session_handle == SESSION_INVALID_HANDLE &&
+		 lookup_result.connection_index == ~0 &&
+		 lookup_result.thread_index == CLIB_INVALID_THREAD_INDEX &&
+		 lookup_result.transport_proto == TRANSPORT_PROTO_NONE),
+		"failed scalar lookup should invalidate a prior identity");
 
   /*
    * Add 1.2.3.4/16 * 5.6.7.8/16 4321
@@ -1734,6 +1764,115 @@ session_test_rules (vlib_main_t * vm, unformat_input_t * input)
 
   vec_free (ns_id);
   vec_free (attach_args.name);
+  return 0;
+}
+
+static int
+session_test_tuple_result (vlib_main_t *vm, unformat_input_t *input)
+{
+  clib_bihash_kv_16_8_t established = {};
+  clib_bihash_kv_16_8_t half_open = {};
+  session_lookup_connection4_result_t result;
+  session_endpoint_t listener_sep = SESSION_ENDPOINT_NULL;
+  clib_thread_index_t current_thread = vlib_get_thread_index ();
+  clib_thread_index_t foreign_thread = current_thread ? 0 : 1;
+  ip4_address_t local = {
+    .as_u32 = clib_host_to_net_u32 (0x0a000001),
+  };
+  ip4_address_t remote = {
+    .as_u32 = clib_host_to_net_u32 (0x0a000002),
+  };
+  session_t *listener;
+  session_t *foreign;
+  session_t *stale;
+  session_handle_t stale_handle;
+  session_table_t *table;
+  u32 table_index;
+  u32 fib_index = 1024;
+  u16 local_port = clib_host_to_net_u16 (1234);
+  u16 remote_port = clib_host_to_net_u16 (4321);
+  int rv;
+
+  if (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    return -1;
+
+  table_index = session_lookup_get_or_alloc_index_for_fib (FIB_PROTOCOL_IP4, fib_index);
+  table = session_table_get (table_index);
+  SESSION_TEST ((table != 0), "tuple result test table should exist");
+
+  vec_validate (session_main.wrk, foreign_thread);
+  listener = session_alloc (current_thread);
+  foreign = session_alloc (foreign_thread);
+  listener->connection_index = 11;
+  foreign->connection_index = ~0;
+  foreign->session_type = session_type_from_proto_and_ip (TRANSPORT_PROTO_TCP, 1);
+  foreign->session_state = SESSION_STATE_READY;
+
+  listener_sep.is_ip4 = 1;
+  listener_sep.ip.ip4 = local;
+  listener_sep.port = local_port;
+  listener_sep.transport_proto = TRANSPORT_PROTO_TCP;
+  rv = session_lookup_add_session_endpoint (table_index, &listener_sep, session_handle (listener));
+  SESSION_TEST ((rv == 0), "tuple result listener should publish");
+
+  established.key[0] = (u64) remote.as_u32 << 32 | local.as_u32;
+  established.key[1] = (u64) TRANSPORT_PROTO_TCP << 32 | (u64) remote_port << 16 | local_port;
+  established.value = session_handle (foreign);
+  half_open = established;
+  half_open.value = 22;
+  rv = clib_bihash_add_del_16_8 (&table->v4_session_hash, &established, 1);
+  SESSION_TEST ((rv == 0), "foreign established tuple should publish");
+  rv = clib_bihash_add_del_16_8 (&table->v4_half_open_hash, &half_open, 1);
+  SESSION_TEST ((rv == 0), "half-open tuple should publish");
+
+  rv = session_lookup_connection4_result (fib_index, &local, &remote, local_port, remote_port,
+					  TRANSPORT_PROTO_TCP, &result);
+  SESSION_TEST ((rv == 0 && result.type == SESSION_LOOKUP_CONNECTION_TYPE_ESTABLISHED &&
+		 result.session_handle == session_handle (foreign) &&
+		 result.connection_index == ~0 && result.thread_index == foreign_thread &&
+		 result.transport_proto == TRANSPORT_PROTO_TCP),
+		"foreign scalar lookup should not require a transport pointer");
+  SESSION_TEST ((session_lookup_connection4_result_validate_owner (&result) != 0 &&
+		 result.connection_index == ~0),
+		"foreign scalar result should not access the owner session pool");
+
+  rv = clib_bihash_add_del_16_8 (&table->v4_session_hash, &established, 0);
+  SESSION_TEST ((rv == 0), "established tuple should unpublish");
+  rv = session_lookup_connection4_result (fib_index, &local, &remote, local_port, remote_port,
+					  TRANSPORT_PROTO_TCP, &result);
+  SESSION_TEST ((rv == 0 && result.type == SESSION_LOOKUP_CONNECTION_TYPE_HALF_OPEN &&
+		 result.session_handle == SESSION_INVALID_HANDLE && result.connection_index == 22 &&
+		 result.thread_index == current_thread &&
+		 result.transport_proto == TRANSPORT_PROTO_TCP),
+		"half-open tuple should use the current-worker owner sentinel");
+
+  rv = clib_bihash_add_del_16_8 (&table->v4_half_open_hash, &half_open, 0);
+  SESSION_TEST ((rv == 0), "half-open tuple should unpublish");
+  rv = session_lookup_connection4_result (fib_index, &local, &remote, local_port, remote_port,
+					  TRANSPORT_PROTO_TCP, &result);
+  SESSION_TEST ((rv == 0 && result.type == SESSION_LOOKUP_CONNECTION_TYPE_LISTENER &&
+		 result.session_handle == session_handle (listener) &&
+		 result.connection_index == ~0 && result.thread_index == current_thread),
+		"lookup precedence should fall through to the listener");
+
+  stale = session_alloc (current_thread);
+  stale_handle = session_handle (stale);
+  session_free (stale);
+  established.value = stale_handle;
+  rv = clib_bihash_add_del_16_8 (&table->v4_session_hash, &established, 1);
+  SESSION_TEST ((rv == 0), "stale established tuple should publish");
+  rv = session_lookup_connection4_result (fib_index, &local, &remote, local_port, remote_port,
+					  TRANSPORT_PROTO_TCP, &result);
+  SESSION_TEST ((rv == 0 && result.type == SESSION_LOOKUP_CONNECTION_TYPE_ESTABLISHED &&
+		 result.session_handle == stale_handle && result.connection_index == ~0 &&
+		 session_lookup_connection4_result_validate_owner (&result) != 0 &&
+		 result.connection_index == ~0),
+		"owner validation should reject a stale established identity");
+
+  clib_bihash_add_del_16_8 (&table->v4_session_hash, &established, 0);
+  session_lookup_del_session_endpoint (table_index, &listener_sep);
+  session_free (foreign);
+  session_free (listener);
   return 0;
 }
 
@@ -3001,6 +3140,8 @@ session_test (vlib_main_t * vm,
 	res = session_test_rule_table (vm, input);
       else if (unformat (input, "rules"))
 	res = session_test_rules (vm, input);
+      else if (unformat (input, "tuple-result"))
+	res = session_test_tuple_result (vm, input);
       else if (unformat (input, "proxy"))
 	res = session_test_proxy (vm, input);
       else if (unformat (input, "endpt-cfg"))
@@ -3028,6 +3169,8 @@ session_test (vlib_main_t * vm,
 	  if ((res = session_test_rule_table (vm, input)))
 	    goto done;
 	  if ((res = session_test_rules (vm, input)))
+	    goto done;
+	  if ((res = session_test_tuple_result (vm, input)))
 	    goto done;
 	  if ((res = session_test_proxy (vm, input)))
 	    goto done;
