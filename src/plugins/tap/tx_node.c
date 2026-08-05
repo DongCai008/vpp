@@ -18,9 +18,35 @@
 #include <vnet/ip/ip_psh_cksum.h>
 #include <vnet/tcp/tcp_packet.h>
 #include <vnet/udp/udp_packet.h>
+#include <vnet/buffer_shinfo.h>
 #include <tap/internal.h>
 
 #define VIRTIO_TX_MAX_CHAIN_LEN 127
+
+static_always_inline u16
+tap_cow_shared_buffers (vlib_main_t *vm, u32 *buffers, u16 n_buffers)
+{
+  u16 n_kept = 0;
+
+  for (u16 n = 0; n < n_buffers; n++)
+    {
+      u32 bi = buffers[n];
+      vlib_buffer_t *b = vlib_get_buffer (vm, bi);
+
+      if (PREDICT_FALSE (vnet_buffer_shinfo_is_shared (b)))
+	{
+	  if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi)))
+	    {
+	      vlib_buffer_free_one (vm, bi);
+	      continue;
+	    }
+	}
+
+      buffers[n_kept++] = bi;
+    }
+
+  return n_kept;
+}
 
 static void
 tap_tx_trace (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_buffer_t *b0,
@@ -383,6 +409,7 @@ VNET_DEVICE_CLASS_TX_FN (tap_device_class)
   u16 qid = tf->queue_id;
   tap_txq_t *txq = tap_get_tx_queue (tif, qid);
   u16 n, n_pkts = frame->n_vectors, n_left = n_pkts;
+  u16 n_cow_dropped;
   u32 *buffers = vlib_frame_vector_args (frame);
   u32 to[GRO_TO_VECTOR_SIZE (n_pkts)];
   u16 retry_count = 2;
@@ -390,9 +417,19 @@ VNET_DEVICE_CLASS_TX_FN (tap_device_class)
   if (tf->shared_queue)
     CLIB_SPINLOCK_LOCK (txq->lock)
 
+  n_left = tap_cow_shared_buffers (vm, buffers, n_left);
+  n_cow_dropped = n_pkts - n_left;
+  if (PREDICT_FALSE (n_cow_dropped))
+    {
+      vlib_error_count (vm, node->node_index, TAP_TX_ERROR_COW_FAILED, n_cow_dropped);
+      vlib_increment_simple_counter (vnet_main.interface_main.sw_if_counters +
+				       VNET_INTERFACE_COUNTER_DROP,
+				     vm->thread_index, tif->sw_if_index, n_cow_dropped);
+    }
+
   if (tif->packet_coalesce)
     {
-      n_left = vnet_gro_inline (vm, txq->flow_table, buffers, n_pkts, to);
+      n_left = vnet_gro_inline (vm, txq->flow_table, buffers, n_left, to);
       buffers = to;
       txq->tx_is_scheduled = 0;
     }

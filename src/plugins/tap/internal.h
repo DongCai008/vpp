@@ -213,16 +213,15 @@ format_function_t format_virtio_features;
 format_function_t format_if_tun_features;
 format_function_t format_if_tun_offloads;
 
-#define foreach_tap_tx_func_error                                             \
-  _ (NO_FREE_SLOTS, "no free tx slots")                                       \
-  _ (TRUNC_PACKET, "packet > buffer size -- truncated in tx ring")            \
-  _ (PENDING_MSGS, "pending msgs in tx ring")                                 \
-  _ (INDIRECT_DESC_ALLOC_FAILED,                                              \
-     "indirect descriptor allocation failed - packet drop")                   \
-  _ (OUT_OF_ORDER, "out-of-order buffers in used ring")                       \
-  _ (GSO_PACKET_DROP, "gso disabled on itf  -- gso packet drop")              \
-  _ (CSUM_OFFLOAD_PACKET_DROP,                                                \
-     "checksum offload disabled on itf -- csum offload packet drop")
+#define foreach_tap_tx_func_error                                                                  \
+  _ (NO_FREE_SLOTS, "no free tx slots")                                                            \
+  _ (TRUNC_PACKET, "packet > buffer size -- truncated in tx ring")                                 \
+  _ (PENDING_MSGS, "pending msgs in tx ring")                                                      \
+  _ (INDIRECT_DESC_ALLOC_FAILED, "indirect descriptor allocation failed - packet drop")            \
+  _ (OUT_OF_ORDER, "out-of-order buffers in used ring")                                            \
+  _ (COW_FAILED, "shared buffer copy failed")                                                      \
+  _ (GSO_PACKET_DROP, "gso disabled on itf  -- gso packet drop")                                   \
+  _ (CSUM_OFFLOAD_PACKET_DROP, "checksum offload disabled on itf -- csum offload packet drop")
 
 typedef enum
 {
