@@ -287,9 +287,9 @@ shared_view_mutation_test (vlib_main_t *vm)
   tail->current_data = -4;
   tail->current_length = 17;
   for (i = 0; i < root->current_length; i++)
-    root->data[root->current_data + i] = i;
+    ((u8 *) vlib_buffer_get_current (root))[i] = i;
   for (i = 0; i < tail->current_length; i++)
-    tail->data[tail->current_data + i] = root->current_length + i;
+    ((u8 *) vlib_buffer_get_current (tail))[i] = root->current_length + i;
   for (i = 0; i < ARRAY_LEN (root->opaque); i++)
     {
       root->opaque[i] = 0x1000 + i;

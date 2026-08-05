@@ -194,6 +194,9 @@ vlib_buffer_shared_view_make_writable (vlib_main_t *vm, u32 *buffer_index)
     return -1;
 
   copy_index = vlib_get_buffer_index (vm, copy);
+  copy->flow_id = root->flow_id;
+  copy->error = root->error;
+  copy->current_config_index = root->current_config_index;
   vlib_buffer_shared_view_copy_opaque (vm, root, copy);
   while (1)
     {
