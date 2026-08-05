@@ -202,6 +202,12 @@ counters arp {
     units "packets";
     description "RX interface is unnumbered to different subnet";
   };
+  no_buffers {
+    severity error;
+    type counter64;
+    units "packets";
+    description "No buffers available for shared-view copy";
+  };
 };
 
 paths {

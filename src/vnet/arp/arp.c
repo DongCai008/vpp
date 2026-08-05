@@ -234,34 +234,43 @@ arp_input (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	  n_left_to_next -= 1;
 
 	  p0 = vlib_get_buffer (vm, pi0);
-	  arp0 = vlib_buffer_get_current (p0);
-
-	  error0 = ARP_ERROR_REPLIES_SENT;
 	  next0 = ARP_INPUT_NEXT_DROP;
-
-	  error0 = (arp0->l2_type != clib_net_to_host_u16 (
-				       ETHERNET_ARP_HARDWARE_TYPE_ethernet) ?
-			    ARP_ERROR_L2_TYPE_NOT_ETHERNET :
-			    error0);
-	  error0 = (arp0->l3_type != clib_net_to_host_u16 (ETHERNET_TYPE_IP4) ?
-			    ARP_ERROR_L3_TYPE_NOT_IP4 :
-			    error0);
-	  error0 = (0 == arp0->ip4_over_ethernet[0].ip4.as_u32 ?
-			    ARP_ERROR_L3_DST_ADDRESS_UNSET :
-			    error0);
-
-	  if (ARP_ERROR_REPLIES_SENT == error0)
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0) &&
+			     vlib_buffer_shared_view_make_writable (vm, &pi0)))
 	    {
-	      next0 = ARP_INPUT_NEXT_DISABLED;
-	      vnet_feature_arc_start (am->feature_arc_index,
-				      vnet_buffer (p0)->sw_if_index[VLIB_RX],
-				      &next0, p0);
+	      p0->error = node->errors[ARP_ERROR_NO_BUFFERS];
 	    }
 	  else
-	    p0->error = node->errors[error0];
+	    {
+	      to_next[0] = pi0;
+	      p0 = vlib_get_buffer (vm, pi0);
+	      arp0 = vlib_buffer_get_current (p0);
 
-	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
-					   n_left_to_next, pi0, next0);
+	      error0 = ARP_ERROR_REPLIES_SENT;
+
+	      error0 =
+		(arp0->l2_type != clib_net_to_host_u16 (ETHERNET_ARP_HARDWARE_TYPE_ethernet) ?
+		   ARP_ERROR_L2_TYPE_NOT_ETHERNET :
+		   error0);
+	      error0 = (arp0->l3_type != clib_net_to_host_u16 (ETHERNET_TYPE_IP4) ?
+			  ARP_ERROR_L3_TYPE_NOT_IP4 :
+			  error0);
+	      error0 =
+		(0 == arp0->ip4_over_ethernet[0].ip4.as_u32 ? ARP_ERROR_L3_DST_ADDRESS_UNSET :
+							      error0);
+
+	      if (ARP_ERROR_REPLIES_SENT == error0)
+		{
+		  next0 = ARP_INPUT_NEXT_DISABLED;
+		  vnet_feature_arc_start (am->feature_arc_index,
+					  vnet_buffer (p0)->sw_if_index[VLIB_RX], &next0, p0);
+		}
+	      else
+		p0->error = node->errors[error0];
+	    }
+
+	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next, n_left_to_next, pi0,
+					   next0);
 	}
 
       vlib_put_next_frame (vm, node, next_index, n_left_to_next);
@@ -623,6 +632,18 @@ arp_reply (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	    {
 	      error0 = ARP_ERROR_GRATUITOUS_ARP;
 	      goto drop;
+	    }
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)))
+	    {
+	      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &pi0)))
+		{
+		  error0 = ARP_ERROR_NO_BUFFERS;
+		  goto drop;
+		}
+	      to_next[-1] = pi0;
+	      p0 = vlib_get_buffer (vm, pi0);
+	      arp0 = vlib_buffer_get_current (p0);
+	      eth_rx = ethernet_buffer_get_header (p0);
 	    }
 
 	  next0 = arp_mk_reply (vnm, p0, sw_if_index0, if_addr0, arp0, eth_rx);

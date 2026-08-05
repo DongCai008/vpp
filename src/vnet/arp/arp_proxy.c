@@ -342,13 +342,26 @@ arp_proxy (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 		    /*
 		     * change the interface address to the proxied
 		     */
+		    if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)))
+		      {
+			if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &pi0)))
+			  {
+			    error0 = ARP_ERROR_NO_BUFFERS;
+			    next0 = ARP_REPLY_NEXT_DROP;
+			    break;
+			  }
+			to_next[-1] = pi0;
+			p0 = vlib_get_buffer (vm, pi0);
+			arp0 = vlib_buffer_get_current (p0);
+			eth_rx = ethernet_buffer_get_header (p0);
+		      }
 		    n_arp_replies_sent++;
 
-		    next0 =
-		      arp_mk_reply (vnm, p0, sw_if_index0, &proxy_src, arp0,
-				    eth_rx);
+		    next0 = arp_mk_reply (vnm, p0, sw_if_index0, &proxy_src, arp0, eth_rx);
 		  }
 	      }
+	      if (PREDICT_FALSE (error0 == ARP_ERROR_NO_BUFFERS))
+		p0->error = node->errors[error0];
 	    }
 	  else
 	    {
