@@ -304,17 +304,22 @@ arp_proxy (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	  n_left_from -= 1;
 	  n_left_to_next -= 1;
 
+	  error0 = ARP_ERROR_REPLIES_SENT;
+	  next0 = ARP_REPLY_NEXT_DROP;
 	  p0 = vlib_get_buffer (vm, pi0);
+	  if (PREDICT_FALSE (arp_buffer_make_writable (vm, &pi0, &p0)))
+	    {
+	      error0 = ARP_ERROR_NO_BUFFERS;
+	      goto drop;
+	    }
+	  to_next[-1] = pi0;
 	  arp0 = vlib_buffer_get_current (p0);
 	  /* Fill in ethernet header. */
 	  eth_rx = ethernet_buffer_get_header (p0);
 
-	  is_request0 = arp0->opcode
-	    == clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_request);
+	  is_request0 = arp0->opcode == clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_request);
 
-	  error0 = ARP_ERROR_REPLIES_SENT;
 	  sw_if_index0 = vnet_buffer (p0)->sw_if_index[VLIB_RX];
-	  next0 = ARP_REPLY_NEXT_DROP;
 
 	  fib_index0 = ip4_fib_table_get_index_for_sw_if_index (sw_if_index0);
 	  if (~0 == fib_index0)
@@ -324,52 +329,41 @@ arp_proxy (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 
 	  if (0 == error0 && is_request0)
 	    {
-	      u32 this_addr = clib_net_to_host_u32
-		(arp0->ip4_over_ethernet[1].ip4.as_u32);
+	      u32 this_addr = clib_net_to_host_u32 (arp0->ip4_over_ethernet[1].ip4.as_u32);
 
 	      vec_foreach (pa, am->proxy_arps)
-	      {
-		u32 lo_addr = clib_net_to_host_u32 (pa->lo_addr.as_u32);
-		u32 hi_addr = clib_net_to_host_u32 (pa->hi_addr.as_u32);
+		{
+		  u32 lo_addr = clib_net_to_host_u32 (pa->lo_addr.as_u32);
+		  u32 hi_addr = clib_net_to_host_u32 (pa->hi_addr.as_u32);
 
-		/* an ARP request hit in the proxy-arp table? */
-		if ((this_addr >= lo_addr && this_addr <= hi_addr) &&
-		    (fib_index0 == pa->fib_index))
-		  {
-		    proxy_src.as_u32 =
-		      arp0->ip4_over_ethernet[1].ip4.data_u32;
+		  /* an ARP request hit in the proxy-arp table? */
+		  if ((this_addr >= lo_addr && this_addr <= hi_addr) &&
+		      (fib_index0 == pa->fib_index))
+		    {
+		      proxy_src.as_u32 = arp0->ip4_over_ethernet[1].ip4.data_u32;
 
-		    /*
-		     * change the interface address to the proxied
-		     */
-		    if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)))
-		      {
-			if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &pi0)))
-			  {
-			    error0 = ARP_ERROR_NO_BUFFERS;
-			    next0 = ARP_REPLY_NEXT_DROP;
-			    break;
-			  }
-			to_next[-1] = pi0;
-			p0 = vlib_get_buffer (vm, pi0);
-			arp0 = vlib_buffer_get_current (p0);
-			eth_rx = ethernet_buffer_get_header (p0);
-		      }
-		    n_arp_replies_sent++;
+		      /*
+		       * change the interface address to the proxied
+		       */
+		      n_arp_replies_sent++;
 
-		    next0 = arp_mk_reply (vnm, p0, sw_if_index0, &proxy_src, arp0, eth_rx);
-		  }
-	      }
-	      if (PREDICT_FALSE (error0 == ARP_ERROR_NO_BUFFERS))
-		p0->error = node->errors[error0];
+		      next0 = arp_mk_reply (vnm, p0, sw_if_index0, &proxy_src, arp0, eth_rx);
+		    }
+		}
 	    }
 	  else
 	    {
-	      p0->error = node->errors[error0];
+	      goto drop;
 	    }
 
-	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next,
-					   n_left_to_next, pi0, next0);
+	  goto enqueue;
+
+	drop:
+	  p0->error = node->errors[error0];
+
+	enqueue:
+	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next, n_left_to_next, pi0,
+					   next0);
 	}
 
       vlib_put_next_frame (vm, node, next_index, n_left_to_next);

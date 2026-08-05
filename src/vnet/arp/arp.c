@@ -235,15 +235,13 @@ arp_input (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 
 	  p0 = vlib_get_buffer (vm, pi0);
 	  next0 = ARP_INPUT_NEXT_DROP;
-	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0) &&
-			     vlib_buffer_shared_view_make_writable (vm, &pi0)))
+	  if (PREDICT_FALSE (arp_buffer_make_writable (vm, &pi0, &p0)))
 	    {
 	      p0->error = node->errors[ARP_ERROR_NO_BUFFERS];
 	    }
 	  else
 	    {
-	      to_next[0] = pi0;
-	      p0 = vlib_get_buffer (vm, pi0);
+	      to_next[-1] = pi0;
 	      arp0 = vlib_buffer_get_current (p0);
 
 	      error0 = ARP_ERROR_REPLIES_SENT;
@@ -403,13 +401,19 @@ arp_reply (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	  n_left_from -= 1;
 	  n_left_to_next -= 1;
 
+	  next0 = ARP_REPLY_NEXT_DROP;
+	  error0 = ARP_ERROR_REPLIES_SENT;
 	  p0 = vlib_get_buffer (vm, pi0);
+	  if (PREDICT_FALSE (arp_buffer_make_writable (vm, &pi0, &p0)))
+	    {
+	      error0 = ARP_ERROR_NO_BUFFERS;
+	      goto drop;
+	    }
+	  to_next[-1] = pi0;
 	  arp0 = vlib_buffer_get_current (p0);
 	  /* Fill in ethernet header. */
 	  eth_rx = ethernet_buffer_get_header (p0);
 
-	  next0 = ARP_REPLY_NEXT_DROP;
-	  error0 = ARP_ERROR_REPLIES_SENT;
 	  sw_if_index0 = vnet_buffer (p0)->sw_if_index[VLIB_RX];
 
 	  /* Check that IP address is local and matches incoming interface. */
@@ -633,19 +637,6 @@ arp_reply (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	      error0 = ARP_ERROR_GRATUITOUS_ARP;
 	      goto drop;
 	    }
-	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)))
-	    {
-	      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &pi0)))
-		{
-		  error0 = ARP_ERROR_NO_BUFFERS;
-		  goto drop;
-		}
-	      to_next[-1] = pi0;
-	      p0 = vlib_get_buffer (vm, pi0);
-	      arp0 = vlib_buffer_get_current (p0);
-	      eth_rx = ethernet_buffer_get_header (p0);
-	    }
-
 	  next0 = arp_mk_reply (vnm, p0, sw_if_index0, if_addr0, arp0, eth_rx);
 
 	  /* We are going to reply to this request, so, in the absence of

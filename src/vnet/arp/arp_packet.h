@@ -17,6 +17,19 @@ typedef enum
   ARP_REPLY_N_NEXT,
 } arp_reply_next_t;
 
+static_always_inline int
+arp_buffer_make_writable (vlib_main_t *vm, u32 *buffer_index, vlib_buffer_t **buffer)
+{
+  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (*buffer)))
+    {
+      if (vlib_buffer_shared_view_make_writable (vm, buffer_index))
+	return -1;
+      *buffer = vlib_get_buffer (vm, *buffer_index);
+    }
+
+  return 0;
+}
+
 static_always_inline u32
 arp_mk_reply (vnet_main_t * vnm,
 	      vlib_buffer_t * p0,
