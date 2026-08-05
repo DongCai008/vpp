@@ -14,6 +14,7 @@
 #include <vnet/udp/udp_packet.h>
 #include <vnet/feature/feature.h>
 #include <vnet/classify/pcap_classify.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/hash/hash.h>
 #include <vnet/interface_output.h>
 #include <vppinfra/vector/mask_compare.h>
@@ -1087,6 +1088,10 @@ pcap_drop_trace (vlib_main_t * vm,
       b0 = vlib_get_buffer (vm, bi0);
       from++;
       n_left--;
+
+      /* Drop capture rewinds and appends an error suffix in place. */
+      if (vnet_buffer_shinfo_is_shared (b0))
+	continue;
 
       /* See if we're pointedly ignoring this specific error */
       if (im->pcap_drop_filter_hash

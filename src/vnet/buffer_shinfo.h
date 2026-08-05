@@ -39,6 +39,12 @@ typedef struct
   u32 length;
 } vnet_buffer_shinfo_span_t;
 
+static_always_inline int
+vnet_buffer_shinfo_is_shared (vlib_buffer_t *buffer)
+{
+  return (buffer->flags & (VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR)) != 0;
+}
+
 int vnet_buffer_shinfo_get (vlib_main_t *vm, u32 buffer_index, vnet_buffer_shinfo_t *shinfo);
 
 int vnet_buffer_shinfo_get_span (vlib_main_t *vm, u32 buffer_index, u32 span_index,

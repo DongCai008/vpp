@@ -161,6 +161,7 @@ buffer_shinfo_test (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t
   u32 invalid_index = 0xdecafbad;
   u32 saved_next, saved_flags;
   u8 saved_pool;
+  u8 logical_copy[1290];
   u32 n_clones = 0;
 
   clib_error_t *error;
@@ -264,6 +265,11 @@ buffer_shinfo_test (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t
   root->flags &= ~VNET_BUFFER_F_OFFLOAD;
   vnet_buffer (root)->oflags = 0;
 
+  for (u32 i = 0; i < root->current_length; i++)
+    root->data[root->current_data + i] = i;
+  for (u32 i = 0; i < tail->current_length; i++)
+    tail->data[tail->current_data + i] = 0xa0 + i;
+
   SHINFO_TEST (vnet_buffer_shinfo_clone (vm, buffers[0], &clones[n_clones]) == 0,
 	       "root clone failed");
   n_clones++;
@@ -276,6 +282,16 @@ buffer_shinfo_test (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t
 		 (vlib_get_buffer (vm, clones[0])->flags & VNET_BUFFER_F_SHARED_ROOT) == 0 &&
 		 (root->flags & VNET_BUFFER_F_SHARED_ROOT),
 	       "clone root resolution is wrong");
+  SHINFO_TEST (vnet_buffer_shinfo_is_shared (root) &&
+		 vnet_buffer_shinfo_is_shared (vlib_get_buffer (vm, clones[0])),
+	       "shared-view test did not create shared root and descriptor");
+  SHINFO_TEST (vlib_buffer_chain_view_copy (vm, vlib_get_buffer (vm, clones[0]), logical_copy,
+					    sizeof (logical_copy), 0) == sizeof (logical_copy) &&
+		 clib_memcmp (logical_copy, vlib_buffer_get_current (root), root->current_length) ==
+		   0 &&
+		 clib_memcmp (logical_copy + root->current_length, vlib_buffer_get_current (tail),
+			      sizeof (logical_copy) - root->current_length) == 0,
+	       "descriptor view copy did not cross into canonical tail data");
   SHINFO_TEST (vnet_buffer_shinfo_get (vm, clones[1], &shinfo) == 0 &&
 		 shinfo.root_buffer_index == buffers[0] && shinfo.data_bytes == 1300 &&
 		 (vlib_get_buffer (vm, clones[1])->flags & VNET_BUFFER_F_GSO) == 0 &&
