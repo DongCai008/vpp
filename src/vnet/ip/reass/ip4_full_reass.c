@@ -12,6 +12,7 @@
 
 #include <vppinfra/vec.h>
 #include <vnet/vnet.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/ip/ip.h>
 #include <vnet/ip/ip.api_enum.h>
 #include <vppinfra/fifo.h>
@@ -1226,6 +1227,16 @@ ip4_full_reass_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  error0 = IP4_ERROR_REASS_MALFORMED_PACKET;
 	  goto packet_enqueue;
 	}
+
+      /* The custom path consumes descriptor-local next indices. */
+      if (CUSTOM != type && PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+	{
+	  next0 = IP4_FULL_REASS_NEXT_DROP;
+	  error0 = IP4_ERROR_REASS_NO_BUF;
+	  goto packet_enqueue;
+	}
+      b0 = vlib_get_buffer (vm, bi0);
+      ip0 = vlib_buffer_get_current (b0);
 
       u32 fib_index = (vnet_buffer (b0)->sw_if_index[VLIB_TX] == (u32) ~0) ?
 			      vec_elt (ip4_main.fib_index_by_sw_if_index,

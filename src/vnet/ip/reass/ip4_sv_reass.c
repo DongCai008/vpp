@@ -12,6 +12,7 @@
 
 #include <vppinfra/vec.h>
 #include <vnet/vnet.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/ip/ip.h>
 #include <vnet/ip/ip4_to_ip6.h>
 #include <vppinfra/fifo.h>
@@ -934,6 +935,18 @@ slow_path:
 	      b0->error = node->errors[error0];
 	      goto packet_enqueue;
 	    }
+	  /* COW discards custom next indices and output rewrite state. */
+	  if (!a.is_custom && !a.is_output_feature &&
+	      PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+	    {
+	      next0 = IP4_SV_REASSEMBLY_NEXT_DROP;
+	      error0 = IP4_ERROR_REASS_NO_BUF;
+	      goto packet_enqueue;
+	    }
+	  b0 = vlib_get_buffer (vm, bi0);
+	  ip0 = (ip4_header_t *) u8_ptr_add (vlib_buffer_get_current (b0),
+					     (ptrdiff_t) (a.is_output_feature ? 1 : 0) *
+					       vnet_buffer (b0)->ip.save_rewrite_length);
 	  ip4_sv_reass_kv_t kv;
 	  u8 do_handoff = 0;
 

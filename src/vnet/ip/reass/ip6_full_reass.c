@@ -12,6 +12,7 @@
 
 #include <vppinfra/vec.h>
 #include <vnet/vnet.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/ip/ip.h>
 #include <vppinfra/bihash_48_8.h>
 #include <vnet/ip/reass/ip6_full_reass.h>
@@ -1231,8 +1232,20 @@ ip6_full_reassembly_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 				       IP6_ERROR_REASS_FRAGMENTS_RCVD, 1);
 	  frag_hdr =
 	    ip6_ext_next_header_offset (ip0, hdr_chain.eh[res].offset);
-	  vnet_buffer (b0)->ip.reass.ip6_frag_hdr_offset =
-	    hdr_chain.eh[res].offset;
+
+	  /* The custom path consumes descriptor-local next indices. */
+	  if (!is_custom_app && PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+	    {
+	      next0 = IP6_FULL_REASSEMBLY_NEXT_DROP;
+	      error0 = IP6_ERROR_REASS_NO_BUF;
+	      goto skip_reass;
+	    }
+	  b0 = vlib_get_buffer (vm, bi0);
+	  ip0 = vlib_buffer_get_current (b0);
+	  fvnb = vnet_buffer (b0);
+	  frag_hdr =
+	    ip6_ext_next_header_offset (ip0, hdr_chain.eh[res].offset);
+	  fvnb->ip.reass.ip6_frag_hdr_offset = hdr_chain.eh[res].offset;
 
 	  if (0 == ip6_frag_hdr_offset (frag_hdr))
 	    {
