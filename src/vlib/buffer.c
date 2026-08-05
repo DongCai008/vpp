@@ -97,10 +97,12 @@ u8 *
 format_vlib_buffer_and_data (u8 * s, va_list * args)
 {
   vlib_buffer_t *b = va_arg (*args, vlib_buffer_t *);
+  u8 data[64] = {};
+  uword data_length;
 
-  s = format (s, "%U, %U",
-	      format_vlib_buffer, b,
-	      format_hex_bytes, vlib_buffer_get_current (b), 64);
+  data_length = vlib_buffer_chain_view_copy (vlib_get_main (), b, data, sizeof (data), 0);
+
+  s = format (s, "%U, %U", format_vlib_buffer, b, format_hex_bytes, data, data_length);
 
   return s;
 }
@@ -137,15 +139,12 @@ u8 *
 format_vlib_buffer_contents (u8 * s, va_list * va)
 {
   vlib_main_t *vm = va_arg (*va, vlib_main_t *);
-  vlib_buffer_t *b = va_arg (*va, vlib_buffer_t *);
+  vlib_buffer_t *first = va_arg (*va, vlib_buffer_t *);
+  u8 *contents;
+  uword length = vlib_buffer_chain_view_length (vm, first, 0);
 
-  while (1)
-    {
-      vec_add (s, vlib_buffer_get_current (b), b->current_length);
-      if (!(b->flags & VLIB_BUFFER_NEXT_PRESENT))
-	break;
-      b = vlib_get_buffer (vm, b->next_buffer);
-    }
+  vec_add2 (s, contents, length);
+  vlib_buffer_chain_view_copy (vm, first, contents, length, 0);
 
   return s;
 }

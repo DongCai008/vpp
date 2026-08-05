@@ -559,28 +559,40 @@ vlib_buffer_index_length_in_chain (vlib_main_t * vm, u32 bi)
   return vlib_buffer_length_in_chain (vm, b);
 }
 
-/** \brief Copy buffer contents to memory
+/** \brief Copy logical chain-view contents to memory
 
     @param vm - (vlib_main_t *) vlib main data structure pointer
-    @param buffer_index - (u32) buffer index
-    @param contents - (u8 *) memory, <strong>must be large enough</strong>
-    @return - (uword) length of buffer chain
+    @param first - (vlib_buffer_t *) first buffer in the chain
+    @param contents - (u8 *) destination memory, <strong>must be large enough</strong>
+    @param max_bytes - maximum bytes to copy
+    @param link_skip_fn - optional logical data skip callback
+    @return - (uword) bytes copied
 */
 always_inline uword
-vlib_buffer_contents (vlib_main_t * vm, u32 buffer_index, u8 * contents)
+vlib_buffer_chain_view_copy (vlib_main_t *vm, vlib_buffer_t *first, u8 *contents, uword max_bytes,
+			     vlib_buffer_chain_view_link_skip_fn_t *link_skip_fn)
 {
   vlib_buffer_chain_view_t iterator;
   vlib_buffer_chain_view_segment_t segment;
   uword content_len = 0;
 
-  vlib_buffer_chain_view_init (&iterator, vm, vlib_get_buffer (vm, buffer_index), 0);
-  while (vlib_buffer_chain_view_next (&iterator, &segment))
+  vlib_buffer_chain_view_init (&iterator, vm, first, link_skip_fn);
+  while (max_bytes && vlib_buffer_chain_view_next (&iterator, &segment))
     {
-      clib_memcpy_fast (contents + content_len, segment.data, segment.data_length);
-      content_len += segment.data_length;
+      uword copy_length = clib_min (max_bytes, segment.data_length);
+
+      clib_memcpy_fast (contents + content_len, segment.data, copy_length);
+      content_len += copy_length;
+      max_bytes -= copy_length;
     }
 
   return content_len;
+}
+
+always_inline uword
+vlib_buffer_contents (vlib_main_t *vm, u32 buffer_index, u8 *contents)
+{
+  return vlib_buffer_chain_view_copy (vm, vlib_get_buffer (vm, buffer_index), contents, ~0, 0);
 }
 
 always_inline uword

@@ -1143,8 +1143,8 @@ ethernet_input_trace (vlib_main_t * vm, vlib_node_runtime_t * node,
 	    {
 	      t0 = vlib_add_trace (vm, node, b0,
 				   sizeof (ethernet_input_trace_t));
-	      clib_memcpy_fast (t0->packet_data, b0->data + b0->current_data,
-				sizeof (t0->packet_data));
+	      clib_memset (t0->packet_data, 0, sizeof (t0->packet_data));
+	      vlib_buffer_chain_view_copy (vm, b0, t0->packet_data, sizeof (t0->packet_data), 0);
 	      t0->frame_flags = from_frame->flags;
 	      clib_memcpy_fast (&t0->frame_data,
 				vlib_frame_scalar_args (from_frame),

@@ -176,6 +176,7 @@ chain_view_test (vlib_main_t *vm)
   vlib_buffer_t *b = 0;
   u8 *contents = 0;
   u8 *rand = 0;
+  u8 prefix[9];
   u32 bi;
   uword logical_length = 0;
   uword physical_length = 0;
@@ -224,6 +225,10 @@ chain_view_test (vlib_main_t *vm)
 	"contents reader returns the logical chain length");
   TEST (clib_memcmp (contents, rand, logical_length) == 0,
 	"contents reader copies all logical ranges");
+  TEST (vlib_buffer_chain_view_copy (vm, b, prefix, sizeof (prefix), 0) == sizeof (prefix),
+	"bounded copy returns its logical prefix length");
+  TEST (clib_memcmp (prefix, rand, sizeof (prefix)) == 0,
+	"bounded copy preserves the ordinary-chain prefix");
 
   ret = 1;
 err:

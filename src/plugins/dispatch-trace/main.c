@@ -148,8 +148,7 @@ dispatch_pcap_trace (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  dtt->pcap_buffer[2] = string_count;
 
 	  /* Figure out how many bytes in the pcap trace */
-	  capture_size =
-	    vec_len (dtt->pcap_buffer) + +vlib_buffer_length_in_chain (vm, b);
+	  capture_size = vec_len (dtt->pcap_buffer) + vlib_buffer_chain_view_length (vm, b, 0);
 
 	  clib_spinlock_lock_if_init (&pm->lock);
 	  n_left = clib_min (capture_size, 16384);
@@ -159,20 +158,10 @@ dispatch_pcap_trace (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  clib_memcpy_fast (d, dtt->pcap_buffer, vec_len (dtt->pcap_buffer));
 	  d += vec_len (dtt->pcap_buffer);
 
-	  n_left = clib_min (vlib_buffer_length_in_chain (vm, b),
+	  n_left = clib_min (vlib_buffer_chain_view_length (vm, b, 0),
 			     (16384 - vec_len (dtt->pcap_buffer)));
 	  /* Copy the packet data */
-	  while (1)
-	    {
-	      u32 copy_length = clib_min ((u32) n_left, b->current_length);
-	      clib_memcpy_fast (d, b->data + b->current_data, copy_length);
-	      n_left -= b->current_length;
-	      if (n_left <= 0)
-		break;
-	      d += b->current_length;
-	      ASSERT (b->flags & VLIB_BUFFER_NEXT_PRESENT);
-	      b = vlib_get_buffer (vm, b->next_buffer);
-	    }
+	  vlib_buffer_chain_view_copy (vm, b, d, n_left, 0);
 	  clib_spinlock_unlock_if_init (&pm->lock);
 	}
     }

@@ -62,7 +62,7 @@ mpcap_add_buffer (mpcap_main_t * pm,
 		  f64 time_now, u32 buffer_index, u32 n_bytes_in_trace)
 {
   vlib_buffer_t *b = vlib_get_buffer (vm, buffer_index);
-  u32 n = vlib_buffer_length_in_chain (vm, b);
+  u32 n = vlib_buffer_chain_view_length (vm, b, 0);
   i32 n_left = clib_min (n_bytes_in_trace, n);
   void *d;
 
@@ -76,17 +76,7 @@ mpcap_add_buffer (mpcap_main_t * pm,
       return;
     }
 
-  while (1)
-    {
-      u32 copy_length = clib_min ((u32) n_left, b->current_length);
-      clib_memcpy (d, b->data + b->current_data, copy_length);
-      n_left -= b->current_length;
-      if (n_left <= 0)
-	break;
-      d += b->current_length;
-      ASSERT (b->flags & VLIB_BUFFER_NEXT_PRESENT);
-      b = vlib_get_buffer (vm, b->next_buffer);
-    }
+  vlib_buffer_chain_view_copy (vm, b, d, n_left, 0);
   if (pm->n_packets_captured >= pm->n_packets_to_capture)
     mpcap_close (pm);
 
