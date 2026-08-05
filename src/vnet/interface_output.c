@@ -881,9 +881,12 @@ typedef enum
 } vnet_error_disposition_t;
 
 static void
-drop_catchup_trace (vlib_main_t * vm,
-		    vlib_node_runtime_t * node, vlib_buffer_t * b)
+drop_catchup_trace (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_buffer_t *b)
 {
+  /* Catchup tracing rewinds the current data before parsing packet headers. */
+  if (vnet_buffer_shinfo_is_shared (b))
+    return;
+
   /* Can we safely rewind the buffer? If not, fagedaboudit */
   if (b->flags & VNET_BUFFER_F_L2_HDR_OFFSET_VALID)
     {
