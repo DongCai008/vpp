@@ -605,6 +605,16 @@ ip4_sv_reass_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
   u16 nexts[VLIB_FRAME_SIZE], *next = nexts;
   b = bufs;
 
+  if (!a.is_custom && !a.is_output_feature)
+    {
+      u32 i;
+
+      for (i = 0; i < n_left_from; i++)
+	if (vlib_get_buffer (vm, from[i])->flags &
+	    (VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR))
+	  goto slow_path;
+    }
+
   /* optimistic case first - no fragments */
   while (n_left_from >= 2)
     {
@@ -862,6 +872,14 @@ slow_path:
 	  u8 forward_context = 0;
 
 	  bi0 = from[0];
+	  /* COW discards custom next indices and output rewrite state. */
+	  if (!a.is_custom && !a.is_output_feature &&
+	      PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+	    {
+	      next0 = IP4_SV_REASSEMBLY_NEXT_DROP;
+	      error0 = IP4_ERROR_REASS_NO_BUF;
+	      goto packet_enqueue;
+	    }
 	  b0 = vlib_get_buffer (vm, bi0);
 
 	  ip4_header_t *ip0 = (ip4_header_t *) u8_ptr_add (
@@ -935,18 +953,6 @@ slow_path:
 	      b0->error = node->errors[error0];
 	      goto packet_enqueue;
 	    }
-	  /* COW discards custom next indices and output rewrite state. */
-	  if (!a.is_custom && !a.is_output_feature &&
-	      PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
-	    {
-	      next0 = IP4_SV_REASSEMBLY_NEXT_DROP;
-	      error0 = IP4_ERROR_REASS_NO_BUF;
-	      goto packet_enqueue;
-	    }
-	  b0 = vlib_get_buffer (vm, bi0);
-	  ip0 = (ip4_header_t *) u8_ptr_add (vlib_buffer_get_current (b0),
-					     (ptrdiff_t) (a.is_output_feature ? 1 : 0) *
-					       vnet_buffer (b0)->ip.save_rewrite_length);
 	  ip4_sv_reass_kv_t kv;
 	  u8 do_handoff = 0;
 

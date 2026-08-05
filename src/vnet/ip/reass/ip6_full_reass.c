@@ -1200,6 +1200,13 @@ ip6_full_reassembly_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  u32 icmp_bi = ~0;
 
 	  bi0 = from[0];
+	  /* The custom path consumes descriptor-local next indices. */
+	  if (!is_custom_app && PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+	    {
+	      next0 = IP6_FULL_REASSEMBLY_NEXT_DROP;
+	      error0 = IP6_ERROR_REASS_NO_BUF;
+	      goto skip_reass;
+	    }
 	  b0 = vlib_get_buffer (vm, bi0);
 
 	  ip6_header_t *ip0 = vlib_buffer_get_current (b0);
@@ -1233,18 +1240,6 @@ ip6_full_reassembly_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  frag_hdr =
 	    ip6_ext_next_header_offset (ip0, hdr_chain.eh[res].offset);
 
-	  /* The custom path consumes descriptor-local next indices. */
-	  if (!is_custom_app && PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
-	    {
-	      next0 = IP6_FULL_REASSEMBLY_NEXT_DROP;
-	      error0 = IP6_ERROR_REASS_NO_BUF;
-	      goto skip_reass;
-	    }
-	  b0 = vlib_get_buffer (vm, bi0);
-	  ip0 = vlib_buffer_get_current (b0);
-	  fvnb = vnet_buffer (b0);
-	  frag_hdr =
-	    ip6_ext_next_header_offset (ip0, hdr_chain.eh[res].offset);
 	  fvnb->ip.reass.ip6_frag_hdr_offset = hdr_chain.eh[res].offset;
 
 	  if (0 == ip6_frag_hdr_offset (frag_hdr))
