@@ -27,6 +27,7 @@
 #include <vnet/devices/devices.h>
 #include <vnet/feature/feature.h>
 #include <vnet/ip/ip_psh_cksum.h>
+#include <vnet/buffer_shinfo.h>
 
 #include <vhost/vhost_user.h>
 #include <vhost/vhost_user_inline.h>
@@ -48,14 +49,15 @@
 
 extern vnet_device_class_t vhost_user_device_class;
 
-#define foreach_vhost_user_tx_func_error      \
-  _(NONE, "no error")  \
-  _(NOT_READY, "vhost vring not ready")  \
-  _(DOWN, "vhost interface is down")  \
-  _(PKT_DROP_NOBUF, "tx packet drops (no available descriptors)")  \
-  _(PKT_DROP_NOMRG, "tx packet drops (cannot merge descriptors)")  \
-  _(MMAP_FAIL, "mmap failure") \
-  _(INDIRECT_OVERFLOW, "indirect descriptor table overflow")
+#define foreach_vhost_user_tx_func_error                                                           \
+  _ (NONE, "no error")                                                                             \
+  _ (NOT_READY, "vhost vring not ready")                                                           \
+  _ (DOWN, "vhost interface is down")                                                              \
+  _ (PKT_DROP_NOBUF, "tx packet drops (no available descriptors)")                                 \
+  _ (PKT_DROP_NOMRG, "tx packet drops (cannot merge descriptors)")                                 \
+  _ (COW_FAILED, "tx packet drops (shared-buffer copy failed)")                                    \
+  _ (MMAP_FAIL, "mmap failure")                                                                    \
+  _ (INDIRECT_OVERFLOW, "indirect descriptor table overflow")
 
 typedef enum
 {
@@ -264,6 +266,19 @@ vhost_user_handle_tx_offload (vhost_user_intf_t *vui, vlib_buffer_t *b,
     }
 }
 
+static_always_inline int
+vhost_user_cow_shared_offload_buffer (vlib_main_t *vm, u32 *bi, vlib_buffer_t **b)
+{
+  if (PREDICT_TRUE (!vnet_buffer_shinfo_is_shared (*b)))
+    return 0;
+
+  if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, bi)))
+    return -1;
+
+  *b = vlib_get_buffer (vm, *bi);
+  return 0;
+}
+
 static_always_inline void
 vhost_user_mark_desc_available (vlib_main_t * vm, vhost_user_intf_t * vui,
 				vhost_user_vring_t * rxvq,
@@ -404,6 +419,19 @@ retry:
 	vlib_prefetch_buffer_with_index (vm, buffers[1], LOAD);
 
       b0 = vlib_get_buffer (vm, buffers[0]);
+      or_flags = b0->flags & VNET_BUFFER_F_OFFLOAD;
+      if (or_flags && (vui->features & VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_CSUM)) &&
+	  PREDICT_FALSE (vhost_user_cow_shared_offload_buffer (vm, buffers, &b0)))
+	{
+	  vlib_error_count (vm, node->node_index, VHOST_USER_TX_FUNC_ERROR_COW_FAILED, 1);
+	  vlib_increment_simple_counter (vnet_main.interface_main.sw_if_counters +
+					   VNET_INTERFACE_COUNTER_DROP,
+					 thread_index, vui->sw_if_index, 1);
+	  buffers++;
+	  n_left--;
+	  continue;
+	}
+
       if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
 	{
 	  cpu->current_trace = vlib_add_trace (vm, node, b0,
@@ -455,8 +483,6 @@ retry:
       hdr->hdr.flags = 0;
       hdr->hdr.gso_type = VIRTIO_NET_HDR_GSO_NONE;
       hdr->num_buffers = 1;
-
-      or_flags = (b0->flags & VNET_BUFFER_F_OFFLOAD);
 
       /* Guest supports csum offload and buffer requires checksum offload? */
       if (or_flags &&
@@ -740,6 +766,18 @@ retry:
 	vlib_prefetch_buffer_with_index (vm, buffers[1], LOAD);
 
       b0 = vlib_get_buffer (vm, buffers[0]);
+      or_flags = b0->flags & VNET_BUFFER_F_OFFLOAD;
+      if (or_flags && (vui->features & VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_CSUM)) &&
+	  PREDICT_FALSE (vhost_user_cow_shared_offload_buffer (vm, buffers, &b0)))
+	{
+	  vlib_error_count (vm, node->node_index, VHOST_USER_TX_FUNC_ERROR_COW_FAILED, 1);
+	  vlib_increment_simple_counter (vnet_main.interface_main.sw_if_counters +
+					   VNET_INTERFACE_COUNTER_DROP,
+					 thread_index, vui->sw_if_index, 1);
+	  buffers++;
+	  n_left--;
+	  continue;
+	}
 
       if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
 	{
@@ -791,8 +829,6 @@ retry:
 	hdr->hdr.flags = 0;
 	hdr->hdr.gso_type = VIRTIO_NET_HDR_GSO_NONE;
 	hdr->num_buffers = 1;	//This is local, no need to check
-
-	or_flags = (b0->flags & VNET_BUFFER_F_OFFLOAD);
 
 	/* Guest supports csum offload and buffer requires checksum offload? */
 	if (or_flags
