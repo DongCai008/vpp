@@ -6,6 +6,7 @@
 
 #include <vnet/ip6-nd/ip6_ra.h>
 
+#include <vnet/buffer_shinfo.h>
 #include <vnet/ip/ip.h>
 #include <vnet/ip-neighbor/ip_neighbor_dp.h>
 
@@ -332,6 +333,17 @@ icmp6_router_solicitation (vlib_main_t * vm,
 			      error0);
 		  if (error0 == ICMP6_ERROR_NONE)
 		    {
+		      if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+			{
+			  error0 = ICMP6_ERROR_ALLOC_FAILURE;
+			  goto drop0;
+			}
+
+		      p0 = vlib_get_buffer (vm, bi0);
+		      ip0 = vlib_buffer_get_current (p0);
+		      h0 = ip6_next_header (ip0);
+		      to_next[-1] = bi0;
+
 		      f64 now = vlib_time_now (vm);
 
 		      /* adjust the sizeof the buffer to just include
