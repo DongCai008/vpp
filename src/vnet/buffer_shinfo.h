@@ -42,7 +42,7 @@ typedef struct
 static_always_inline int
 vnet_buffer_shinfo_is_shared (vlib_buffer_t *buffer)
 {
-  return (buffer->flags & (VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR)) != 0;
+  return vlib_buffer_shared_view_is_shared (buffer);
 }
 
 int vnet_buffer_shinfo_get (vlib_main_t *vm, u32 buffer_index, vnet_buffer_shinfo_t *shinfo);

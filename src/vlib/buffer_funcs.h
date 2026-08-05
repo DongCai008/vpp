@@ -1358,6 +1358,37 @@ vlib_buffer_free_from_ring_no_next (vlib_main_t * vm, u32 * ring, u32 start,
 int vlib_buffer_add_data (vlib_main_t * vm, u32 * buffer_index, void *data,
 			  u32 n_data_bytes);
 
+/** \brief Test whether a buffer is a VLIB shared packet view. */
+static_always_inline int
+vlib_buffer_shared_view_is_shared (const vlib_buffer_t *buffer)
+{
+  return (buffer->flags & VLIB_BUFFER_SHARED_VIEW_FLAGS) != 0;
+}
+
+/** \brief Resolve a packet view to its canonical backing root.
+
+    The caller owns @c buffer_index for this call. A descriptor must point
+    directly to a buffer marked as a shared-view root.
+*/
+int vlib_buffer_shared_view_root (vlib_main_t *vm, u32 buffer_index, u32 *root_buffer_index);
+
+/** \brief Attach an empty private descriptor to a backing root.
+
+    The descriptor and root are caller-owned live buffers. On success the
+    descriptor becomes a shared packet view and normal chain-aware free
+    releases both the descriptor and its backing reference. On failure no
+    buffer metadata or reference count is changed.
+*/
+int vlib_buffer_shared_view_attach (vlib_main_t *vm, u32 descriptor_index, u32 root_buffer_index);
+
+/** \brief Publish an ordinary writable replacement for a shared packet view.
+
+    The caller owns @c *buffer_index and must replace every retained alias
+    with the result. An ordinary buffer is left unchanged. On failure the
+    input index, shared backing references, and packet metadata are unchanged.
+*/
+int vlib_buffer_shared_view_make_writable (vlib_main_t *vm, u32 *buffer_index);
+
 /* Define vlib_buffer and vnet_buffer flags bits preserved for copy/clone */
 #define VLIB_BUFFER_COPY_CLONE_FLAGS_MASK                     	\
   (VLIB_BUFFER_NEXT_PRESENT | VLIB_BUFFER_TOTAL_LENGTH_VALID |	\

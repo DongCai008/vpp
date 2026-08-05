@@ -14,34 +14,32 @@
  * Flags that are set in the high order bits of ((vlib_buffer*)b)->flags
  *
  */
-#define foreach_vnet_buffer_flag                                              \
-  _ (1, L4_CHECKSUM_COMPUTED, "l4-cksum-computed", 1)                         \
-  _ (2, L4_CHECKSUM_CORRECT, "l4-cksum-correct", 1)                           \
-  _ (3, VLAN_2_DEEP, "vlan-2-deep", 1)                                        \
-  _ (4, VLAN_1_DEEP, "vlan-1-deep", 1)                                        \
-  _ (5, SPAN_CLONE, "span-clone", 1)                                          \
-  _ (6, LOOP_COUNTER_VALID, "loop-counter-valid", 0)                          \
-  _ (7, LOCALLY_ORIGINATED, "local", 1)                                       \
-  _ (8, IS_IP4, "ip4", 1)                                                     \
-  _ (9, IS_IP6, "ip6", 1)                                                     \
-  _ (10, OFFLOAD, "offload", 0)                                               \
-  _ (11, IS_NATED, "natted", 1)                                               \
-  _ (12, L2_HDR_OFFSET_VALID, "l2_hdr_offset_valid", 0)                       \
-  _ (13, L3_HDR_OFFSET_VALID, "l3_hdr_offset_valid", 0)                       \
-  _ (14, L4_HDR_OFFSET_VALID, "l4_hdr_offset_valid", 0)                       \
-  _ (15, FLOW_REPORT, "flow-report", 1)                                       \
-  _ (16, IS_DVR, "dvr", 1)                                                    \
-  _ (17, QOS_DATA_VALID, "qos-data-valid", 0)                                 \
-  _ (18, GSO, "gso", 0)                                                       \
-  _ (19, SHARED_ROOT, "shared-root", 0)                                       \
-  _ (20, SHARED_DESCRIPTOR, "shared-descriptor", 0)                           \
-  _ (21, AVAIL1, "avail1", 1)                                                 \
-  _ (22, AVAIL2, "avail2", 1)                                                 \
-  _ (23, AVAIL3, "avail3", 1)                                                 \
-  _ (24, AVAIL4, "avail4", 1)                                                 \
-  _ (25, AVAIL5, "avail5", 1)                                                 \
-  _ (26, AVAIL6, "avail6", 1)                                                 \
-  _ (27, AVAIL7, "avail7", 1)
+#define foreach_vnet_buffer_flag                                                                   \
+  _ (1, L4_CHECKSUM_COMPUTED, "l4-cksum-computed", 1)                                              \
+  _ (2, L4_CHECKSUM_CORRECT, "l4-cksum-correct", 1)                                                \
+  _ (3, VLAN_2_DEEP, "vlan-2-deep", 1)                                                             \
+  _ (4, VLAN_1_DEEP, "vlan-1-deep", 1)                                                             \
+  _ (5, SPAN_CLONE, "span-clone", 1)                                                               \
+  _ (6, LOOP_COUNTER_VALID, "loop-counter-valid", 0)                                               \
+  _ (7, LOCALLY_ORIGINATED, "local", 1)                                                            \
+  _ (8, IS_IP4, "ip4", 1)                                                                          \
+  _ (9, IS_IP6, "ip6", 1)                                                                          \
+  _ (10, OFFLOAD, "offload", 0)                                                                    \
+  _ (11, IS_NATED, "natted", 1)                                                                    \
+  _ (12, L2_HDR_OFFSET_VALID, "l2_hdr_offset_valid", 0)                                            \
+  _ (13, L3_HDR_OFFSET_VALID, "l3_hdr_offset_valid", 0)                                            \
+  _ (14, L4_HDR_OFFSET_VALID, "l4_hdr_offset_valid", 0)                                            \
+  _ (15, FLOW_REPORT, "flow-report", 1)                                                            \
+  _ (16, IS_DVR, "dvr", 1)                                                                         \
+  _ (17, QOS_DATA_VALID, "qos-data-valid", 0)                                                      \
+  _ (18, GSO, "gso", 0)                                                                            \
+  _ (19, AVAIL1, "avail1", 1)                                                                      \
+  _ (20, AVAIL2, "avail2", 1)                                                                      \
+  _ (21, AVAIL3, "avail3", 1)                                                                      \
+  _ (22, AVAIL4, "avail4", 1)                                                                      \
+  _ (23, AVAIL5, "avail5", 1)                                                                      \
+  _ (24, AVAIL6, "avail6", 1)                                                                      \
+  _ (25, AVAIL7, "avail7", 1)
 
 /*
  * Please allocate the FIRST available bit, redefine
@@ -70,6 +68,10 @@ enum
   foreach_vnet_buffer_flag
 #undef _
 };
+
+/* Shared-view identity is VLIB-owned; retain these source aliases for VNET. */
+#define VNET_BUFFER_F_SHARED_ROOT	VLIB_BUFFER_SHARED_VIEW_ROOT
+#define VNET_BUFFER_F_SHARED_DESCRIPTOR VLIB_BUFFER_SHARED_VIEW_DESCRIPTOR
 
 /* Make sure that the vnet and vlib bits are disjoint */
 STATIC_ASSERT (((VNET_BUFFER_FLAGS_ALL_AVAIL & VLIB_BUFFER_FLAGS_ALL) == 0),

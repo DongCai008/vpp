@@ -255,6 +255,121 @@ VLIB_CLI_COMMAND (test_chain_view_command, static) = {
   .function = test_chain_view_fn,
 };
 
+static int
+shared_view_mutation_test (vlib_main_t *vm)
+{
+  vlib_buffer_t *copy;
+  vlib_buffer_t *descriptor;
+  vlib_buffer_t *root;
+  vlib_buffer_t *tail;
+  u32 buffers[3];
+  u32 mutable_index;
+  u32 root_index;
+  u32 saved_next;
+  u32 i;
+  int ret = 0;
+
+  if (vlib_buffer_alloc (vm, buffers, ARRAY_LEN (buffers)) != ARRAY_LEN (buffers))
+    return 0;
+
+  mutable_index = buffers[2];
+  root = vlib_get_buffer (vm, buffers[0]);
+  tail = vlib_get_buffer (vm, buffers[1]);
+  descriptor = vlib_get_buffer (vm, buffers[2]);
+  root->current_data = 3;
+  root->current_length = 29;
+  root->next_buffer = buffers[1];
+  root->flags |= VLIB_BUFFER_NEXT_PRESENT | VLIB_BUFFER_IS_TRACED;
+  root->flow_id = 0x12345678;
+  root->error = 19;
+  root->current_config_index = 37;
+  root->trace_handle = 0xabcdef01;
+  tail->current_data = -4;
+  tail->current_length = 17;
+  for (i = 0; i < root->current_length; i++)
+    root->data[root->current_data + i] = i;
+  for (i = 0; i < tail->current_length; i++)
+    tail->data[tail->current_data + i] = root->current_length + i;
+  for (i = 0; i < ARRAY_LEN (root->opaque); i++)
+    {
+      root->opaque[i] = 0x1000 + i;
+      tail->opaque[i] = 0x2000 + i;
+    }
+  for (i = 0; i < ARRAY_LEN (root->opaque2); i++)
+    {
+      root->opaque2[i] = 0x3000 + i;
+      tail->opaque2[i] = 0x4000 + i;
+    }
+
+  descriptor->flow_id = 0x87654321;
+  descriptor->error = 53;
+  descriptor->current_config_index = 61;
+  clib_memset (descriptor->opaque, 0xa5, sizeof (descriptor->opaque));
+  clib_memset (descriptor->opaque2, 0x5a, sizeof (descriptor->opaque2));
+  TEST (vlib_buffer_shared_view_attach (vm, buffers[2], buffers[0]) == 0,
+	"shared-view descriptor attachment succeeds");
+  TEST (vlib_buffer_shared_view_is_shared (root) &&
+	  vlib_buffer_shared_view_is_shared (descriptor) &&
+	  (root->flags & VLIB_BUFFER_SHARED_VIEW_ROOT) &&
+	  (descriptor->flags & VLIB_BUFFER_SHARED_VIEW_DESCRIPTOR) && root->ref_count == 2 &&
+	  tail->ref_count == 2,
+	"shared-view attachment publishes the generic identity and references");
+  TEST (vlib_buffer_shared_view_root (vm, buffers[2], &root_index) == 0 && root_index == buffers[0],
+	"shared-view root resolution returns the canonical root");
+
+  saved_next = descriptor->next_buffer;
+  descriptor->next_buffer = buffers[1];
+  mutable_index = buffers[2];
+  TEST (vlib_buffer_shared_view_make_writable (vm, &mutable_index) != 0 &&
+	  mutable_index == buffers[2] && root->ref_count == 2 && tail->ref_count == 2,
+	"failed shared-view validation leaves the caller view and references unchanged");
+  descriptor->next_buffer = saved_next;
+
+  mutable_index = buffers[2];
+  TEST (vlib_buffer_shared_view_make_writable (vm, &mutable_index) == 0 &&
+	  mutable_index != buffers[2] && root->ref_count == 1 && tail->ref_count == 1,
+	"shared-view mutation publishes a replacement and releases one view");
+  copy = vlib_get_buffer (vm, mutable_index);
+  TEST (!vlib_buffer_shared_view_is_shared (copy) && copy->flow_id == root->flow_id &&
+	  copy->error == root->error && copy->current_config_index == root->current_config_index &&
+	  copy->trace_handle == root->trace_handle &&
+	  clib_memcmp (copy->opaque, root->opaque, sizeof (root->opaque)) == 0 &&
+	  clib_memcmp (copy->opaque2, root->opaque2, sizeof (root->opaque2)) == 0 &&
+	  clib_memcmp (vlib_buffer_get_current (copy), vlib_buffer_get_current (root),
+		       root->current_length) == 0,
+	"shared-view mutation copies canonical root metadata and data");
+  copy = vlib_get_buffer (vm, copy->next_buffer);
+  TEST (!vlib_buffer_shared_view_is_shared (copy) &&
+	  clib_memcmp (copy->opaque, tail->opaque, sizeof (tail->opaque)) == 0 &&
+	  clib_memcmp (copy->opaque2, tail->opaque2, sizeof (tail->opaque2)) == 0 &&
+	  clib_memcmp (vlib_buffer_get_current (copy), vlib_buffer_get_current (tail),
+		       tail->current_length) == 0,
+	"shared-view mutation deep-copies tail opaque metadata and data");
+
+  TEST (vlib_buffer_shared_view_make_writable (vm, &mutable_index) == 0,
+	"ordinary replacement is a mutation-boundary no-op");
+  ret = 1;
+err:
+  vlib_buffer_free_one (vm, mutable_index);
+  vlib_buffer_free_one (vm, buffers[0]);
+  return ret;
+}
+
+static clib_error_t *
+test_shared_view_mutation_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
+{
+  if (!shared_view_mutation_test (vm))
+    return clib_error_return (0, "buffer shared-view mutation test failed");
+
+  return 0;
+}
+
+VLIB_CLI_COMMAND (test_shared_view_mutation_command, static) = {
+  .path = "test buffer-shared-view-mutation",
+  .short_help = "test buffer-shared-view-mutation",
+  .function = test_shared_view_mutation_fn,
+};
+
 static ip_csum_t
 checksum_chain_raw (vlib_main_t *vm, vlib_buffer_t *first_buffer, u32 first_buffer_offset,
 		    u32 n_bytes_to_checksum, ip_csum_t sum)

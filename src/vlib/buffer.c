@@ -40,6 +40,174 @@ vlib_buffer_length_in_chain_slow_path (vlib_main_t *vm, vlib_buffer_t *b_first)
   return l + l_first;
 }
 
+static int
+vlib_buffer_shared_view_validate_root (vlib_main_t *vm, u32 root_buffer_index, u32 *data_bytes,
+				       int check_refs)
+{
+  vlib_buffer_t *buffer;
+  vlib_buffer_pool_t *pool;
+  u64 length = 0;
+  uword max_buffers;
+  u32 buffer_index = root_buffer_index;
+  uword n_buffers = 0;
+
+  if (PREDICT_FALSE (vm == 0 || vm->buffer_main == 0))
+    return -1;
+
+  max_buffers = vm->buffer_main->buffer_mem_size >> CLIB_LOG2_CACHE_LINE_BYTES;
+  if (PREDICT_FALSE (max_buffers == 0))
+    return -1;
+
+  while (1)
+    {
+      i64 data_end;
+
+      if (PREDICT_FALSE (n_buffers++ >= max_buffers))
+	return -1;
+
+      buffer = vlib_get_buffer_checked (vm, buffer_index);
+      if (PREDICT_FALSE (buffer == 0 ||
+			 (n_buffers > 1 && (buffer->flags & VLIB_BUFFER_SHARED_VIEW_FLAGS))))
+	return -1;
+
+      pool = vlib_get_buffer_pool (vm, buffer->buffer_pool_index);
+      data_end = (i64) buffer->current_data + buffer->current_length;
+      if (PREDICT_FALSE (buffer->current_data < -VLIB_BUFFER_PRE_DATA_SIZE ||
+			 data_end > pool->data_size))
+	return -1;
+
+      if (PREDICT_FALSE (check_refs && buffer->ref_count >= VLIB_BUFFER_MAX_CLONE))
+	return -1;
+
+      length += buffer->current_length;
+      if (PREDICT_FALSE (length > ~((u32) 0)))
+	return -1;
+
+      if ((buffer->flags & VLIB_BUFFER_NEXT_PRESENT) == 0)
+	break;
+      buffer_index = buffer->next_buffer;
+    }
+
+  if (data_bytes)
+    *data_bytes = length;
+  return 0;
+}
+
+int
+vlib_buffer_shared_view_root (vlib_main_t *vm, u32 buffer_index, u32 *root_buffer_index)
+{
+  vlib_buffer_t *buffer;
+
+  if (root_buffer_index == 0)
+    return -1;
+
+  buffer = vlib_get_buffer_checked (vm, buffer_index);
+  if (buffer == 0 ||
+      (buffer->flags & VLIB_BUFFER_SHARED_VIEW_FLAGS) == VLIB_BUFFER_SHARED_VIEW_FLAGS)
+    return -1;
+
+  if ((buffer->flags & VLIB_BUFFER_SHARED_VIEW_DESCRIPTOR) == 0)
+    {
+      *root_buffer_index = buffer_index;
+      return 0;
+    }
+
+  if ((buffer->flags & VLIB_BUFFER_NEXT_PRESENT) == 0)
+    return -1;
+
+  buffer = vlib_get_buffer_checked (vm, buffer->next_buffer);
+  if (buffer == 0 ||
+      (buffer->flags & VLIB_BUFFER_SHARED_VIEW_FLAGS) != VLIB_BUFFER_SHARED_VIEW_ROOT)
+    return -1;
+
+  *root_buffer_index = vlib_get_buffer_index (vm, buffer);
+  return 0;
+}
+
+int
+vlib_buffer_shared_view_attach (vlib_main_t *vm, u32 descriptor_index, u32 root_buffer_index)
+{
+  vlib_buffer_t *descriptor;
+  vlib_buffer_t *root;
+  u32 data_bytes;
+
+  descriptor = vlib_get_buffer_checked (vm, descriptor_index);
+  root = vlib_get_buffer_checked (vm, root_buffer_index);
+  if (descriptor == 0 || root == 0 || descriptor == root ||
+      descriptor->buffer_pool_index != root->buffer_pool_index || descriptor->current_length != 0 ||
+      (descriptor->flags & (VLIB_BUFFER_NEXT_PRESENT | VLIB_BUFFER_SHARED_VIEW_FLAGS)) ||
+      (root->flags & VLIB_BUFFER_SHARED_VIEW_DESCRIPTOR) ||
+      vlib_buffer_shared_view_validate_root (vm, root_buffer_index, &data_bytes, 1))
+    return -1;
+
+  root->flags |= VLIB_BUFFER_SHARED_VIEW_ROOT;
+  vlib_buffer_attach_clone (vm, descriptor, root);
+  descriptor->total_length_not_including_first_buffer = data_bytes;
+  descriptor->flags |= VLIB_BUFFER_TOTAL_LENGTH_VALID | VLIB_BUFFER_SHARED_VIEW_DESCRIPTOR;
+  return 0;
+}
+
+static void
+vlib_buffer_shared_view_copy_opaque (vlib_main_t *vm, vlib_buffer_t *source,
+				     vlib_buffer_t *destination)
+{
+  while (1)
+    {
+      clib_memcpy_fast (destination->opaque, source->opaque, sizeof (source->opaque));
+      clib_memcpy_fast (destination->opaque2, source->opaque2, sizeof (source->opaque2));
+
+      if ((source->flags & VLIB_BUFFER_NEXT_PRESENT) == 0)
+	break;
+      source = vlib_get_buffer (vm, source->next_buffer);
+      destination = vlib_get_buffer (vm, destination->next_buffer);
+    }
+}
+
+int
+vlib_buffer_shared_view_make_writable (vlib_main_t *vm, u32 *buffer_index)
+{
+  vlib_buffer_t *buffer;
+  vlib_buffer_t *copy;
+  vlib_buffer_t *root;
+  u32 copy_index;
+  u32 input_index;
+  u32 root_index;
+
+  if (buffer_index == 0)
+    return -1;
+
+  input_index = *buffer_index;
+  buffer = vlib_get_buffer_checked (vm, input_index);
+  if (buffer == 0)
+    return -1;
+
+  if (!vlib_buffer_shared_view_is_shared (buffer))
+    return 0;
+
+  if (vlib_buffer_shared_view_root (vm, input_index, &root_index) ||
+      vlib_buffer_shared_view_validate_root (vm, root_index, 0, 0))
+    return -1;
+
+  root = vlib_get_buffer (vm, root_index);
+  copy = vlib_buffer_copy (vm, root);
+  if (copy == 0)
+    return -1;
+
+  copy_index = vlib_get_buffer_index (vm, copy);
+  vlib_buffer_shared_view_copy_opaque (vm, root, copy);
+  while (1)
+    {
+      copy->flags &= ~VLIB_BUFFER_SHARED_VIEW_FLAGS;
+      if ((copy->flags & VLIB_BUFFER_NEXT_PRESENT) == 0)
+	break;
+      copy = vlib_get_buffer (vm, copy->next_buffer);
+    }
+
+  *buffer_index = copy_index;
+  vlib_buffer_free_one (vm, input_index);
+  return 0;
+}
+
 u8 *
 format_vlib_buffer_no_chain (u8 * s, va_list * args)
 {

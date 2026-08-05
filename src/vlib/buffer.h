@@ -37,33 +37,38 @@
 /**
  * Buffer Flags
  */
-#define foreach_vlib_buffer_flag \
-  _( 0, IS_TRACED, 0)					\
-  _( 1, NEXT_PRESENT, "next-present")			\
-  _( 2, TOTAL_LENGTH_VALID, 0)				\
-  _( 3, EXT_HDR_VALID, "ext-hdr-valid")
+#define foreach_vlib_buffer_flag                                                                   \
+  _ (0, IS_TRACED, 0)                                                                              \
+  _ (1, NEXT_PRESENT, "next-present")                                                              \
+  _ (2, TOTAL_LENGTH_VALID, 0)                                                                     \
+  _ (3, EXT_HDR_VALID, "ext-hdr-valid")                                                            \
+  _ (4, SHARED_VIEW_ROOT, "shared-view-root")                                                      \
+  _ (5, SHARED_VIEW_DESCRIPTOR, "shared-view-descriptor")
 
 /* NOTE: only buffer generic flags should be defined here, please consider
    using user flags. i.e. src/vnet/buffer.h */
 
 enum
 {
-#define _(bit, name, v) VLIB_BUFFER_##name  = (1 << (bit)),
+#define _(bit, name, v) VLIB_BUFFER_##name = (1 << (bit)),
   foreach_vlib_buffer_flag
 #undef _
 };
 
 enum
 {
-#define _(bit, name, v) VLIB_BUFFER_LOG2_##name  = (bit),
+#define _(bit, name, v) VLIB_BUFFER_LOG2_##name = (bit),
   foreach_vlib_buffer_flag
 #undef _
 };
 
-  /* User defined buffer flags. */
+/* User defined buffer flags. */
 #define LOG2_VLIB_BUFFER_FLAG_USER(n) (32 - (n))
-#define VLIB_BUFFER_FLAG_USER(n) (1 << LOG2_VLIB_BUFFER_FLAG_USER(n))
-#define VLIB_BUFFER_FLAGS_ALL (0x0f)
+#define VLIB_BUFFER_FLAG_USER(n)      (1 << LOG2_VLIB_BUFFER_FLAG_USER (n))
+#define VLIB_BUFFER_FLAGS_ALL	      (0x3f)
+
+#define VLIB_BUFFER_SHARED_VIEW_FLAGS                                                              \
+  (VLIB_BUFFER_SHARED_VIEW_ROOT | VLIB_BUFFER_SHARED_VIEW_DESCRIPTOR)
 
 /** \brief Compile time buffer trajectory tracing option
     Turn this on if you run into "bad monkey" contexts,

@@ -11,31 +11,11 @@
 static int
 vnet_buffer_shinfo_root (vlib_main_t *vm, u32 buffer_index, u32 *root_index, vlib_buffer_t **root)
 {
-  vlib_buffer_t *buffer;
-
-  buffer = vlib_get_buffer_checked (vm, buffer_index);
-  if (buffer == 0)
+  if (vlib_buffer_shared_view_root (vm, buffer_index, root_index))
     return -1;
 
-  if ((buffer->flags & VNET_BUFFER_F_SHARED_DESCRIPTOR) == 0)
-    {
-      *root_index = buffer_index;
-      *root = buffer;
-      return 0;
-    }
-
-  if (buffer->flags & VNET_BUFFER_F_SHARED_ROOT || (buffer->flags & VLIB_BUFFER_NEXT_PRESENT) == 0)
-    return -1;
-
-  buffer = vlib_get_buffer_checked (vm, buffer->next_buffer);
-  if (buffer == 0 ||
-      (buffer->flags & (VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR)) !=
-	VNET_BUFFER_F_SHARED_ROOT)
-    return -1;
-
-  *root_index = vlib_get_buffer_index (vm, buffer);
-  *root = buffer;
-  return 0;
+  *root = vlib_get_buffer_checked (vm, *root_index);
+  return *root == 0 ? -1 : 0;
 }
 
 static int
@@ -226,7 +206,6 @@ vnet_buffer_shinfo_clone (vlib_main_t *vm, u32 source_buffer_index, u32 *clone_b
     root->flags &
     (VLIB_BUFFER_IS_TRACED | VNET_BUFFER_F_GSO | VNET_BUFFER_F_IS_IP4 | VNET_BUFFER_F_IS_IP6 |
      VNET_BUFFER_F_OFFLOAD | VNET_BUFFER_F_L3_HDR_OFFSET_VALID | VNET_BUFFER_F_L4_HDR_OFFSET_VALID);
-  clone->flags |= VNET_BUFFER_F_SHARED_DESCRIPTOR;
   if (clone->flags & VLIB_BUFFER_IS_TRACED)
     clone->trace_handle = root->trace_handle;
 
@@ -251,10 +230,12 @@ vnet_buffer_shinfo_clone (vlib_main_t *vm, u32 source_buffer_index, u32 *clone_b
       vnet_buffer2 (clone)->gso_l4_hdr_sz = vnet_buffer2 (root)->gso_l4_hdr_sz;
     }
 
-  root->flags |= VNET_BUFFER_F_SHARED_ROOT;
-  vlib_buffer_attach_clone (vm, clone, root);
-  clone->total_length_not_including_first_buffer = shinfo.data_bytes;
-  clone->flags |= VLIB_BUFFER_TOTAL_LENGTH_VALID;
+  if (vlib_buffer_shared_view_attach (vm, clone_index, root_index))
+    {
+      vlib_buffer_free_one (vm, clone_index);
+      return -1;
+    }
+
   *clone_buffer_index = clone_index;
   return 0;
 }
@@ -262,44 +243,5 @@ vnet_buffer_shinfo_clone (vlib_main_t *vm, u32 source_buffer_index, u32 *clone_b
 int
 vnet_buffer_shinfo_cow (vlib_main_t *vm, u32 *buffer_index)
 {
-  vlib_buffer_t *buffer;
-  vlib_buffer_t *copy;
-  vnet_buffer_shinfo_t shinfo;
-  u32 copy_index, input_index, root_index;
-
-  if (buffer_index == 0)
-    return -1;
-
-  input_index = *buffer_index;
-  buffer = vlib_get_buffer_checked (vm, input_index);
-  if (buffer == 0)
-    return -1;
-
-  if ((buffer->flags & (VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR)) == 0)
-    return 0;
-
-  if (vnet_buffer_shinfo_root (vm, input_index, &root_index, &buffer) ||
-      vnet_buffer_shinfo_walk (vm, root_index, &shinfo, 0, 0, 0))
-    return -1;
-
-  copy = vlib_buffer_copy (vm, buffer);
-  if (copy == 0)
-    return -1;
-
-  copy_index = vlib_get_buffer_index (vm, copy);
-  copy->flow_id = buffer->flow_id;
-  copy->error = buffer->error;
-  copy->current_config_index = buffer->current_config_index;
-
-  while (1)
-    {
-      copy->flags &= ~(VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR);
-      if ((copy->flags & VLIB_BUFFER_NEXT_PRESENT) == 0)
-	break;
-      copy = vlib_get_buffer (vm, copy->next_buffer);
-    }
-
-  *buffer_index = copy_index;
-  vlib_buffer_free_one (vm, input_index);
-  return 0;
+  return vlib_buffer_shared_view_make_writable (vm, buffer_index);
 }
