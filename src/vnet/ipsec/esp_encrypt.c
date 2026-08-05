@@ -531,8 +531,8 @@ esp_encrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
       if (PREDICT_FALSE (cow_failed[b - bufs]))
 	{
 	  err = ESP_ENCRYPT_ERROR_NO_BUFFERS;
-	  esp_encrypt_set_next_index (b[0], node, thread_index, err, n_noop, noop_nexts, drop_next,
-				      vnet_buffer (b[0])->ipsec.sad_index);
+	  noop_nexts[n_noop] = drop_next;
+	  b[0]->error = node->errors[err];
 	  goto trace;
 	}
       if (n_left > 2 && PREDICT_TRUE (!cow_failed[b - bufs + 1]))
