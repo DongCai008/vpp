@@ -178,9 +178,10 @@ typedef struct
   u32 hw_if_index;
 } af_xdp_input_trace_t;
 
-#define foreach_af_xdp_tx_func_error                                          \
-  _ (NO_FREE_SLOTS, "no free tx slots")                                       \
-  _ (SYSCALL_REQUIRED, "syscall required")                                    \
+#define foreach_af_xdp_tx_func_error                                                               \
+  _ (NO_FREE_SLOTS, "no free tx slots")                                                            \
+  _ (COW_FAILED, "tx packet drops (shared-buffer copy failed)")                                    \
+  _ (SYSCALL_REQUIRED, "syscall required")                                                         \
   _ (SYSCALL_FAILURES, "syscall failures")
 
 typedef enum

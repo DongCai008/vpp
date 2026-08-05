@@ -4,15 +4,40 @@
 #include <vlib/unix/unix.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/devices/devices.h>
+#include <vnet/buffer_shinfo.h>
 #include <af_xdp/af_xdp.h>
 
 #define AF_XDP_TX_RETRIES 5
 
-static_always_inline void
-af_xdp_device_output_free (vlib_main_t * vm, const vlib_node_runtime_t * node,
-			   af_xdp_txq_t * txq)
+static_always_inline u32
+af_xdp_cow_shared_buffers (vlib_main_t *vm, u32 *buffers, u32 n_buffers)
 {
-  const __u64 *compl;
+  u32 n_kept = 0;
+
+  for (u32 n = 0; n < n_buffers; n++)
+    {
+      u32 bi = buffers[n];
+      vlib_buffer_t *b = vlib_get_buffer (vm, bi);
+
+      if (PREDICT_FALSE (vnet_buffer_shinfo_is_shared (b)))
+	{
+	  if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi)))
+	    {
+	      vlib_buffer_free_one (vm, bi);
+	      continue;
+	    }
+	}
+
+      buffers[n_kept++] = bi;
+    }
+
+  return n_kept;
+}
+
+static_always_inline void
+af_xdp_device_output_free (vlib_main_t *vm, const vlib_node_runtime_t *node, af_xdp_txq_t *txq)
+{
+  const __u64 * compl ;
   const u32 size = txq->cq.size;
   const u32 mask = size - 1;
   u32 bis[VLIB_FRAME_SIZE], *bi = bis;
@@ -248,11 +273,21 @@ VNET_DEVICE_CLASS_TX_FN (af_xdp_device_class) (vlib_main_t * vm,
   const int shared_queue = tf->shared_queue;
   af_xdp_txq_t *txq = vec_elt_at_index (ad->txqs, tf->queue_id);
   u32 *from;
-  u32 n, n_tx;
+  u32 n, n_tx, n_cow_dropped;
   int i;
 
   from = vlib_frame_vector_args (frame);
   n_tx = frame->n_vectors;
+
+  n_tx = af_xdp_cow_shared_buffers (vm, from, n_tx);
+  n_cow_dropped = frame->n_vectors - n_tx;
+  if (PREDICT_FALSE (n_cow_dropped))
+    {
+      vlib_error_count (vm, node->node_index, AF_XDP_TX_ERROR_COW_FAILED, n_cow_dropped);
+      vlib_increment_simple_counter (vnet_main.interface_main.sw_if_counters +
+				       VNET_INTERFACE_COUNTER_DROP,
+				     vm->thread_index, ad->sw_if_index, n_cow_dropped);
+    }
 
   if (shared_queue)
     clib_spinlock_lock (&txq->lock);
