@@ -7,6 +7,7 @@
 #include <vlib/pci/pci.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/devices/devices.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/ip/ip6_packet.h>
 #include <vnet/ip/ip4_packet.h>
 
@@ -125,6 +126,20 @@ VNET_DEVICE_CLASS_TX_FN (vmxnet3_device_class) (vlib_main_t * vm,
 
       bi0 = buffers[0];
       b0 = vlib_get_buffer (vm, bi0);
+      if (PREDICT_FALSE (vnet_buffer_shinfo_is_shared (b0)))
+	{
+	  if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+	    {
+	      vlib_buffer_free_one (vm, bi0);
+	      vlib_error_count (vm, node->node_index, VMXNET3_TX_ERROR_ERROR_PACKETS, 1);
+	      buffers++;
+	      n_left--;
+	      continue;
+	    }
+
+	  buffers[0] = bi0;
+	  b0 = vlib_get_buffer (vm, bi0);
+	}
       b = b0;
 
       space_left = vmxnet3_tx_ring_space_left (txq);
