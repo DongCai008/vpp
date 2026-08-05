@@ -161,6 +161,7 @@ buffer_shinfo_test (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t
   u32 invalid_index = 0xdecafbad;
   u32 saved_next, saved_flags;
   u8 saved_pool;
+  u8 *formatted_contents = 0;
   u8 logical_copy[1290];
   u32 n_clones = 0;
 
@@ -292,6 +293,15 @@ buffer_shinfo_test (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t
 		 clib_memcmp (logical_copy + root->current_length, vlib_buffer_get_current (tail),
 			      sizeof (logical_copy) - root->current_length) == 0,
 	       "descriptor view copy did not cross into canonical tail data");
+  formatted_contents =
+    format (0, "%U", format_vlib_buffer_contents, vm, vlib_get_buffer (vm, clones[0]));
+  SHINFO_TEST (
+    vec_len (formatted_contents) == root->current_length + tail->current_length &&
+      clib_memcmp (formatted_contents, vlib_buffer_get_current (root), root->current_length) == 0 &&
+      clib_memcmp (formatted_contents + root->current_length, vlib_buffer_get_current (tail),
+		   tail->current_length) == 0,
+    "generic contents formatter did not read the descriptor view");
+  vec_free (formatted_contents);
   SHINFO_TEST (vnet_buffer_shinfo_get (vm, clones[1], &shinfo) == 0 &&
 		 shinfo.root_buffer_index == buffers[0] && shinfo.data_bytes == 1300 &&
 		 (vlib_get_buffer (vm, clones[1])->flags & VNET_BUFFER_F_GSO) == 0 &&
