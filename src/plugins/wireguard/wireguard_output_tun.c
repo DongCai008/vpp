@@ -8,6 +8,7 @@
 #include <vppinfra/error.h>
 
 #include <wireguard/wireguard.h>
+#include <vnet/buffer_shinfo.h>
 #include <wireguard/wireguard_send.h>
 
 #define foreach_wg_output_error                                               \
@@ -373,8 +374,24 @@ wg_output_tun_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
   u64 async_ctx[VLIB_FRAME_SIZE];
   u32 sync_bi[VLIB_FRAME_SIZE];
   u32 noop_bi[VLIB_FRAME_SIZE];
+  u8 cow_failed[VLIB_FRAME_SIZE] = {};
 
   vlib_get_buffers (vm, from, bufs, n_left_from);
+
+  for (u32 i = 0; i < n_left_from; i++)
+    {
+      u32 bi = from[i];
+
+      if ((bufs[i]->flags & (VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR)) == 0)
+	continue;
+      if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi)))
+	{
+	  cow_failed[i] = 1;
+	  continue;
+	}
+      from[i] = bi;
+      bufs[i] = vlib_get_buffer (vm, bi);
+    }
   vec_reset_length (ptd->crypto_ops);
   vec_reset_length (ptd->chained_crypto_ops);
   vec_reset_length (ptd->chunks);
@@ -409,6 +426,12 @@ wg_output_tun_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
       noop_next[0] = WG_OUTPUT_NEXT_ERROR;
       err = WG_OUTPUT_NEXT_ERROR;
+
+      if (PREDICT_FALSE (cow_failed[b - bufs]))
+	{
+	  b[0]->error = node->errors[WG_OUTPUT_ERROR_NO_BUFFERS];
+	  goto out;
+	}
 
       adj_index = vnet_buffer (b[0])->ip.adj_index[VLIB_TX];
 

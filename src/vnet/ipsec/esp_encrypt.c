@@ -6,6 +6,7 @@
 
 #include <vnet/vnet.h>
 #include <vnet/api_errno.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/ip/ip.h>
 #include <vnet/interface_output.h>
 
@@ -489,9 +490,25 @@ esp_encrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
   u32 sync_bi[VLIB_FRAME_SIZE];
   u32 async_bi[VLIB_FRAME_SIZE];
   u32 noop_bi[VLIB_FRAME_SIZE];
+  u8 cow_failed[VLIB_FRAME_SIZE] = {};
   esp_encrypt_error_t err;
 
   vlib_get_buffers (vm, from, b, n_left);
+
+  for (u32 i = 0; i < n_left; i++)
+    {
+      u32 bi = from[i];
+
+      if ((bufs[i]->flags & (VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR)) == 0)
+	continue;
+      if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi)))
+	{
+	  cow_failed[i] = 1;
+	  continue;
+	}
+      from[i] = bi;
+      bufs[i] = vlib_get_buffer (vm, bi);
+    }
 
   vec_reset_length (ptd->crypto_ops);
   vec_reset_length (ptd->chained_crypto_ops);
@@ -499,7 +516,7 @@ esp_encrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
   while (n_left > 0)
     {
-      u32 sa_index0;
+      u32 sa_index0 = INDEX_INVALID;
       dpo_id_t *dpo;
       esp_header_t *esp;
       u8 *payload, *next_hdr_ptr;
@@ -511,7 +528,14 @@ esp_encrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
       err = ESP_ENCRYPT_ERROR_RX_PKTS;
 
-      if (n_left > 2)
+      if (PREDICT_FALSE (cow_failed[b - bufs]))
+	{
+	  err = ESP_ENCRYPT_ERROR_NO_BUFFERS;
+	  esp_encrypt_set_next_index (b[0], node, thread_index, err, n_noop, noop_nexts, drop_next,
+				      vnet_buffer (b[0])->ipsec.sad_index);
+	  goto trace;
+	}
+      if (n_left > 2 && PREDICT_TRUE (!cow_failed[b - bufs + 1]))
 	{
 	  u8 *p;
 	  vlib_prefetch_buffer_header (b[2], LOAD);
