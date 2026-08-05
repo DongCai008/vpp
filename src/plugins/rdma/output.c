@@ -8,6 +8,7 @@
 #include <vppinfra/ring.h>
 #include <vnet/ethernet/ethernet.h>
 #include <vnet/devices/devices.h>
+#include <vnet/buffer_shinfo.h>
 #include <rdma/rdma.h>
 
 #define RDMA_TX_RETRIES 5
@@ -479,39 +480,63 @@ rdma_device_output_free (vlib_main_t *vm, const vlib_node_runtime_t *node,
 
 static u32
 rdma_device_output_tx_try (vlib_main_t *vm, const vlib_node_runtime_t *node,
-			   const rdma_device_t *rd, rdma_txq_t *txq,
-			   u32 n_left_from, u32 *bi)
+			   const rdma_device_t *rd, rdma_txq_t *txq, u32 n_left_from, u32 *bi)
 {
   vlib_buffer_t *b[VLIB_FRAME_SIZE];
   const u32 mask = pow2_mask (txq->bufs_log2sz);
+  u32 n, n_enq;
 
   /* do not enqueue more packet than ring space */
-  n_left_from = clib_min (n_left_from, RDMA_TXQ_AVAIL_SZ (txq, txq->head,
-							  txq->tail));
+  n_left_from = clib_min (n_left_from, RDMA_TXQ_AVAIL_SZ (txq, txq->head, txq->tail));
   /* if ring is full, do nothing */
   if (PREDICT_FALSE (n_left_from == 0))
     return 0;
 
-  /* speculatively copy buffer indices */
-  vlib_buffer_copy_indices_to_ring (txq->bufs, bi, txq->tail & mask,
-				    RDMA_TXQ_BUF_SZ (txq), n_left_from);
+  /*
+   * Direct verbs walks and rewrites physical chain links while IB verbs
+   * publishes the current data pointer to the NIC.  Replace a shared input
+   * before either path observes it.  Stop at the first allocation failure so
+   * an unsubmitted prefix remains contiguous in the caller's frame.
+   */
+  for (n = 0; n < n_left_from; n++)
+    {
+      vlib_buffer_t *b0 = vlib_get_buffer (vm, bi[n]);
 
-  vlib_get_buffers (vm, bi, b, n_left_from);
+      if (PREDICT_TRUE (!vnet_buffer_shinfo_is_shared (b0)))
+	continue;
+
+      if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, bi + n)))
+	break;
+    }
+
+  if (PREDICT_FALSE (n == 0))
+    {
+      vlib_buffer_free_one (vm, bi[0]);
+      vlib_error_count (vm, node->node_index, RDMA_TX_ERROR_NO_BUFFERS, 1);
+      return 1;
+    }
+
+  /* speculatively copy buffer indices */
+  vlib_buffer_copy_indices_to_ring (txq->bufs, bi, txq->tail & mask, RDMA_TXQ_BUF_SZ (txq), n);
+
+  vlib_get_buffers (vm, bi, b, n);
 
   if (PREDICT_TRUE (rd->flags & RDMA_DEVICE_F_MLX5DV))
-    n_left_from =
-      rdma_device_output_tx_mlx5 (vm, node, rd, txq, n_left_from, bi, b);
+    n_enq = rdma_device_output_tx_mlx5 (vm, node, rd, txq, n, bi, b);
   else
-    n_left_from =
-      rdma_device_output_tx_ibverb (vm, node, rd, txq, n_left_from, bi, b);
+    n_enq = rdma_device_output_tx_ibverb (vm, node, rd, txq, n, bi, b);
 
-  return n_left_from;
+  if (n_enq != n || n == n_left_from)
+    return n_enq;
+
+  vlib_buffer_free_one (vm, bi[n]);
+  vlib_error_count (vm, node->node_index, RDMA_TX_ERROR_NO_BUFFERS, 1);
+  return n + 1;
 }
 
 static uword
-rdma_device_output_tx (vlib_main_t *vm, vlib_node_runtime_t *node,
-		       rdma_device_t *rd, rdma_txq_t *txq, u32 *from,
-		       u32 n_left_from)
+rdma_device_output_tx (vlib_main_t *vm, vlib_node_runtime_t *node, rdma_device_t *rd,
+		       rdma_txq_t *txq, u32 *from, u32 n_left_from)
 {
   int i;
 
