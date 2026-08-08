@@ -2344,26 +2344,18 @@ vnet_lisp_add_del_mreq_itr_rlocs (vnet_lisp_add_del_mreq_itr_rloc_args_t * a)
 }
 
 /* Statistics (not really errors) */
-#define foreach_lisp_cp_lookup_error           \
-_(DROP, "drop")                                \
-_(MAP_REQUESTS_SENT, "map-request sent")       \
-_(ARP_REPLY_TX, "ARP replies sent")            \
-_(NDP_NEIGHBOR_ADVERTISEMENT_TX,               \
-  "neighbor advertisement sent")
+#define foreach_lisp_cp_lookup_error                                                               \
+  _ (DROP, "drop")                                                                                 \
+  _ (NO_BUFFERS, "shared-view copy allocation failed")                                             \
+  _ (MAP_REQUESTS_SENT, "map-request sent")                                                        \
+  _ (ARP_REPLY_TX, "ARP replies sent")                                                             \
+  _ (NDP_NEIGHBOR_ADVERTISEMENT_TX, "neighbor advertisement sent")
 
 static char *lisp_cp_lookup_error_strings[] = {
-#define _(sym,string) string,
+#define _(sym, string) string,
   foreach_lisp_cp_lookup_error
 #undef _
 };
-
-typedef enum
-{
-#define _(sym,str) LISP_CP_LOOKUP_ERROR_##sym,
-  foreach_lisp_cp_lookup_error
-#undef _
-    LISP_CP_LOOKUP_N_ERROR,
-} lisp_cp_lookup_error_t;
 
 typedef enum
 {
@@ -3375,6 +3367,18 @@ lisp_cp_lookup_inline (vlib_main_t * vm,
 	  to_next[0] = pi0;
 	  to_next += 1;
 	  n_left_to_next -= 1;
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (vlib_get_buffer (vm, pi0))))
+	    {
+	      if (vlib_buffer_shared_view_make_writable (vm, &pi0))
+		{
+		  b0 = vlib_get_buffer (vm, pi0);
+		  b0->error = node->errors[LISP_CP_LOOKUP_ERROR_NO_BUFFERS];
+		  next0 = LISP_CP_LOOKUP_NEXT_DROP;
+		  goto enqueue_cow_failure;
+		}
+	      from[-1] = pi0;
+	      to_next[-1] = pi0;
+	    }
 
 	  b0 = vlib_get_buffer (vm, pi0);
 
@@ -3507,6 +3511,7 @@ lisp_cp_lookup_inline (vlib_main_t * vm,
 	    }
 	  gid_address_free (&dst);
 	  gid_address_free (&src);
+	enqueue_cow_failure:
 	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
 					   to_next,
 					   n_left_to_next, pi0, next0);
@@ -3619,26 +3624,19 @@ VLIB_REGISTER_NODE (lisp_cp_lookup_nsh_node) = {
 };
 
 /* lisp_cp_input statistics */
-#define foreach_lisp_cp_input_error                               \
-_(DROP, "drop")                                                   \
-_(RLOC_PROBE_REQ_RECEIVED, "rloc-probe requests received")        \
-_(RLOC_PROBE_REP_RECEIVED, "rloc-probe replies received")         \
-_(MAP_NOTIFIES_RECEIVED, "map-notifies received")                 \
-_(MAP_REPLIES_RECEIVED, "map-replies received")
+#define foreach_lisp_cp_input_error                                                                \
+  _ (DROP, "drop")                                                                                 \
+  _ (NO_BUFFERS, "shared-view copy allocation failed")                                             \
+  _ (RLOC_PROBE_REQ_RECEIVED, "rloc-probe requests received")                                      \
+  _ (RLOC_PROBE_REP_RECEIVED, "rloc-probe replies received")                                       \
+  _ (MAP_NOTIFIES_RECEIVED, "map-notifies received")                                               \
+  _ (MAP_REPLIES_RECEIVED, "map-replies received")
 
 static char *lisp_cp_input_error_strings[] = {
-#define _(sym,string) string,
+#define _(sym, string) string,
   foreach_lisp_cp_input_error
 #undef _
 };
-
-typedef enum
-{
-#define _(sym,str) LISP_CP_INPUT_ERROR_##sym,
-  foreach_lisp_cp_input_error
-#undef _
-    LISP_CP_INPUT_N_ERROR,
-} lisp_cp_input_error_t;
 
 typedef struct
 {
@@ -4325,13 +4323,27 @@ lisp_cp_input (vlib_main_t * vm, vlib_node_runtime_t * node,
 	{
 	  u32 bi0;
 	  vlib_buffer_t *b0;
+	  u8 cow_failed = 0;
 
 	  bi0 = from[0];
 	  from += 1;
 	  n_left_from -= 1;
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (vlib_get_buffer (vm, bi0))))
+	    {
+	      if (vlib_buffer_shared_view_make_writable (vm, &bi0))
+		{
+		  b0 = vlib_get_buffer (vm, bi0);
+		  b0->error = node->errors[LISP_CP_INPUT_ERROR_NO_BUFFERS];
+		  cow_failed = 1;
+		}
+	      else
+		from[-1] = bi0;
+	    }
 	  to_next_drop[0] = bi0;
 	  to_next_drop += 1;
 	  n_left_to_next_drop -= 1;
+	  if (PREDICT_FALSE (cow_failed))
+	    continue;
 
 	  b0 = vlib_get_buffer (vm, bi0);
 

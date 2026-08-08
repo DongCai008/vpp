@@ -46,6 +46,7 @@ add_vpp_plugin(lisp
   lisp-gpe/lisp_gpe_tenant.c
   lisp-gpe/interface.c
   lisp-gpe/decap.c
+  lisp-gpe/lisp_shared_view_test.c
   lisp-gpe/lisp_gpe_api.c
 
   API_FILES

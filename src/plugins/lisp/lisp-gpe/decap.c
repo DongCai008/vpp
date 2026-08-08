@@ -121,6 +121,31 @@ incr_decap_stats (vnet_main_t *vnm, clib_thread_index_t thread_index,
     }
 }
 
+static_always_inline u32
+lisp_gpe_make_shared_views_writable (vlib_main_t *vm, vlib_node_runtime_t *node, u32 *from,
+				     u32 n_from, u32 *failed)
+{
+  u32 *from_end = from + n_from;
+  u32 *to = from;
+
+  while (from < from_end)
+    {
+      u32 bi0 = *from++;
+      vlib_buffer_t *b0 = vlib_get_buffer (vm, bi0);
+
+      if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)) &&
+	  vlib_buffer_shared_view_make_writable (vm, &bi0))
+	{
+	  b0->error = node->errors[LISP_GPE_ERROR_NO_BUFFERS];
+	  *failed++ = bi0;
+	}
+      else
+	*to++ = bi0;
+    }
+
+  return to - (from_end - n_from);
+}
+
 /**
  * @brief LISP-GPE decap dispatcher.
  * @node lisp_gpe_input_inline
@@ -142,11 +167,19 @@ lisp_gpe_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 {
   u32 n_left_from, next_index, *from, *to_next, thread_index;
   u32 n_bytes = 0, n_packets = 0, last_sw_if_index = ~0, drops = 0;
+  u32 failed[VLIB_FRAME_SIZE];
+  u32 n_failed, n_cow_failed;
   lisp_gpe_main_t *lgm = vnet_lisp_gpe_get_main ();
 
   thread_index = vm->thread_index;
   from = vlib_frame_vector_args (from_frame);
   n_left_from = from_frame->n_vectors;
+
+  n_left_from = lisp_gpe_make_shared_views_writable (vm, node, from, n_left_from, failed);
+  n_failed = from_frame->n_vectors - n_left_from;
+  n_cow_failed = n_failed;
+  while (n_failed)
+    vlib_set_next_frame_buffer (vm, node, LISP_GPE_INPUT_NEXT_DROP, failed[--n_failed]);
 
   next_index = node->cached_next_index;
 
@@ -424,6 +457,7 @@ lisp_gpe_input_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 		    &n_packets, &n_bytes);
   vlib_node_increment_counter (vm, lisp_gpe_ip4_input_node.index,
 			       LISP_GPE_ERROR_NO_TUNNEL, drops);
+  vlib_node_increment_counter (vm, node->node_index, LISP_GPE_ERROR_NO_BUFFERS, n_cow_failed);
   return from_frame->n_vectors;
 }
 
