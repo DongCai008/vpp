@@ -613,20 +613,28 @@ ip6_sv_reassembly_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  u32 error0 = IP6_ERROR_NONE;
 	  u8 forward_context = 0;
 	  bi0 = from[0];
-	  /* COW discards custom next indices and output rewrite state. */
-	  if (!a.custom_next && !a.is_output_feature &&
-	      PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+	  b0 = vlib_get_buffer (vm, bi0);
+	  u32 reass_next_index = vnet_buffer (b0)->ip.reass.next_index;
+	  u8 save_rewrite_length = vnet_buffer (b0)->ip.save_rewrite_length;
+	  u32 current_config_index = b0->current_config_index;
+	  if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
 	    {
 	      next0 = IP6_SV_REASSEMBLY_NEXT_DROP;
 	      error0 = IP6_ERROR_REASS_NO_BUF;
 	      goto packet_enqueue;
 	    }
 	  b0 = vlib_get_buffer (vm, bi0);
+	  if (a.custom_next)
+	    vnet_buffer (b0)->ip.reass.next_index = reass_next_index;
+	  if (a.is_output_feature)
+	    {
+	      vnet_buffer (b0)->ip.save_rewrite_length = save_rewrite_length;
+	      b0->current_config_index = current_config_index;
+	    }
 
 	  ip6_header_t *ip0 = (ip6_header_t *) u8_ptr_add (
 	    vlib_buffer_get_current (b0),
-	    (ptrdiff_t) (a.is_output_feature ? 1 : 0) *
-	      vnet_buffer (b0)->ip.save_rewrite_length);
+	    (ptrdiff_t) (a.is_output_feature ? 1 : 0) * vnet_buffer (b0)->ip.save_rewrite_length);
 
 	  ip6_frag_hdr_t *frag_hdr;
 	  ip6_ext_hdr_chain_t hdr_chain;

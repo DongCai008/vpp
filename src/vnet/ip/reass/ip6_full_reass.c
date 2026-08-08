@@ -1200,14 +1200,23 @@ ip6_full_reassembly_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  u32 icmp_bi = ~0;
 
 	  bi0 = from[0];
-	  /* The custom path consumes descriptor-local next indices. */
-	  if (!is_custom_app && PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+
+	  /* Custom reassembly owns these descriptor-local forwarding indices. */
+	  b0 = vlib_get_buffer (vm, bi0);
+	  u32 reass_next_index = vnet_buffer (b0)->ip.reass.next_index;
+	  u32 reass_error_next_index = vnet_buffer (b0)->ip.reass.error_next_index;
+	  if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
 	    {
 	      next0 = IP6_FULL_REASSEMBLY_NEXT_DROP;
 	      error0 = IP6_ERROR_REASS_NO_BUF;
 	      goto skip_reass;
 	    }
 	  b0 = vlib_get_buffer (vm, bi0);
+	  if (is_custom_app)
+	    {
+	      vnet_buffer (b0)->ip.reass.next_index = reass_next_index;
+	      vnet_buffer (b0)->ip.reass.error_next_index = reass_error_next_index;
+	    }
 
 	  ip6_header_t *ip0 = vlib_buffer_get_current (b0);
 	  ip6_frag_hdr_t *frag_hdr = NULL;

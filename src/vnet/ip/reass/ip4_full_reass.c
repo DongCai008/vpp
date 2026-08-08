@@ -1185,14 +1185,23 @@ ip4_full_reass_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
       u32 error0 = IP4_ERROR_NONE;
 
       bi0 = from[0];
-      /* The custom path consumes descriptor-local next indices. */
-      if (CUSTOM != type && PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+
+      /* Custom reassembly owns these descriptor-local forwarding indices. */
+      b0 = vlib_get_buffer (vm, bi0);
+      u32 reass_next_index = vnet_buffer (b0)->ip.reass.next_index;
+      u32 reass_error_next_index = vnet_buffer (b0)->ip.reass.error_next_index;
+      if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
 	{
 	  next0 = IP4_FULL_REASS_NEXT_DROP;
 	  error0 = IP4_ERROR_REASS_NO_BUF;
 	  goto packet_enqueue;
 	}
       b0 = vlib_get_buffer (vm, bi0);
+      if (CUSTOM == type)
+	{
+	  vnet_buffer (b0)->ip.reass.next_index = reass_next_index;
+	  vnet_buffer (b0)->ip.reass.error_next_index = reass_error_next_index;
+	}
 
       ip4_header_t *ip0 = vlib_buffer_get_current (b0);
       if (!ip4_get_fragment_more (ip0) && !ip4_get_fragment_offset (ip0))
