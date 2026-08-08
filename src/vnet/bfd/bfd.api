@@ -492,6 +492,12 @@ counters bfd_udp {
     units "packets";
     description "ttl";
   };
+  no_buffers {
+    severity error;
+    type counter64;
+    units "packets";
+    description "no buffers";
+  };
 };
 
 paths {
