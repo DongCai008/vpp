@@ -16,6 +16,7 @@ add_vpp_plugin(ping
   ping.c
   ping.h
   ping_api.c
+  shared_view_test.c
 
   API_FILES
   ping.api

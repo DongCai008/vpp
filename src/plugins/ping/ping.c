@@ -20,6 +20,10 @@
 
 ping_main_t ping_main;
 
+static char *icmp_echo_request_error_strings[] = {
+  "shared-view copy failed",
+};
+
 /**
  * @file
  * @brief IPv4 and IPv6 ICMP Ping.
@@ -158,12 +162,35 @@ ip46_echo_reply_maybe_trace_buffer (vlib_main_t * vm,
     }
 }
 
+static_always_inline u32
+ip46_echo_request_make_shared_views_writable (vlib_main_t *vm, vlib_node_runtime_t *node, u32 *from,
+					      u32 n_from, u32 *failed)
+{
+  u32 *from_start = from;
+  u32 *to = from;
+  u32 *from_end = from + n_from;
+
+  while (from < from_end)
+    {
+      u32 bi0 = *from++;
+      vlib_buffer_t *b0 = vlib_get_buffer (vm, bi0);
+
+      if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)) &&
+	  vlib_buffer_shared_view_make_writable (vm, &bi0))
+	{
+	  b0->error = node->errors[ICMP_ECHO_REQUEST_ERROR_COW_FAIL];
+	  *failed++ = bi0;
+	}
+      else
+	*to++ = bi0;
+    }
+
+  return to - from_start;
+}
 
 static_always_inline uword
-ip46_icmp_echo_reply_inner_node_fn (vlib_main_t * vm,
-				    vlib_node_runtime_t * node,
-				    vlib_frame_t * frame, int do_trace,
-				    int is_ip6)
+ip46_icmp_echo_reply_inner_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame,
+				    int do_trace, int is_ip6)
 {
   u32 n_left_from, *from, *to_next;
   icmp46_echo_reply_next_t next_index;
@@ -298,23 +325,25 @@ ip4_icmp_echo_request (vlib_main_t * vm,
   uword n_packets = frame->n_vectors;
   u32 *from, *to_next;
   u32 n_left_from, n_left_to_next, next;
+  u32 n_writable, n_failed;
+  u32 failed[VLIB_FRAME_SIZE];
   ip4_main_t *i4m = &ip4_main;
   u16 *fragment_ids, *fid;
   u8 host_config_ttl = i4m->host_config.ttl;
 
   from = vlib_frame_vector_args (frame);
-  n_left_from = n_packets;
+  n_writable = ip46_echo_request_make_shared_views_writable (vm, node, from, n_packets, failed);
+  n_failed = n_packets - n_writable;
+  n_left_from = n_writable;
   next = node->cached_next_index;
 
   if (node->flags & VLIB_NODE_FLAG_TRACE)
-    vlib_trace_frame_buffers_only (vm, node, from, frame->n_vectors,
-				   /* stride */ 1,
-				   sizeof (icmp_input_trace_t));
+    vlib_trace_frame_buffers_only (vm, node, from, n_writable,
+				   /* stride */ 1, sizeof (icmp_input_trace_t));
 
   /* Get random fragment IDs for replies. */
-  fid = fragment_ids = clib_random_buffer_get_data (&vm->random_buffer,
-						    n_packets *
-						    sizeof (fragment_ids[0]));
+  fid = fragment_ids =
+    clib_random_buffer_get_data (&vm->random_buffer, n_packets * sizeof (fragment_ids[0]));
 
   while (n_left_from > 0)
     {
@@ -465,14 +494,20 @@ ip4_icmp_echo_request (vlib_main_t * vm,
       vlib_put_next_frame (vm, node, next, n_left_to_next);
     }
 
-  vlib_error_count (vm, ip4_icmp_input_node.index,
-		    ICMP4_ERROR_ECHO_REPLIES_SENT, frame->n_vectors);
+  if (n_failed)
+    {
+      vlib_buffer_enqueue_to_single_next (vm, node, failed, ICMP4_ECHO_REQUEST_NEXT_DROP, n_failed);
+      vlib_node_increment_counter (vm, node->node_index, ICMP_ECHO_REQUEST_ERROR_COW_FAIL,
+				   n_failed);
+    }
+
+  vlib_error_count (vm, ip4_icmp_input_node.index, ICMP4_ERROR_ECHO_REPLIES_SENT, n_writable);
 
   return frame->n_vectors;
 }
 
 static u8 *
-format_icmp_input_trace (u8 * s, va_list * va)
+format_icmp_input_trace (u8 *s, va_list *va)
 {
   CLIB_UNUSED (vlib_main_t * vm) = va_arg (*va, vlib_main_t *);
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*va, vlib_node_t *);
@@ -492,35 +527,35 @@ VLIB_REGISTER_NODE (ip4_icmp_echo_request_node,static) = {
 
   .format_trace = format_icmp_input_trace,
 
-  .n_next_nodes = 1,
+  .n_next_nodes = ICMP4_ECHO_REQUEST_N_NEXT,
   .next_nodes = {
-    [0] = "ip4-load-balance",
+    [ICMP4_ECHO_REQUEST_NEXT_LOOKUP] = "ip4-load-balance",
+    [ICMP4_ECHO_REQUEST_NEXT_DROP] = "ip4-drop",
   },
+
+  .n_errors = ICMP_ECHO_REQUEST_N_ERROR,
+  .error_strings = icmp_echo_request_error_strings,
 };
 
-typedef enum
-{
-  ICMP6_ECHO_REQUEST_NEXT_LOOKUP,
-  ICMP6_ECHO_REQUEST_NEXT_OUTPUT,
-  ICMP6_ECHO_REQUEST_N_NEXT,
-} icmp6_echo_request_next_t;
-
 static uword
-ip6_icmp_echo_request (vlib_main_t *vm, vlib_node_runtime_t *node,
-		       vlib_frame_t *frame)
+ip6_icmp_echo_request (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
   u32 *from, *to_next;
   u32 n_left_from, n_left_to_next, next_index;
+  u32 n_writable, n_failed;
+  u32 failed[VLIB_FRAME_SIZE];
   ip6_main_t *im = &ip6_main;
 
   from = vlib_frame_vector_args (frame);
-  n_left_from = frame->n_vectors;
+  n_writable =
+    ip46_echo_request_make_shared_views_writable (vm, node, from, frame->n_vectors, failed);
+  n_failed = frame->n_vectors - n_writable;
+  n_left_from = n_writable;
   next_index = node->cached_next_index;
 
   if (node->flags & VLIB_NODE_FLAG_TRACE)
-    vlib_trace_frame_buffers_only (vm, node, from, frame->n_vectors,
-				   /* stride */ 1,
-				   sizeof (icmp6_input_trace_t));
+    vlib_trace_frame_buffers_only (vm, node, from, n_writable,
+				   /* stride */ 1, sizeof (icmp6_input_trace_t));
 
   while (n_left_from > 0)
     {
@@ -671,8 +706,14 @@ ip6_icmp_echo_request (vlib_main_t *vm, vlib_node_runtime_t *node,
       vlib_put_next_frame (vm, node, next_index, n_left_to_next);
     }
 
-  vlib_error_count (vm, ip6_icmp_input_node.index,
-		    ICMP6_ERROR_ECHO_REPLIES_SENT, frame->n_vectors);
+  if (n_failed)
+    {
+      vlib_buffer_enqueue_to_single_next (vm, node, failed, ICMP6_ECHO_REQUEST_NEXT_DROP, n_failed);
+      vlib_node_increment_counter (vm, node->node_index, ICMP_ECHO_REQUEST_ERROR_COW_FAIL,
+				   n_failed);
+    }
+
+  vlib_error_count (vm, ip6_icmp_input_node.index, ICMP6_ERROR_ECHO_REPLIES_SENT, n_writable);
 
   return frame->n_vectors;
 }
@@ -689,7 +730,11 @@ VLIB_REGISTER_NODE (ip6_icmp_echo_request_node,static) = {
   .next_nodes = {
     [ICMP6_ECHO_REQUEST_NEXT_LOOKUP] = "ip6-lookup",
     [ICMP6_ECHO_REQUEST_NEXT_OUTPUT] = "interface-output",
+    [ICMP6_ECHO_REQUEST_NEXT_DROP] = "ip6-drop",
   },
+
+  .n_errors = ICMP_ECHO_REQUEST_N_ERROR,
+  .error_strings = icmp_echo_request_error_strings,
 };
 
 /*

@@ -63,7 +63,6 @@ extern ping_main_t ping_main;
 
 #define PING_CLI_UNKNOWN_NODE (~0)
 
-
 typedef CLIB_PACKED (struct {
   u16 id;
   u16 seq;
@@ -71,14 +70,33 @@ typedef CLIB_PACKED (struct {
   u8 data[0];
 }) icmp46_echo_request_t;
 
-
-
 typedef enum
 {
   ICMP46_ECHO_REPLY_NEXT_DROP,
   ICMP46_ECHO_REPLY_NEXT_PUNT,
   ICMP46_ECHO_REPLY_N_NEXT,
 } icmp46_echo_reply_next_t;
+
+typedef enum
+{
+  ICMP_ECHO_REQUEST_ERROR_COW_FAIL,
+  ICMP_ECHO_REQUEST_N_ERROR,
+} icmp_echo_request_error_t;
+
+typedef enum
+{
+  ICMP4_ECHO_REQUEST_NEXT_LOOKUP,
+  ICMP4_ECHO_REQUEST_NEXT_DROP,
+  ICMP4_ECHO_REQUEST_N_NEXT,
+} icmp4_echo_request_next_t;
+
+typedef enum
+{
+  ICMP6_ECHO_REQUEST_NEXT_LOOKUP,
+  ICMP6_ECHO_REQUEST_NEXT_OUTPUT,
+  ICMP6_ECHO_REQUEST_NEXT_DROP,
+  ICMP6_ECHO_REQUEST_N_NEXT,
+} icmp6_echo_request_next_t;
 
 static_always_inline uword
 get_cli_process_id_by_icmp_id_mt (vlib_main_t *vm, u16 icmp_id)
