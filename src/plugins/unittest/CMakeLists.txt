@@ -40,6 +40,7 @@ add_vpp_plugin(unittest
   crypto_test.c
   fib_test.c
   gso_test.c
+  ip_frag_shared_view_test.c
   hash_test.c
   interface_test.c
   ipsec_test.c

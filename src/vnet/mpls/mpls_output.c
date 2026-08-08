@@ -380,43 +380,52 @@ mpls_frag (vlib_main_t * vm,
         vlib_get_next_frame (vm, node, next_index,
                              to_next, n_left_to_next);
 
-        while (n_left_from > 0 && n_left_to_next > 0)
-        {
-            ip_adjacency_t * adj0;
-            vlib_buffer_t * p0;
-            mpls_frag_next_t next0;
-            u32 pi0, adj_index0;
-            ip_frag_error_t error0 = IP_FRAG_ERROR_NONE;
+	while (n_left_from > 0 && n_left_to_next > 0)
+	  {
+	    ip_adjacency_t *adj0;
+	    vlib_buffer_t *p0;
+	    mpls_frag_next_t next0;
+	    u32 pi0, adj_index0;
+	    ip_frag_error_t error0 = IP_FRAG_ERROR_NONE;
 	    i16 encap_size, mtu;
 	    u8 is_ip4;
 
-	    pi0 = to_next[0] = from[0];
+	    pi0 = from[0];
 	    p0 = vlib_get_buffer (vm, pi0);
 	    from += 1;
 	    n_left_from -= 1;
-	    is_ip4 = vnet_buffer (p0)->mpls.pyld_proto == DPO_PROTO_IP4;
-
-	    adj_index0 = vnet_buffer (p0)->ip.adj_index[VLIB_TX];
-	    adj0 = adj_get (adj_index0);
-
-	    /* the size of the MPLS stack */
-	    encap_size = vnet_buffer (p0)->l3_hdr_offset - p0->current_data;
-	    mtu = adj0->rewrite_header.max_l3_packet_bytes - encap_size;
-
-	    /* IP fragmentation */
-	    if (is_ip4)
-	      error0 = ip4_frag_do_fragment (vm, pi0, mtu, encap_size, &frags);
+	    if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)) &&
+		vlib_buffer_shared_view_make_writable (vm, &pi0))
+	      {
+		error0 = IP_FRAG_ERROR_MEMORY;
+		mtu = 0;
+	      }
 	    else
 	      {
-		if (!(p0->flags & VNET_BUFFER_F_LOCALLY_ORIGINATED))
-		  {
-		    /* only fragment locally generated IPv6 */
-		    error0 = IP_FRAG_ERROR_DONT_FRAGMENT_SET;
-		  }
+		p0 = vlib_get_buffer (vm, pi0);
+		is_ip4 = vnet_buffer (p0)->mpls.pyld_proto == DPO_PROTO_IP4;
+
+		adj_index0 = vnet_buffer (p0)->ip.adj_index[VLIB_TX];
+		adj0 = adj_get (adj_index0);
+
+		/* the size of the MPLS stack */
+		encap_size = vnet_buffer (p0)->l3_hdr_offset - p0->current_data;
+		mtu = adj0->rewrite_header.max_l3_packet_bytes - encap_size;
+
+		/* IP fragmentation */
+		if (is_ip4)
+		  error0 = ip4_frag_do_fragment (vm, pi0, mtu, encap_size, &frags);
 		else
 		  {
-		    error0 =
-		      ip6_frag_do_fragment (vm, pi0, mtu, encap_size, &frags);
+		    if (!(p0->flags & VNET_BUFFER_F_LOCALLY_ORIGINATED))
+		      {
+			/* only fragment locally generated IPv6 */
+			error0 = IP_FRAG_ERROR_DONT_FRAGMENT_SET;
+		      }
+		    else
+		      {
+			error0 = ip6_frag_do_fragment (vm, pi0, mtu, encap_size, &frags);
+		      }
 		  }
 	      }
 
@@ -453,8 +462,7 @@ mpls_frag (vlib_main_t * vm,
 		      }
 		    else
 		      {
-			icmp6_error_set_vnet_buffer (p0, ICMP6_packet_too_big,
-						     0, mtu);
+			icmp6_error_set_vnet_buffer (p0, ICMP6_packet_too_big, 0, mtu);
 			next0 = MPLS_FRAG_NEXT_ICMP6_ERROR;
 		      }
 		  }
@@ -492,8 +500,8 @@ mpls_frag (vlib_main_t * vm,
 				     n_left_to_next);
 	      }
 	    vec_reset_length (frags);
-	}
-        vlib_put_next_frame (vm, node, next_index, n_left_to_next);
+	  }
+	vlib_put_next_frame (vm, node, next_index, n_left_to_next);
     }
     vec_free (frags);
 

@@ -67,24 +67,32 @@ ip_pmtu_dpo_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  n_left_from -= 1;
 
 	  p0 = vlib_get_buffer (vm, pi0);
-	  ipm0 = ip_pmtu_dpo_get (vnet_buffer (p0)->ip.adj_index[VLIB_TX]);
-	  vnet_buffer (p0)->ip.adj_index[VLIB_TX] = ipm0->ipm_dpo.dpoi_index;
-	  next0 = ipm0->ipm_dpo.dpoi_next_node;
-
-	  if (PREDICT_FALSE (p0->flags & VLIB_BUFFER_IS_TRACED))
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)) &&
+	      vlib_buffer_shared_view_make_writable (vm, &pi0))
 	    {
-	      ip_pmtu_trace_t *t;
-	      t = vlib_add_trace (vm, node, p0, sizeof (*t));
-	      t->pmtu = ipm0->ipm_pmtu;
-	      t->packet_size = vlib_buffer_length_in_chain (vm, p0);
+	      error0 = IP_FRAG_ERROR_MEMORY;
+	      next0 = IP_PMTU_DROP;
 	    }
-
-	  if (AF_IP6 == af)
-	    error0 =
-	      ip6_frag_do_fragment (vm, pi0, ipm0->ipm_pmtu, 0, &buffer);
 	  else
-	    error0 =
-	      ip4_frag_do_fragment (vm, pi0, ipm0->ipm_pmtu, 0, &buffer);
+	    {
+	      p0 = vlib_get_buffer (vm, pi0);
+	      ipm0 = ip_pmtu_dpo_get (vnet_buffer (p0)->ip.adj_index[VLIB_TX]);
+	      vnet_buffer (p0)->ip.adj_index[VLIB_TX] = ipm0->ipm_dpo.dpoi_index;
+	      next0 = ipm0->ipm_dpo.dpoi_next_node;
+
+	      if (PREDICT_FALSE (p0->flags & VLIB_BUFFER_IS_TRACED))
+		{
+		  ip_pmtu_trace_t *t;
+		  t = vlib_add_trace (vm, node, p0, sizeof (*t));
+		  t->pmtu = ipm0->ipm_pmtu;
+		  t->packet_size = vlib_buffer_length_in_chain (vm, p0);
+		}
+
+	      if (AF_IP6 == af)
+		error0 = ip6_frag_do_fragment (vm, pi0, ipm0->ipm_pmtu, 0, &buffer);
+	      else
+		error0 = ip4_frag_do_fragment (vm, pi0, ipm0->ipm_pmtu, 0, &buffer);
+	    }
 
 	  if (AF_IP4 == af && error0 == IP_FRAG_ERROR_DONT_FRAGMENT_SET)
 	    {
