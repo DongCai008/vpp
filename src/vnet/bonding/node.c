@@ -344,8 +344,7 @@ VLIB_NODE_FN (bond_input_node) (vlib_main_t * vm,
 	    {
 	      t0 = vlib_add_trace (vm, node, b[0], sizeof (*t0));
 	      t0->sw_if_index = sw_if_index[0];
-	      clib_memcpy_fast (&t0->ethernet, vlib_buffer_get_current (b[0]),
-				sizeof (ethernet_header_t));
+	      bond_trace_snapshot_ethernet (vm, b[0], t0);
 	      t0->bond_sw_if_index = vnet_buffer (b[0])->sw_if_index[VLIB_RX];
 	    }
 	  /* next */

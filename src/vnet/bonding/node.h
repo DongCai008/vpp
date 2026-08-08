@@ -391,6 +391,13 @@ typedef struct
   u32 bond_sw_if_index;
 } bond_packet_trace_t;
 
+static_always_inline void
+bond_trace_snapshot_ethernet (vlib_main_t *vm, vlib_buffer_t *buffer, bond_packet_trace_t *trace)
+{
+  clib_memset (&trace->ethernet, 0, sizeof (trace->ethernet));
+  vlib_buffer_chain_view_copy (vm, buffer, (u8 *) &trace->ethernet, sizeof (trace->ethernet), 0);
+}
+
 typedef u32 (*load_balance_func) (vlib_main_t * vm,
 				  vlib_node_runtime_t * node, bond_if_t * bif,
 				  vlib_buffer_t * b0, uword member_count);

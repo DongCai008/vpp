@@ -421,12 +421,10 @@ bond_tx_trace (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  (vlib_trace_buffer (vm, node, 0, b[0], 0 /* follow_chain */ )))
 	{
 	  bond_packet_trace_t *t0;
-	  ethernet_header_t *eth;
 
 	  vlib_set_trace_count (vm, node, --n_trace);
 	  t0 = vlib_add_trace (vm, node, b[0], sizeof (*t0));
-	  eth = vlib_buffer_get_current (b[0]);
-	  t0->ethernet = *eth;
+	  bond_trace_snapshot_ethernet (vm, b[0], t0);
 	  t0->sw_if_index = vnet_buffer (b[0])->sw_if_index[VLIB_TX];
 	  if (!h)
 	  t0->bond_sw_if_index = *vec_elt_at_index (ptd->active_members, 0);
