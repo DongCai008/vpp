@@ -44,6 +44,22 @@ typedef enum
     LISP_GPE_TX_N_NEXT,
 } lisp_gpe_tx_next_t;
 
+#define foreach_lisp_gpe_tx_func_error _ (NO_BUFFERS, "shared-view copy allocation failed")
+
+typedef enum
+{
+#define _(sym, str) LISP_GPE_TX_ERROR_##sym,
+  foreach_lisp_gpe_tx_func_error
+#undef _
+    LISP_GPE_TX_N_ERROR,
+} lisp_gpe_tx_func_error_t;
+
+static char *lisp_gpe_tx_func_error_strings[] = {
+#define _(sym, str) str,
+  foreach_lisp_gpe_tx_func_error
+#undef _
+};
+
 typedef struct
 {
   u32 tunnel_index;
@@ -244,13 +260,21 @@ l2_lisp_gpe_interface_tx (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  ethernet_header_t *e0;
 
 	  bi0 = from[0];
-	  to_next[0] = bi0;
 	  from += 1;
-	  to_next += 1;
 	  n_left_from -= 1;
-	  n_left_to_next -= 1;
 
 	  b0 = vlib_get_buffer (vm, bi0);
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)) &&
+	      vlib_buffer_shared_view_make_writable (vm, &bi0))
+	    {
+	      vlib_buffer_free_one (vm, bi0);
+	      vlib_error_count (vm, node->node_index, LISP_GPE_TX_ERROR_NO_BUFFERS, 1);
+	      continue;
+	    }
+	  b0 = vlib_get_buffer (vm, bi0);
+	  to_next[0] = bi0;
+	  to_next += 1;
+	  n_left_to_next -= 1;
 	  e0 = vlib_buffer_get_current (b0);
 
 	  vnet_buffer (b0)->lisp.overlay_afi = LISP_AFI_MAC;
@@ -286,10 +310,12 @@ format_l2_lisp_gpe_name (u8 * s, va_list * args)
   return format (s, "l2_lisp_gpe%d", dev_instance);
 }
 
-VNET_DEVICE_CLASS (l2_lisp_gpe_device_class,static) = {
+VNET_DEVICE_CLASS (l2_lisp_gpe_device_class, static) = {
   .name = "L2_LISP_GPE",
   .format_device_name = format_l2_lisp_gpe_name,
   .format_tx_trace = format_l2_lisp_gpe_tx_trace,
+  .tx_function_n_errors = LISP_GPE_TX_N_ERROR,
+  .tx_function_error_strings = lisp_gpe_tx_func_error_strings,
   .tx_function = l2_lisp_gpe_interface_tx,
 };
 
@@ -347,13 +373,21 @@ nsh_lisp_gpe_interface_tx (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  const dpo_id_t *dpo0;
 
 	  bi0 = from[0];
-	  to_next[0] = bi0;
 	  from += 1;
-	  to_next += 1;
 	  n_left_from -= 1;
-	  n_left_to_next -= 1;
 
 	  b0 = vlib_get_buffer (vm, bi0);
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)) &&
+	      vlib_buffer_shared_view_make_writable (vm, &bi0))
+	    {
+	      vlib_buffer_free_one (vm, bi0);
+	      vlib_error_count (vm, node->node_index, LISP_GPE_TX_ERROR_NO_BUFFERS, 1);
+	      continue;
+	    }
+	  b0 = vlib_get_buffer (vm, bi0);
+	  to_next[0] = bi0;
+	  to_next += 1;
+	  n_left_to_next -= 1;
 	  nsh0 = vlib_buffer_get_current (b0);
 
 	  vnet_buffer (b0)->lisp.overlay_afi = LISP_AFI_LCAF;
@@ -388,10 +422,12 @@ format_nsh_lisp_gpe_name (u8 * s, va_list * args)
   return format (s, "nsh_lisp_gpe%d", dev_instance);
 }
 
-VNET_DEVICE_CLASS (nsh_lisp_gpe_device_class,static) = {
+VNET_DEVICE_CLASS (nsh_lisp_gpe_device_class, static) = {
   .name = "NSH_LISP_GPE",
   .format_device_name = format_nsh_lisp_gpe_name,
   .format_tx_trace = format_nsh_lisp_gpe_tx_trace,
+  .tx_function_n_errors = LISP_GPE_TX_N_ERROR,
+  .tx_function_error_strings = lisp_gpe_tx_func_error_strings,
   .tx_function = nsh_lisp_gpe_interface_tx,
 };
 
