@@ -5,6 +5,7 @@
 
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
+#include <vnet/buffer_shinfo.h>
 #include <vppinfra/error.h>
 #include <wireguard/wireguard.h>
 
@@ -630,7 +631,7 @@ wg_input_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
   clib_thread_index_t thread_index = vm->thread_index;
   vnet_crypto_op_t **crypto_ops;
   const u16 drop_next = WG_INPUT_NEXT_PUNT;
-  message_type_t header_type;
+  message_type_t header_type = MESSAGE_INVALID;
   vlib_buffer_t *data_bufs[VLIB_FRAME_SIZE];
   u32 data_bi[VLIB_FRAME_SIZE];	 /* buffer index for data */
   u32 other_bi[VLIB_FRAME_SIZE]; /* buffer index for drop or handoff */
@@ -671,8 +672,24 @@ wg_input_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
       other_next[n_other] = WG_INPUT_NEXT_PUNT;
       data_nexts[n_data] = WG_INPUT_N_NEXT;
 
-      header_type =
-	((message_header_t *) vlib_buffer_get_current (b[0]))->type;
+      if (PREDICT_FALSE (vnet_buffer_shinfo_is_shared (b[0])))
+	{
+	  u32 bi = from[b - bufs];
+
+	  if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi)))
+	    {
+	      other_next[n_other] = WG_INPUT_NEXT_ERROR;
+	      b[0]->error = node->errors[WG_INPUT_ERROR_NO_BUFFERS];
+	      other_bi[n_other] = bi;
+	      n_other += 1;
+	      goto out;
+	    }
+
+	  from[b - bufs] = bi;
+	  b[0] = vlib_get_buffer (vm, bi);
+	}
+
+      header_type = ((message_header_t *) vlib_buffer_get_current (b[0]))->type;
 
       if (PREDICT_TRUE (header_type == MESSAGE_DATA))
 	{

@@ -23,6 +23,7 @@ add_vpp_plugin(unittest
   arp_shared_view_test.c
   buffer_shinfo_test.c
   reass_shared_view_test.c
+  wireguard_shared_view_test.c
   bier_test.c
   bihash_test.c
   bitmap_test.c
