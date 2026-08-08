@@ -6,4 +6,5 @@ add_vpp_plugin(udp_echo
   cli.c
   node.c
   format.c
+  shared_view_test.c
 )

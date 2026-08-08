@@ -11,17 +11,6 @@
 #include <udp-echo/udp_echo.h>
 
 vlib_node_registration_t udp_echo_node;
-#define foreach_udp_echo_error                                                                     \
-  _ (PROCESSED, "UDP echo packets processed")                                                      \
-  _ (CLONE_FAIL, "UDP echo clone failures")
-
-typedef enum
-{
-#define _(sym, str) UDP_ECHO_ERROR_##sym,
-  foreach_udp_echo_error
-#undef _
-    UDP_ECHO_N_ERROR,
-} udp_echo_error_t;
 
 static char *udp_echo_error_strings[] = {
 #define _(sym, string) string,
@@ -29,17 +18,38 @@ static char *udp_echo_error_strings[] = {
 #undef _
 };
 
-typedef enum
+static_always_inline u32
+udp_echo_make_shared_views_writable (vlib_main_t *vm, vlib_node_runtime_t *node, u32 *from,
+				     u32 n_from, u32 *failed)
 {
-  UDP_ECHO_NEXT_IP4_LOOKUP,
-  UDP_ECHO_N_NEXT,
-} udp_echo_next_t;
+  u32 *from_start = from;
+  u32 *to = from;
+  u32 *from_end = from + n_from;
+
+  while (from < from_end)
+    {
+      u32 bi0 = *from++;
+      vlib_buffer_t *b0 = vlib_get_buffer (vm, bi0);
+
+      if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)) &&
+	  vlib_buffer_shared_view_make_writable (vm, &bi0))
+	{
+	  b0->error = node->errors[UDP_ECHO_ERROR_COW_FAIL];
+	  *failed++ = bi0;
+	}
+      else
+	*to++ = bi0;
+    }
+
+  return to - from_start;
+}
 
 VLIB_NODE_FN (udp_echo_node)
 (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
   udp_echo_main_t *uem = &udp_echo_main;
-  u32 n_left_from = frame->n_vectors;
+  u32 n_packets = frame->n_vectors;
+  u32 n_left_from;
   u32 *from = vlib_frame_vector_args (frame);
   u8 n_clones = uem->n_clones;
   u8 linearize = uem->linearize;
@@ -47,7 +57,10 @@ VLIB_NODE_FN (udp_echo_node)
   u8 regen_ip_cksum = uem->regen_ip_cksum;
   vnet_buffer_oflags_t cksum_oflags = 0;
   u32 n_clone_fail = 0;
-  u32 n_to_next = frame->n_vectors;
+  u32 n_to_next;
+  u32 n_writable;
+  u32 n_failed;
+  u32 failed[VLIB_FRAME_SIZE];
   u32 *to_next = from;
   u32 node_index = udp_echo_node.index;
   u32 to[VLIB_FRAME_SIZE * 5];
@@ -58,10 +71,18 @@ VLIB_NODE_FN (udp_echo_node)
   if (regen_udp_cksum)
     cksum_oflags |= VNET_BUFFER_OFFLOAD_F_UDP_CKSUM;
 
-  vlib_get_buffers (vm, from, bufs, n_left_from);
-  for (u32 i = 0; i < 4; i++)
-    bufs[n_left_from + i] = bufs[n_left_from - 1];
-  b = bufs;
+  n_writable = udp_echo_make_shared_views_writable (vm, node, from, n_packets, failed);
+  n_failed = n_packets - n_writable;
+  n_left_from = n_writable;
+  n_to_next = n_writable;
+
+  if (n_left_from)
+    {
+      vlib_get_buffers (vm, from, bufs, n_left_from);
+      for (u32 i = 0; i < 4; i++)
+	bufs[n_left_from + i] = bufs[n_left_from - 1];
+      b = bufs;
+    }
 
   for (; n_left_from >= 4; n_left_from -= 4, b += 4)
     {
@@ -157,7 +178,7 @@ VLIB_NODE_FN (udp_echo_node)
       u16 n_req = n_clones + 1;
       n_to_next = 0;
 
-      for (u32 i = 0; i < frame->n_vectors; i++)
+      for (u32 i = 0; i < n_writable; i++)
 	{
 	  vlib_buffer_t *sb = vlib_get_buffer (vm, from[i]);
 	  u16 n_got;
@@ -207,10 +228,12 @@ VLIB_NODE_FN (udp_echo_node)
     }
 
   vlib_buffer_enqueue_to_single_next (vm, node, to_next, UDP_ECHO_NEXT_IP4_LOOKUP, n_to_next);
+  vlib_buffer_enqueue_to_single_next (vm, node, failed, UDP_ECHO_NEXT_DROP, n_failed);
   vlib_node_increment_counter (vm, node_index, UDP_ECHO_ERROR_PROCESSED, n_to_next);
   vlib_node_increment_counter (vm, node_index, UDP_ECHO_ERROR_CLONE_FAIL, n_clone_fail);
+  vlib_node_increment_counter (vm, node_index, UDP_ECHO_ERROR_COW_FAIL, n_failed);
 
-  return n_to_next;
+  return n_packets;
 }
 
 VLIB_REGISTER_NODE (udp_echo_node) = {
@@ -224,6 +247,7 @@ VLIB_REGISTER_NODE (udp_echo_node) = {
 
   .next_nodes = {
         [UDP_ECHO_NEXT_IP4_LOOKUP] = "ip4-lookup",
+        [UDP_ECHO_NEXT_DROP] = "error-drop",
   },
   .n_next_nodes = UDP_ECHO_N_NEXT,
 };
