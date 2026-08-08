@@ -183,4 +183,11 @@ u32 af_packet_get_if_capabilities (u8 *host_if_name);
 
 format_function_t format_af_packet_device_name;
 
+static_always_inline void
+af_packet_trace_snapshot_pre_data (vlib_main_t *vm, vlib_buffer_t *buffer, u8 *snapshot)
+{
+  clib_memset_u8 (snapshot, 0, VLIB_BUFFER_PRE_DATA_SIZE);
+  vlib_buffer_chain_view_copy (vm, buffer, snapshot, VLIB_BUFFER_PRE_DATA_SIZE, 0);
+}
+
 #define MIN(x, y) (((x) < (y)) ? (x) : (y))

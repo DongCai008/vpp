@@ -303,15 +303,12 @@ af_packet_tx_trace (vlib_main_t *vm, vlib_node_runtime_t *node,
   t->is_v2 = is_v2;
 
   if (is_v2)
-    clib_memcpy_fast (&t->tph2, (tpacket2_hdr_t *) tph,
-		      sizeof (tpacket2_hdr_t));
+    clib_memcpy_fast (&t->tph2, (tpacket2_hdr_t *) tph, sizeof (tpacket2_hdr_t));
   else
-    clib_memcpy_fast (&t->tph3, (tpacket3_hdr_t *) tph,
-		      sizeof (tpacket3_hdr_t));
+    clib_memcpy_fast (&t->tph3, (tpacket3_hdr_t *) tph, sizeof (tpacket3_hdr_t));
   clib_memcpy_fast (&t->vnet_hdr, vnet_hdr, sizeof (*vnet_hdr));
   clib_memcpy_fast (&t->buffer, b0, sizeof (*b0) - sizeof (b0->pre_data));
-  clib_memcpy_fast (t->buffer.pre_data, vlib_buffer_get_current (b0),
-		    sizeof (t->buffer.pre_data));
+  af_packet_trace_snapshot_pre_data (vm, b0, t->buffer.pre_data);
 }
 
 static_always_inline void
