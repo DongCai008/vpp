@@ -883,53 +883,50 @@ typedef enum
 static void
 drop_catchup_trace (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_buffer_t *b)
 {
-  /* Catchup tracing rewinds the current data before parsing packet headers. */
-  if (vnet_buffer_shinfo_is_shared (b))
-    return;
+  u8 snapshot[sizeof (ethernet_header_t) + sizeof (ip6_header_t)];
+  uword snapshot_length;
+  vnet_error_trace_t *t;
+  ip4_header_t *ip4;
+  ip6_header_t *ip6;
+  ethernet_header_t *eh;
 
-  /* Can we safely rewind the buffer? If not, fagedaboudit */
-  if (b->flags & VNET_BUFFER_F_L2_HDR_OFFSET_VALID)
+  /* Can we safely read an L2-started packet view? If not, fagedaboudit */
+  snapshot_length = vnet_buffer_l2_snapshot (vm, b, snapshot, sizeof (snapshot));
+  if (snapshot_length >= sizeof (*eh))
     {
-      vnet_error_trace_t *t;
-      ip4_header_t *ip4;
-      ip6_header_t *ip6;
-      ethernet_header_t *eh;
-      i16 delta;
-
       t = vlib_add_trace (vm, node, b, sizeof (*t));
-      delta = vnet_buffer (b)->l2_hdr_offset - b->current_data;
-      vlib_buffer_advance (b, delta);
-
-      eh = vlib_buffer_get_current (b);
+      eh = (void *) snapshot;
       /* Save mactype */
       t->mactype = clib_net_to_host_u16 (eh->type);
       t->details_valid = 1;
       switch (t->mactype)
 	{
 	case ETHERNET_TYPE_IP4:
-	  ip4 = (void *) (eh + 1);
-	  t->details_valid = 2;
-	  t->is_ip6 = 0;
-	  t->src.ip4.as_u32 = ip4->src_address.as_u32;
-	  t->dst.ip4.as_u32 = ip4->dst_address.as_u32;
+	  if (snapshot_length >= sizeof (*eh) + sizeof (*ip4))
+	    {
+	      ip4 = (void *) (eh + 1);
+	      t->details_valid = 2;
+	      t->is_ip6 = 0;
+	      t->src.ip4.as_u32 = ip4->src_address.as_u32;
+	      t->dst.ip4.as_u32 = ip4->dst_address.as_u32;
+	    }
 	  break;
 
 	case ETHERNET_TYPE_IP6:
-	  ip6 = (void *) (eh + 1);
-	  t->details_valid = 2;
-	  t->is_ip6 = 1;
-	  clib_memcpy_fast (t->src.as_u8, ip6->src_address.as_u8,
-			    sizeof (ip6_address_t));
-	  clib_memcpy_fast (t->dst.as_u8, ip6->dst_address.as_u8,
-			    sizeof (ip6_address_t));
+	  if (snapshot_length >= sizeof (*eh) + sizeof (*ip6))
+	    {
+	      ip6 = (void *) (eh + 1);
+	      t->details_valid = 2;
+	      t->is_ip6 = 1;
+	      clib_memcpy_fast (t->src.as_u8, ip6->src_address.as_u8, sizeof (ip6_address_t));
+	      clib_memcpy_fast (t->dst.as_u8, ip6->dst_address.as_u8, sizeof (ip6_address_t));
+	    }
 	  break;
 
 	default:
 	  /* Dunno, do nothing, leave details_valid alone */
 	  break;
 	}
-      /* Restore current data (probably unnecessary) */
-      vlib_buffer_advance (b, -delta);
     }
 }
 

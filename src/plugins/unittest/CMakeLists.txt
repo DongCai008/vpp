@@ -24,6 +24,7 @@ add_vpp_plugin(unittest
   ah_shared_view_test.c
   bfd_shared_view_test.c
   bond_trace_shared_view_test.c
+  drop_capture_shared_view_test.c
   af_packet_trace_shared_view_test.c
   buffer_shinfo_test.c
   buffer_shared_view_worker_test.c
