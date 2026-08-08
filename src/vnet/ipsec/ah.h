@@ -40,6 +40,8 @@ ah_encrypt_err_to_sa_err (u32 err)
       return IPSEC_SA_ERROR_CRYPTO_ENGINE_ERROR;
     case AH_ENCRYPT_ERROR_SEQ_CYCLED:
       return IPSEC_SA_ERROR_SEQ_CYCLED;
+    case AH_ENCRYPT_ERROR_NO_BUFFERS:
+      return IPSEC_SA_ERROR_NO_BUFFERS;
     }
   return ~0;
 }
@@ -59,6 +61,8 @@ ah_decrypt_err_to_sa_err (u32 err)
       return IPSEC_SA_ERROR_DROP_FRAGMENTS;
     case AH_DECRYPT_ERROR_REPLAY:
       return IPSEC_SA_ERROR_REPLAY;
+    case AH_DECRYPT_ERROR_NO_BUFFERS:
+      return IPSEC_SA_ERROR_NO_BUFFERS;
     }
   return ~0;
 }

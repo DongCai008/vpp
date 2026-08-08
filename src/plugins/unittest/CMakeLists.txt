@@ -21,6 +21,7 @@ add_vpp_plugin(unittest
   api_test.c
   api_fuzz_test.c
   arp_shared_view_test.c
+  ah_shared_view_test.c
   buffer_shinfo_test.c
   reass_shared_view_test.c
   wireguard_shared_view_test.c

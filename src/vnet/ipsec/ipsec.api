@@ -783,6 +783,12 @@ counters ah_encrypt {
     units "packets";
     description "sequence number cycled (packet dropped)";
   };
+  no_buffers {
+    severity error;
+    type counter64;
+    units "packets";
+    description "no buffers (packet dropped)";
+  };
 };
 
 counters ah_decrypt {
@@ -821,6 +827,12 @@ counters ah_decrypt {
     type counter64;
     units "packets";
     description "SA replayed packet";
+  };
+  no_buffers {
+    severity error;
+    type counter64;
+    units "packets";
+    description "no buffers (packet dropped)";
   };
 };
 

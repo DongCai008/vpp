@@ -12,6 +12,7 @@
 #include <vnet/ipsec/esp.h>
 #include <vnet/ipsec/ah.h>
 #include <vnet/ipsec/ipsec_io.h>
+#include <vnet/buffer_shinfo.h>
 
 #define foreach_ah_decrypt_next                 \
   _(DROP, "error-drop")                         \
@@ -93,6 +94,7 @@ ah_decrypt_inline (vlib_main_t * vm,
   ah_decrypt_packet_data_t pkt_data[VLIB_FRAME_SIZE], *pd = pkt_data;
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
   u16 nexts[VLIB_FRAME_SIZE], *next = nexts;
+  u8 cow_failed[VLIB_FRAME_SIZE] = {};
   ipsec_main_t *im = &ipsec_main;
   ipsec_per_thread_data_t *ptd = vec_elt_at_index (im->ptd, thread_index);
   from = vlib_frame_vector_args (from_frame);
@@ -106,11 +108,34 @@ ah_decrypt_inline (vlib_main_t * vm,
   clib_memset_u16 (nexts, -1, n_left);
   vec_reset_length (ptd->crypto_ops);
 
+  for (u32 i = 0; i < n_left; i++)
+    {
+      u32 bi = from[i];
+
+      if (PREDICT_TRUE (!vnet_buffer_shinfo_is_shared (bufs[i])))
+	continue;
+      if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi)))
+	{
+	  cow_failed[i] = 1;
+	  continue;
+	}
+      from[i] = bi;
+      bufs[i] = vlib_get_buffer (vm, bi);
+    }
+
   while (n_left > 0)
     {
       ah_header_t *ah0;
       ip4_header_t *ih4;
       ip6_header_t *ih6;
+
+      if (PREDICT_FALSE (cow_failed[b - bufs]))
+	{
+	  ah_decrypt_set_next_index (b[0], node, vm->thread_index, AH_DECRYPT_ERROR_NO_BUFFERS, 0,
+				     next, AH_DECRYPT_NEXT_DROP,
+				     vnet_buffer (b[0])->ipsec.sad_index);
+	  goto next;
+	}
 
       if (vnet_buffer (b[0])->ipsec.sad_index != current_sa_index)
 	{
@@ -257,11 +282,10 @@ ah_decrypt_inline (vlib_main_t * vm,
   pd = pkt_data;
   b = bufs;
 
-  vlib_node_increment_counter (vm, node->node_index, AH_DECRYPT_ERROR_RX_PKTS,
-			       n_left);
-  vlib_increment_combined_counter (&ipsec_sa_counters, thread_index,
-				   current_sa_index, current_sa_pkts,
-				   current_sa_bytes);
+  vlib_node_increment_counter (vm, node->node_index, AH_DECRYPT_ERROR_RX_PKTS, n_left);
+  if (current_sa_index != ~0)
+    vlib_increment_combined_counter (&ipsec_sa_counters, thread_index, current_sa_index,
+				     current_sa_pkts, current_sa_bytes);
 
   ah_process_ops (vm, node, ptd->crypto_ops, bufs, nexts);
 

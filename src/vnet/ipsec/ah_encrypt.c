@@ -13,6 +13,7 @@
 #include <vnet/ipsec/ah.h>
 #include <vnet/ipsec/ipsec.api_enum.h>
 #include <vnet/tunnel/tunnel_dp.h>
+#include <vnet/buffer_shinfo.h>
 
 #define foreach_ah_encrypt_next \
   _ (DROP, "error-drop")                           \
@@ -93,6 +94,7 @@ ah_encrypt_inline (vlib_main_t * vm,
   thread_index = vm->thread_index;
   vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b = bufs;
   u16 nexts[VLIB_FRAME_SIZE], *next = nexts;
+  u8 cow_failed[VLIB_FRAME_SIZE] = {};
   ipsec_per_thread_data_t *ptd = vec_elt_at_index (im->ptd, thread_index);
   ipsec_sa_outb_rt_t *ort = 0;
   ip4_and_ah_header_t *ih0, *oh0 = 0;
@@ -111,10 +113,34 @@ ah_encrypt_inline (vlib_main_t * vm,
   vlib_get_buffers (vm, from, b, n_left);
   vec_reset_length (ptd->crypto_ops);
 
+  for (u32 i = 0; i < n_left; i++)
+    {
+      u32 bi = from[i];
+
+      if (PREDICT_TRUE (!vnet_buffer_shinfo_is_shared (bufs[i])))
+	continue;
+      if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi)))
+	{
+	  cow_failed[i] = 1;
+	  continue;
+	}
+      from[i] = bi;
+      bufs[i] = vlib_get_buffer (vm, bi);
+    }
+
   while (n_left > 0)
     {
       u8 ip_hdr_size;
       u8 next_hdr_type;
+
+      if (PREDICT_FALSE (cow_failed[b - bufs]))
+	{
+	  pd->sa_index = vnet_buffer (b[0])->ipsec.sad_index;
+	  ah_encrypt_set_next_index (b[0], node, vm->thread_index, AH_ENCRYPT_ERROR_NO_BUFFERS, 0,
+				     next, AH_ENCRYPT_NEXT_DROP, pd->sa_index);
+	  pd->skip = 1;
+	  goto next;
+	}
 
       if (vnet_buffer (b[0])->ipsec.sad_index != current_sa_index)
 	{
@@ -354,11 +380,10 @@ ah_encrypt_inline (vlib_main_t * vm,
   pd = pkt_data;
   b = bufs;
 
-  vlib_node_increment_counter (vm, node->node_index,
-			       AH_ENCRYPT_ERROR_RX_PKTS, n_left);
-  vlib_increment_combined_counter (&ipsec_sa_counters, thread_index,
-				   current_sa_index, current_sa_pkts,
-				   current_sa_bytes);
+  vlib_node_increment_counter (vm, node->node_index, AH_ENCRYPT_ERROR_RX_PKTS, n_left);
+  if (current_sa_index != ~0)
+    vlib_increment_combined_counter (&ipsec_sa_counters, thread_index, current_sa_index,
+				     current_sa_pkts, current_sa_bytes);
 
   ah_process_ops (vm, node, ptd->crypto_ops, bufs, nexts);
 
