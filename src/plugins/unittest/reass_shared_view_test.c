@@ -76,7 +76,7 @@ done:
 static int
 reass_shared_view_test_node (vlib_main_t *vm, const char *node_name, int is_ip6, u32 next_index,
 			     u32 error_next_index, u8 save_rewrite_length, u32 current_config_index,
-			     int with_context, int check_output_context)
+			     int with_context, int check_output_context, int check_full_context)
 {
   vlib_buffer_t *root;
   vlib_buffer_t *descriptor;
@@ -111,6 +111,8 @@ reass_shared_view_test_node (vlib_main_t *vm, const char *node_name, int is_ip6,
     }
   root->current_config_index = current_config_index + 1;
   vnet_buffer (root)->ip.save_rewrite_length = save_rewrite_length + 1;
+  vnet_buffer (root)->ip.reass.next_index = next_index + 17;
+  vnet_buffer (root)->ip.reass.error_next_index = error_next_index + 17;
 
   REASS_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
 	      "attach reassembly shared-view descriptor");
@@ -136,14 +138,25 @@ reass_shared_view_test_node (vlib_main_t *vm, const char *node_name, int is_ip6,
       REASS_TEST (vnet_buffer (forwarded)->ip.save_rewrite_length == save_rewrite_length,
 		  "preserve descriptor rewrite length");
     }
-  if (!is_ip6 && !with_context && !check_output_context)
+  if (check_full_context)
+    {
+      REASS_TEST (vnet_buffer (forwarded)->ip.reass.next_index == next_index,
+		  "preserve custom full next index");
+      REASS_TEST (vnet_buffer (forwarded)->ip.reass.error_next_index == error_next_index,
+		  "preserve custom full error next index");
+    }
+  if (!is_ip6 && !with_context && !check_output_context && !check_full_context)
     REASS_TEST (vnet_buffer (forwarded)->ip.reass.next_index == next_index,
 		"preserve custom IPv4 next index");
-  if (is_ip6 && !with_context && !check_output_context)
+  if (is_ip6 && !with_context && !check_output_context && !check_full_context)
     REASS_TEST (vnet_buffer (forwarded)->ip.reass.error_next_index == error_next_index,
 		"preserve custom IPv6 error next index");
   if (with_context)
-    REASS_TEST (forwarded_context == 0xbeef, "preserve shallow custom-context aux forwarding");
+    {
+      REASS_TEST (vnet_buffer (forwarded)->ip.reass.next_index == next_index,
+		  "preserve shallow custom-context next index");
+      REASS_TEST (forwarded_context == 0xbeef, "preserve shallow custom-context aux forwarding");
+    }
   ret = 1;
 
 done:
@@ -155,14 +168,16 @@ done:
 static int
 reass_shared_view_test (vlib_main_t *vm)
 {
-  return reass_shared_view_test_node (vm, "ip4-full-reassembly-custom", 0, 1, 1, 0, 0, 0, 0) &&
-	 reass_shared_view_test_node (vm, "ip6-full-reassembly-custom", 1, 1, 1, 0, 0, 0, 0) &&
-	 reass_shared_view_test_node (vm, "ip4-sv-reassembly-custom-next", 0, 1, 1, 0, 0, 0, 0) &&
-	 reass_shared_view_test_node (vm, "ip6-sv-reassembly-custom-context", 1, 1, 1, 0, 0, 1,
+  return reass_shared_view_test_node (vm, "ip4-full-reassembly-custom", 0, 1, 1, 0, 0, 0, 0, 1) &&
+	 reass_shared_view_test_node (vm, "ip6-full-reassembly-custom", 1, 1, 1, 0, 0, 0, 0, 1) &&
+	 reass_shared_view_test_node (vm, "ip4-sv-reassembly-custom-next", 0, 1, 1, 0, 0, 0, 0,
 				      0) &&
-	 reass_shared_view_test_node (vm, "ip4-sv-reassembly-output-feature", 0, 0, 0, 0, 0, 0,
-				      1) &&
-	 reass_shared_view_test_node (vm, "ip6-sv-reassembly-output-feature", 1, 0, 0, 0, 0, 0, 1);
+	 reass_shared_view_test_node (vm, "ip6-sv-reassembly-custom-context", 1, 1, 1, 0, 0, 1, 0,
+				      0) &&
+	 reass_shared_view_test_node (vm, "ip4-sv-reassembly-output-feature", 0, 0, 0, 0, 0, 0, 1,
+				      0) &&
+	 reass_shared_view_test_node (vm, "ip6-sv-reassembly-output-feature", 1, 0, 0, 0, 0, 0, 1,
+				      0);
 }
 
 static clib_error_t *
