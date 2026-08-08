@@ -43,6 +43,7 @@ add_vpp_plugin(unittest
   crypto/rfc4231.c
   crypto/sha.c
   crypto_test.c
+  dhcp_shared_view_test.c
   fib_test.c
   gso_test.c
   ip_frag_shared_view_test.c

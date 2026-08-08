@@ -173,6 +173,20 @@ dhcpv6_proxy_to_server_input (vlib_main_t * vm,
 	  n_left_from -= 1;
 
 	  b0 = vlib_get_buffer (vm, bi0);
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
+	    {
+	      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &bi0)))
+		{
+		  b0 = vlib_get_buffer (vm, bi0);
+		  b0->error = node->errors[DHCPV6_PROXY_ERROR_ALLOC_FAIL];
+		  error0 = DHCPV6_PROXY_ERROR_ALLOC_FAIL;
+		  next0 = DHCPV6_PROXY_TO_SERVER_INPUT_NEXT_DROP;
+		  vlib_node_increment_counter (vm, dhcpv6_proxy_to_server_node.index,
+					       DHCPV6_PROXY_ERROR_ALLOC_FAIL, 1);
+		  goto do_enqueue;
+		}
+	      b0 = vlib_get_buffer (vm, bi0);
+	    }
 
 	  h0 = vlib_buffer_get_current (b0);
 
@@ -592,6 +606,25 @@ dhcpv6_proxy_to_client_input (vlib_main_t * vm,
       n_left_from -= 1;
 
       b0 = vlib_get_buffer (vm, bi0);
+      if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
+	{
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &bi0)))
+	    {
+	      b0 = vlib_get_buffer (vm, bi0);
+	      b0->error = node->errors[DHCPV6_PROXY_ERROR_ALLOC_FAIL];
+	      error0 = DHCPV6_PROXY_ERROR_ALLOC_FAIL;
+	      vlib_node_increment_counter (vm, dhcpv6_proxy_to_client_node.index,
+					   DHCPV6_PROXY_ERROR_ALLOC_FAIL, 1);
+
+	      f0 = vlib_get_frame_to_node (vm, dm->error_drop_node_index);
+	      to_next0 = vlib_frame_vector_args (f0);
+	      to_next0[0] = bi0;
+	      f0->n_vectors = 1;
+	      vlib_put_frame_to_node (vm, dm->error_drop_node_index, f0);
+	      goto do_trace;
+	    }
+	  b0 = vlib_get_buffer (vm, bi0);
+	}
       h0 = vlib_buffer_get_current (b0);
 
       if (DHCPV6_MSG_RELAY_REPL != h0->msg_type)

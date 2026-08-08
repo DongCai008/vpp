@@ -142,6 +142,20 @@ dhcp_proxy_to_server_input (vlib_main_t * vm,
 	  n_left_from -= 1;
 
 	  b0 = vlib_get_buffer (vm, bi0);
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
+	    {
+	      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &bi0)))
+		{
+		  b0 = vlib_get_buffer (vm, bi0);
+		  b0->error = node->errors[DHCP_PROXY_ERROR_ALLOC_FAIL];
+		  error0 = DHCP_PROXY_ERROR_ALLOC_FAIL;
+		  next0 = DHCP_PROXY_TO_SERVER_INPUT_NEXT_DROP;
+		  vlib_node_increment_counter (vm, dhcp_proxy_to_server_node.index,
+					       DHCP_PROXY_ERROR_ALLOC_FAIL, 1);
+		  goto do_enqueue;
+		}
+	      b0 = vlib_get_buffer (vm, bi0);
+	    }
 
 	  h0 = vlib_buffer_get_current (b0);
 
@@ -538,6 +552,21 @@ dhcp_proxy_to_client_input (vlib_main_t * vm,
 	  n_left_to_next -= 1;
 
 	  b0 = vlib_get_buffer (vm, bi0);
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
+	    {
+	      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &bi0)))
+		{
+		  b0 = vlib_get_buffer (vm, bi0);
+		  b0->error = node->errors[DHCP_PROXY_ERROR_ALLOC_FAIL];
+		  error0 = DHCP_PROXY_ERROR_ALLOC_FAIL;
+		  next0 = DHCP4_PROXY_NEXT_DROP;
+		  vlib_node_increment_counter (vm, dhcp_proxy_to_client_node.index,
+					       DHCP_PROXY_ERROR_ALLOC_FAIL, 1);
+		  goto do_enqueue;
+		}
+	      to_next[-1] = bi0;
+	      b0 = vlib_get_buffer (vm, bi0);
+	    }
 	  h0 = vlib_buffer_get_current (b0);
 
 	  /*
@@ -761,6 +790,7 @@ dhcp_proxy_to_client_input (vlib_main_t * vm,
 				sizeof (tr->packet_data));
 	    }
 
+	do_enqueue:
 	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
 					   to_next, n_left_to_next,
 					   bi0, next0);
