@@ -22,6 +22,7 @@ add_vpp_plugin(unittest
   api_fuzz_test.c
   arp_shared_view_test.c
   buffer_shinfo_test.c
+  reass_shared_view_test.c
   bier_test.c
   bihash_test.c
   bitmap_test.c
