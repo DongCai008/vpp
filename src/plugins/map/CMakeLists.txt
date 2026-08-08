@@ -18,6 +18,7 @@ add_vpp_plugin(map
   ip6_map.c
   ip6_map_t.c
   map_api.c
+  map_shared_view_test.c
   map.c
   lpm.c
 

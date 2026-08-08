@@ -426,6 +426,12 @@ counters map {
     units "packets";
     description "could not cache fragment";
   };
+  no_buffers {
+    severity error;
+    type counter64;
+    units "packets";
+    description "could not allocate writable packet buffer";
+  };
   fragment_malformed {
     severity error;
     type counter64;

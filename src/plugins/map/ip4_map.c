@@ -170,6 +170,14 @@ ip4_map (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 	  n_left_from -= 1;
 
 	  p0 = vlib_get_buffer (vm, pi0);
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)) &&
+	      vlib_buffer_shared_view_make_writable (vm, &pi0))
+	    {
+	      error0 = MAP_ERROR_NO_BUFFERS;
+	      next0 = IP4_MAP_NEXT_DROP;
+	      goto exit;
+	    }
+	  p0 = vlib_get_buffer (vm, pi0);
 	  ip40 = vlib_buffer_get_current (p0);
 
 	  d0 =
