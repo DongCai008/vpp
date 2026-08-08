@@ -1089,6 +1089,12 @@ counters ip4 {
     units "packets";
     description "ip4 MTU exceeded and DF set";
   };
+  rewrite_no_buffers {
+    severity error;
+    type counter64;
+    units "packets";
+    description "ip4 rewrite shared-view copy allocation failure";
+  };
   dst_lookup_miss {
     severity error;
     type counter64;
@@ -1309,6 +1315,12 @@ counters ip6 {
     type counter64;
     units "packets";
     description "ip6 MTU exceeded";
+  };
+  rewrite_no_buffers {
+    severity error;
+    type counter64;
+    units "packets";
+    description "ip6 rewrite shared-view copy allocation failure";
   };
   dst_lookup_miss {
     severity error;

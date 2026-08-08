@@ -1742,19 +1742,47 @@ ip6_mtu_check (vlib_buffer_t * b, u16 packet_bytes,
     }
 }
 
+static_always_inline u32
+ip6_rewrite_make_shared_views_writable (vlib_main_t *vm, vlib_node_runtime_t *error_node, u32 *from,
+					u32 n_from, u32 *failed)
+{
+  u32 *from_start = from;
+  u32 *to = from;
+  u32 *from_end = from + n_from;
+
+  while (from < from_end)
+    {
+      u32 pi0 = *from++;
+      vlib_buffer_t *p0 = vlib_get_buffer (vm, pi0);
+
+      if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)) &&
+	  vlib_buffer_shared_view_make_writable (vm, &pi0))
+	{
+	  p0->error = error_node->errors[IP6_ERROR_REWRITE_NO_BUFFERS];
+	  *failed++ = pi0;
+	}
+      else
+	*to++ = pi0;
+    }
+
+  return to - from_start;
+}
+
 always_inline uword
-ip6_rewrite_inline_with_gso (vlib_main_t * vm,
-			     vlib_node_runtime_t * node,
-			     vlib_frame_t * frame,
+ip6_rewrite_inline_with_gso (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame,
 			     int do_counters, int is_midchain, int is_mcast)
 {
   ip_lookup_main_t *lm = &ip6_main.lookup_main;
   u32 *from = vlib_frame_vector_args (frame);
-  u32 n_left_from, n_left_to_next, *to_next, next_index;
-  vlib_node_runtime_t *error_node =
-    vlib_node_get_runtime (vm, ip6_input_node.index);
+  u32 failed[VLIB_FRAME_SIZE];
+  u16 drop_nexts[VLIB_FRAME_SIZE];
+  u32 n_left_from, n_left_to_next, *to_next, next_index, n_failed, n_packets, n_writable;
+  vlib_node_runtime_t *error_node = vlib_node_get_runtime (vm, ip6_input_node.index);
 
-  n_left_from = frame->n_vectors;
+  n_packets = frame->n_vectors;
+  n_writable = ip6_rewrite_make_shared_views_writable (vm, error_node, from, n_packets, failed);
+  n_left_from = n_writable;
+  n_failed = n_packets - n_writable;
   next_index = node->cached_next_index;
   clib_thread_index_t thread_index = vm->thread_index;
 
@@ -2101,9 +2129,19 @@ ip6_rewrite_inline_with_gso (vlib_main_t * vm,
 
   /* Need to do trace after rewrites to pick up new packet data. */
   if (node->flags & VLIB_NODE_FLAG_TRACE)
-    ip6_forward_next_trace (vm, node, frame, VLIB_TX);
+    {
+      frame->n_vectors = n_writable;
+      ip6_forward_next_trace (vm, node, frame, VLIB_TX);
+      frame->n_vectors = n_packets;
+    }
 
-  return frame->n_vectors;
+  if (n_failed)
+    {
+      clib_memset_u16 (drop_nexts, IP6_REWRITE_NEXT_DROP, n_failed);
+      vlib_buffer_enqueue_to_next (vm, node, failed, drop_nexts, n_failed);
+    }
+
+  return n_packets;
 }
 
 always_inline uword
