@@ -7,6 +7,9 @@
 #include <vlib/vlib.h>
 #include <vnet/buffer_shinfo.h>
 #include <vnet/ethernet/packet.h>
+#include <vnet/ip/ip4.h>
+#include <vnet/ip/ip6.h>
+#include <vnet/udp/udp_packet.h>
 #include <vnet/interface_output.h>
 #include <vppinfra/pcap.h>
 
