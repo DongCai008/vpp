@@ -104,8 +104,49 @@ ping_shared_view_init_packet (vlib_buffer_t *buffer, int is_ip6)
 }
 
 static int
+ping_shared_view_ordinary_test (vlib_main_t *vm, int is_ip6)
+{
+  const char *node_name = is_ip6 ? "ip6-icmp-echo-request" : "ip4-icmp-echo-request";
+  vlib_buffer_t *forwarded;
+  vlib_buffer_t *input;
+  vlib_node_runtime_t *runtime;
+  icmp46_header_t *icmp;
+  u32 buffer_index;
+  u32 forwarded_index = ~0;
+  u32 forwarded_runtime_index = ~0;
+  u32 next = is_ip6 ? ICMP6_ECHO_REQUEST_NEXT_LOOKUP : ICMP4_ECHO_REQUEST_NEXT_LOOKUP;
+  int ret = 0;
+
+  if (vlib_buffer_alloc (vm, &buffer_index, 1) != 1)
+    return 0;
+
+  input = vlib_get_buffer (vm, buffer_index);
+  ping_shared_view_init_packet (input, is_ip6);
+  PING_TEST (ping_shared_view_dispatch (vm, node_name, buffer_index, &forwarded_index,
+					&forwarded_runtime_index) == 0,
+	     "dispatch ordinary ping buffer");
+  PING_TEST (forwarded_index == buffer_index, "retain ordinary ping frame slot");
+  runtime = vlib_node_get_runtime (vm, vlib_get_node_by_name (vm, (u8 *) node_name)->index);
+  PING_TEST (forwarded_runtime_index ==
+	       vlib_node_runtime_get_next_frame (vm, runtime, next)->node_runtime_index,
+	     "send ordinary ping buffer to lookup");
+  forwarded = vlib_get_buffer (vm, forwarded_index);
+  PING_TEST (forwarded == input, "retain ordinary ping buffer pointer");
+  icmp = is_ip6 ? ip6_next_header (vlib_buffer_get_current (forwarded)) :
+		  ip4_next_header (vlib_buffer_get_current (forwarded));
+  PING_TEST (icmp->type == (is_ip6 ? ICMP6_echo_reply : ICMP4_echo_reply),
+	     "rewrite ordinary ping reply");
+  ret = 1;
+
+done:
+  vlib_buffer_free_one (vm, forwarded_index == ~0 ? buffer_index : forwarded_index);
+  return ret;
+}
+
+static int
 ping_shared_view_success_test (vlib_main_t *vm, int is_ip6)
 {
+  vlib_buffer_t *descriptor;
   const char *node_name = is_ip6 ? "ip6-icmp-echo-request" : "ip4-icmp-echo-request";
   vlib_buffer_t *forwarded;
   vlib_buffer_t *root;
@@ -130,6 +171,7 @@ ping_shared_view_success_test (vlib_main_t *vm, int is_ip6)
   ping_shared_view_init_packet (root, is_ip6);
   PING_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
 	     "attach ping shared-view descriptor");
+  descriptor = vlib_get_buffer (vm, buffers[1]);
   PING_TEST (ping_shared_view_dispatch (vm, node_name, buffers[1], &forwarded_index,
 					&forwarded_runtime_index) == 0,
 	     "dispatch ping shared-view descriptor");
@@ -139,6 +181,7 @@ ping_shared_view_success_test (vlib_main_t *vm, int is_ip6)
 	       vlib_node_runtime_get_next_frame (vm, runtime, next)->node_runtime_index,
 	     "send ping replacement to lookup");
   forwarded = vlib_get_buffer (vm, forwarded_index);
+  PING_TEST (forwarded != descriptor, "reload ping pointer after descriptor COW");
   PING_TEST (!vlib_buffer_shared_view_is_shared (forwarded),
 	     "forward ordinary ping replacement after COW");
   icmp = is_ip6 ? ip6_next_header (vlib_buffer_get_current (forwarded)) :
@@ -192,6 +235,8 @@ ping_shared_view_failure_test (vlib_main_t *vm, int is_ip6)
 	     "dispatch ping COW-failure descriptor");
   descriptor->next_buffer = descriptor_next;
   PING_TEST (forwarded_index == buffers[1], "retain ping descriptor after COW failure");
+  PING_TEST (vlib_get_buffer (vm, forwarded_index) == descriptor,
+	     "retain ping pointer after COW failure");
   runtime = vlib_node_get_runtime (vm, vlib_get_node_by_name (vm, (u8 *) node_name)->index);
   PING_TEST (forwarded_runtime_index ==
 	       vlib_node_runtime_get_next_frame (vm, runtime, next)->node_runtime_index,
@@ -211,7 +256,8 @@ done:
 static clib_error_t *
 test_ping_shared_view_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
 {
-  if (!ping_shared_view_success_test (vm, 0) || !ping_shared_view_success_test (vm, 1) ||
+  if (!ping_shared_view_ordinary_test (vm, 0) || !ping_shared_view_ordinary_test (vm, 1) ||
+      !ping_shared_view_success_test (vm, 0) || !ping_shared_view_success_test (vm, 1) ||
       !ping_shared_view_failure_test (vm, 0) || !ping_shared_view_failure_test (vm, 1))
     return clib_error_return (0, "ping shared-view test failed");
 

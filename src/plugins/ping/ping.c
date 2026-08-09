@@ -12,6 +12,7 @@
 #include <vnet/ip/ip_sas.h>
 #include <vnet/ip/ip6_link.h>
 #include <vnet/ip/ip6_ll_table.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/plugin/plugin.h>
 #include <vpp/app/version.h>
 
@@ -175,8 +176,7 @@ ip46_echo_request_make_shared_views_writable (vlib_main_t *vm, vlib_node_runtime
       u32 bi0 = *from++;
       vlib_buffer_t *b0 = vlib_get_buffer (vm, bi0);
 
-      if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)) &&
-	  vlib_buffer_shared_view_make_writable (vm, &bi0))
+      if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi0, &b0)))
 	{
 	  b0->error = node->errors[ICMP_ECHO_REQUEST_ERROR_COW_FAIL];
 	  *failed++ = bi0;
