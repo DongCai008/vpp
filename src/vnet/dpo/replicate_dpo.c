@@ -15,28 +15,26 @@
  */
 vlib_log_class_t replicate_logger;
 
-#define REP_DBG(_rep, _fmt, _args...)                                   \
-{                                                                       \
-    vlib_log_debug(replicate_logger,                                    \
-                   "rep:[%U]:" _fmt,                                    \
-                   format_replicate,                                    \
-                   replicate_get_index(_rep),                           \
-                   REPLICATE_FORMAT_NONE,                               \
-                   ##_args);                                            \
-}
+#define REP_DBG(_rep, _fmt, _args...)                                                              \
+  {                                                                                                \
+    vlib_log_debug (replicate_logger, "rep:[%U]:" _fmt, format_replicate,                          \
+		    replicate_get_index (_rep), REPLICATE_FORMAT_NONE, ##_args);                   \
+  }
 
-#define foreach_replicate_dpo_error                       \
-_(BUFFER_ALLOCATION_FAILURE, "Buffer Allocation Failure")
+#define foreach_replicate_dpo_error                                                                \
+  _ (BUFFER_ALLOCATION_FAILURE, "Buffer Allocation Failure")                                       \
+  _ (COW_FAIL, "shared-view copy failed")
 
-typedef enum {
-#define _(sym,str) REPLICATE_DPO_ERROR_##sym,
+typedef enum
+{
+#define _(sym, str) REPLICATE_DPO_ERROR_##sym,
   foreach_replicate_dpo_error
 #undef _
-  REPLICATE_DPO_N_ERROR,
+    REPLICATE_DPO_N_ERROR,
 } replicate_dpo_error_t;
 
-static char * replicate_dpo_error_strings[] = {
-#define _(sym,string) string,
+static char *replicate_dpo_error_strings[] = {
+#define _(sym, string) string,
   foreach_replicate_dpo_error
 #undef _
 };
@@ -737,83 +735,97 @@ replicate_inline (vlib_main_t * vm,
     from = vlib_frame_vector_args (frame);
     n_left_from = frame->n_vectors;
     next_index = node->cached_next_index;
-  
+
     while (n_left_from > 0)
-    {
-        u32 n_left_to_next;
+      {
+	u32 n_left_to_next;
 
-        vlib_get_next_frame (vm, node, next_index,
-                             to_next, n_left_to_next);
+	vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
 
-        while (n_left_from > 0 && n_left_to_next > 0)
-	{
-            u32 next0, ci0, bi0, bucket, repi0;
-            const replicate_t *rep0;
-            vlib_buffer_t * b0, *c0;
-            const dpo_id_t *dpo0;
+	while (n_left_from > 0 && n_left_to_next > 0)
+	  {
+	    u32 next0, ci0, bi0, bucket, repi0;
+	    const replicate_t *rep0;
+	    vlib_buffer_t *b0, *c0;
+	    const dpo_id_t *dpo0;
 	    u8 num_cloned;
 
-            bi0 = from[0];
-            from += 1;
-            n_left_from -= 1;
+	    bi0 = from[0];
+	    from += 1;
+	    n_left_from -= 1;
 
-            b0 = vlib_get_buffer (vm, bi0);
-            repi0 = vnet_buffer (b0)->ip.adj_index[VLIB_TX];
-            rep0 = replicate_get(repi0);
+	    b0 = vlib_get_buffer (vm, bi0);
+	    repi0 = vnet_buffer (b0)->ip.adj_index[VLIB_TX];
 
-            vlib_increment_combined_counter(
-                cm, thread_index, repi0, 1,
-                vlib_buffer_length_in_chain(vm, b0));
+	    if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
+	      {
+		if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &bi0)))
+		  {
+		    b0->error = node->errors[REPLICATE_DPO_ERROR_COW_FAIL];
+		    to_next[0] = bi0;
+		    to_next += 1;
+		    n_left_to_next -= 1;
+
+		    vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next, n_left_to_next,
+						     bi0, 0);
+		    continue;
+		  }
+
+		b0 = vlib_get_buffer (vm, bi0);
+		vnet_buffer (b0)->ip.adj_index[VLIB_TX] = repi0;
+	      }
+
+	    rep0 = replicate_get (repi0);
+
+	    vlib_increment_combined_counter (cm, thread_index, repi0, 1,
+					     vlib_buffer_length_in_chain (vm, b0));
 
 	    vec_validate (rm->clones[thread_index], rep0->rep_n_buckets - 1);
 
-	    num_cloned = vlib_buffer_clone (vm, bi0, rm->clones[thread_index],
-                                            rep0->rep_n_buckets,
+	    num_cloned = vlib_buffer_clone (vm, bi0, rm->clones[thread_index], rep0->rep_n_buckets,
 					    VLIB_BUFFER_CLONE_HEAD_SIZE);
 
 	    if (num_cloned != rep0->rep_n_buckets)
 	      {
-		vlib_node_increment_counter
-		  (vm, node->node_index,
-		   REPLICATE_DPO_ERROR_BUFFER_ALLOCATION_FAILURE, 1);
+		vlib_node_increment_counter (vm, node->node_index,
+					     REPLICATE_DPO_ERROR_BUFFER_ALLOCATION_FAILURE, 1);
 	      }
 
-            for (bucket = 0; bucket < num_cloned; bucket++)
-            {
-                ci0 = rm->clones[thread_index][bucket];
-                c0 = vlib_get_buffer(vm, ci0);
+	    for (bucket = 0; bucket < num_cloned; bucket++)
+	      {
+		ci0 = rm->clones[thread_index][bucket];
+		c0 = vlib_get_buffer (vm, ci0);
 
-                to_next[0] = ci0;
-                to_next += 1;
-                n_left_to_next -= 1;
+		to_next[0] = ci0;
+		to_next += 1;
+		n_left_to_next -= 1;
 
-                dpo0 = replicate_get_bucket_i(rep0, bucket);
-                next0 = dpo0->dpoi_next_node;
-                vnet_buffer (c0)->ip.adj_index[VLIB_TX] = dpo0->dpoi_index;
+		dpo0 = replicate_get_bucket_i (rep0, bucket);
+		next0 = dpo0->dpoi_next_node;
+		vnet_buffer (c0)->ip.adj_index[VLIB_TX] = dpo0->dpoi_index;
 
-                if (PREDICT_FALSE(b0->flags & VLIB_BUFFER_IS_TRACED))
-                {
-                    replicate_trace_t *t;
+		if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
+		  {
+		    replicate_trace_t *t;
 
-                    t = vlib_add_trace (vm, node, c0, sizeof (*t));
-                    t->rep_index = repi0;
-                    t->dpo = *dpo0;
-                }
+		    t = vlib_add_trace (vm, node, c0, sizeof (*t));
+		    t->rep_index = repi0;
+		    t->dpo = *dpo0;
+		  }
 
-                vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
-                                                 to_next, n_left_to_next,
-                                                 ci0, next0);
+		vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next, n_left_to_next, ci0,
+						 next0);
 		if (PREDICT_FALSE (n_left_to_next == 0))
 		  {
 		    vlib_put_next_frame (vm, node, next_index, n_left_to_next);
 		    vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
 		  }
-            }
+	      }
 	    vec_reset_length (rm->clones[thread_index]);
-        }
+	  }
 
-        vlib_put_next_frame (vm, node, next_index, n_left_to_next);
-    }
+	vlib_put_next_frame (vm, node, next_index, n_left_to_next);
+      }
 
     return frame->n_vectors;
 }

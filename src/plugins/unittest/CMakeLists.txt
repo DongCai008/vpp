@@ -62,6 +62,7 @@ add_vpp_plugin(unittest
   pool_test.c
   punt_shared_view_test.c
   punt_test.c
+  replicate_shared_view_test.c
   rbtree_test.c
   session_test.c
   sparse_vec_test.c
