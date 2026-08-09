@@ -54,4 +54,12 @@ int vnet_buffer_shinfo_clone (vlib_main_t *vm, u32 source_buffer_index, u32 *clo
 
 int vnet_buffer_shinfo_cow (vlib_main_t *vm, u32 *buffer_index);
 
+/** \brief Make a caller-owned shared view writable and reload its buffer pointer.
+
+    The caller owns @c *buffer_index and must publish a successful replacement
+    to every retained index alias. An ordinary buffer is unchanged. On failure,
+    both @c *buffer_index and @c *buffer describe the input buffer.
+*/
+int vnet_buffer_shinfo_make_writable (vlib_main_t *vm, u32 *buffer_index, vlib_buffer_t **buffer);
+
 #endif /* included_vnet_buffer_shinfo_h */

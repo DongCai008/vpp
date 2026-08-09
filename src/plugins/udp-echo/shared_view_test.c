@@ -87,8 +87,47 @@ udp_echo_shared_view_init_packet (vlib_buffer_t *buffer)
 }
 
 static int
+udp_echo_shared_view_ordinary_test (vlib_main_t *vm)
+{
+  vlib_buffer_t *forwarded;
+  vlib_buffer_t *input;
+  ip4_header_t *ip;
+  u32 buffer_index;
+  u32 forwarded_index = ~0;
+  u32 forwarded_runtime_index = ~0;
+  int ret = 0;
+
+  if (vlib_buffer_alloc (vm, &buffer_index, 1) != 1)
+    return 0;
+
+  input = vlib_get_buffer (vm, buffer_index);
+  udp_echo_shared_view_init_packet (input);
+  UDP_ECHO_TEST (udp_echo_shared_view_dispatch (vm, buffer_index, &forwarded_index,
+						&forwarded_runtime_index) == 0,
+		 "dispatch ordinary UDP echo buffer");
+  UDP_ECHO_TEST (forwarded_index == buffer_index, "retain ordinary UDP echo frame slot");
+  UDP_ECHO_TEST (forwarded_runtime_index ==
+		   vlib_node_runtime_get_next_frame (
+		     vm, vlib_node_get_runtime (vm, udp_echo_node.index), UDP_ECHO_NEXT_IP4_LOOKUP)
+		     ->node_runtime_index,
+		 "send ordinary UDP echo buffer to ip4-lookup");
+  forwarded = vlib_get_buffer (vm, forwarded_index);
+  UDP_ECHO_TEST (forwarded == input, "retain ordinary UDP echo buffer pointer");
+  ip = vlib_buffer_get_current (forwarded);
+  UDP_ECHO_TEST (ip->src_address.as_u32 == clib_host_to_net_u32 (0x0a000002) &&
+		   ip->dst_address.as_u32 == clib_host_to_net_u32 (0x0a000001),
+		 "rewrite ordinary UDP echo buffer");
+  ret = 1;
+
+done:
+  vlib_buffer_free_one (vm, forwarded_index == ~0 ? buffer_index : forwarded_index);
+  return ret;
+}
+
+static int
 udp_echo_shared_view_success_test (vlib_main_t *vm)
 {
+  vlib_buffer_t *descriptor;
   vlib_buffer_t *forwarded;
   vlib_buffer_t *root;
   ip4_header_t *ip;
@@ -111,6 +150,7 @@ udp_echo_shared_view_success_test (vlib_main_t *vm)
   udp_echo_shared_view_init_packet (root);
   UDP_ECHO_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
 		 "attach UDP echo shared-view descriptor");
+  descriptor = vlib_get_buffer (vm, buffers[1]);
   UDP_ECHO_TEST (
     udp_echo_shared_view_dispatch (vm, buffers[1], &forwarded_index, &forwarded_runtime_index) == 0,
     "dispatch UDP echo shared-view descriptor");
@@ -121,6 +161,7 @@ udp_echo_shared_view_success_test (vlib_main_t *vm)
 		     ->node_runtime_index,
 		 "send UDP echo COW replacement to ip4-lookup");
   forwarded = vlib_get_buffer (vm, forwarded_index);
+  UDP_ECHO_TEST (forwarded != descriptor, "reload UDP echo pointer after descriptor COW");
   UDP_ECHO_TEST (!vlib_buffer_shared_view_is_shared (forwarded),
 		 "forward ordinary UDP echo replacement after COW");
   ip = vlib_buffer_get_current (forwarded);
@@ -179,6 +220,8 @@ udp_echo_shared_view_failure_test (vlib_main_t *vm)
     "dispatch UDP echo COW-failure descriptor");
   descriptor->next_buffer = descriptor_next;
   UDP_ECHO_TEST (forwarded_index == buffers[1], "retain UDP echo descriptor after COW failure");
+  UDP_ECHO_TEST (vlib_get_buffer (vm, forwarded_index) == descriptor,
+		 "retain UDP echo pointer after COW failure");
   runtime = vlib_node_get_runtime (vm, udp_echo_node.index);
   UDP_ECHO_TEST (
     forwarded_runtime_index ==
@@ -199,7 +242,8 @@ done:
 static clib_error_t *
 test_udp_echo_shared_view_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
 {
-  if (!udp_echo_shared_view_success_test (vm) || !udp_echo_shared_view_failure_test (vm))
+  if (!udp_echo_shared_view_ordinary_test (vm) || !udp_echo_shared_view_success_test (vm) ||
+      !udp_echo_shared_view_failure_test (vm))
     return clib_error_return (0, "UDP echo shared-view test failed");
 
   return 0;

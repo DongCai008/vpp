@@ -4,6 +4,7 @@
 
 #include <vlib/vlib.h>
 #include <vnet/vnet.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/pg/pg.h>
 #include <vnet/ip/ip.h>
 #include <vnet/udp/udp_packet.h>
@@ -31,8 +32,7 @@ udp_echo_make_shared_views_writable (vlib_main_t *vm, vlib_node_runtime_t *node,
       u32 bi0 = *from++;
       vlib_buffer_t *b0 = vlib_get_buffer (vm, bi0);
 
-      if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)) &&
-	  vlib_buffer_shared_view_make_writable (vm, &bi0))
+      if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi0, &b0)))
 	{
 	  b0->error = node->errors[UDP_ECHO_ERROR_COW_FAIL];
 	  *failed++ = bi0;
