@@ -7,6 +7,7 @@
 #include <vlib/vlib.h>
 #include <dhcp/dhcp_proxy.h>
 #include <dhcp/client.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/fib/ip4_fib.h>
 
 static char *dhcp_proxy_error_strings[] = {
@@ -144,9 +145,8 @@ dhcp_proxy_to_server_input (vlib_main_t * vm,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
 	    {
-	      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &bi0)))
+	      if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi0, &b0)))
 		{
-		  b0 = vlib_get_buffer (vm, bi0);
 		  b0->error = node->errors[DHCP_PROXY_ERROR_ALLOC_FAIL];
 		  error0 = DHCP_PROXY_ERROR_ALLOC_FAIL;
 		  next0 = DHCP_PROXY_TO_SERVER_INPUT_NEXT_DROP;
@@ -154,7 +154,6 @@ dhcp_proxy_to_server_input (vlib_main_t * vm,
 					       DHCP_PROXY_ERROR_ALLOC_FAIL, 1);
 		  goto do_enqueue;
 		}
-	      b0 = vlib_get_buffer (vm, bi0);
 	    }
 
 	  h0 = vlib_buffer_get_current (b0);
@@ -554,9 +553,8 @@ dhcp_proxy_to_client_input (vlib_main_t * vm,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
 	    {
-	      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &bi0)))
+	      if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi0, &b0)))
 		{
-		  b0 = vlib_get_buffer (vm, bi0);
 		  b0->error = node->errors[DHCP_PROXY_ERROR_ALLOC_FAIL];
 		  error0 = DHCP_PROXY_ERROR_ALLOC_FAIL;
 		  next0 = DHCP4_PROXY_NEXT_DROP;
@@ -565,7 +563,6 @@ dhcp_proxy_to_client_input (vlib_main_t * vm,
 		  goto do_enqueue;
 		}
 	      to_next[-1] = bi0;
-	      b0 = vlib_get_buffer (vm, bi0);
 	    }
 	  h0 = vlib_buffer_get_current (b0);
 
