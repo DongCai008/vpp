@@ -212,8 +212,8 @@ ip_rewrite_shared_view_failure_test (vlib_main_t *vm, const char *node_name, boo
   descriptor->next_buffer = descriptor_next;
   IP_REWRITE_TEST (forwarded_index == buffers[1], "retain rewrite input after COW failure");
 
-  node = vlib_get_node_by_name (vm, (u8 *) node_name);
-  IP_REWRITE_TEST (node != 0, "find rewrite COW-failure node");
+  node = vlib_get_node_by_name (vm, (u8 *) (is_ip6 ? "ip6-input" : "ip4-input"));
+  IP_REWRITE_TEST (node != 0, "find rewrite COW-failure error node");
   IP_REWRITE_TEST (
     descriptor->error ==
       vlib_node_get_runtime (vm, node->index)

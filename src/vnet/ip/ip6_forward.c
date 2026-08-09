@@ -1757,7 +1757,7 @@ ip6_rewrite_make_shared_views_writable (vlib_main_t *vm, vlib_node_runtime_t *er
       vlib_buffer_t *p0 = vlib_get_buffer (vm, pi0);
 
       if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)) &&
-	  vlib_buffer_shared_view_make_writable (vm, &pi0))
+	  vnet_buffer_shinfo_make_writable (vm, &pi0, &p0))
 	{
 	  p0->error = error_node->errors[IP6_ERROR_REWRITE_NO_BUFFERS];
 	  *failed++ = pi0;
