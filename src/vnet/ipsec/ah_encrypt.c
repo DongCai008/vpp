@@ -119,13 +119,12 @@ ah_encrypt_inline (vlib_main_t * vm,
 
       if (PREDICT_TRUE (!vnet_buffer_shinfo_is_shared (bufs[i])))
 	continue;
-      if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi)))
+      if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi, &bufs[i])))
 	{
 	  cow_failed[i] = 1;
 	  continue;
 	}
       from[i] = bi;
-      bufs[i] = vlib_get_buffer (vm, bi);
     }
 
   while (n_left > 0)
