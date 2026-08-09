@@ -252,10 +252,36 @@ ip4_icmp_error (vlib_main_t * vm,
 	  vlib_buffer_t *p0, *org_p0;
 	  ip4_header_t *ip0, *out_ip0;
 	  icmp46_header_t *icmp0;
+	  u32 rx_sw_if_index0;
+	  u32 icmp_data0;
+	  u8 icmp_type0;
+	  u8 icmp_code0;
 	  u32 sw_if_index0;
 	  ip_csum_t sum;
 
 	  org_p0 = vlib_get_buffer (vm, org_pi0);
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (org_p0)))
+	    {
+	      rx_sw_if_index0 = vnet_buffer (org_p0)->sw_if_index[VLIB_RX];
+	      icmp_type0 = vnet_buffer (org_p0)->ip.icmp.type;
+	      icmp_code0 = vnet_buffer (org_p0)->ip.icmp.code;
+	      icmp_data0 = vnet_buffer (org_p0)->ip.icmp.data;
+
+	      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &org_pi0)))
+		{
+		  org_p0->error = node->errors[ICMP4_ERROR_DROP];
+		  from += 1;
+		  n_left_from -= 1;
+		  continue;
+		}
+
+	      from[0] = org_pi0;
+	      org_p0 = vlib_get_buffer (vm, org_pi0);
+	      vnet_buffer (org_p0)->sw_if_index[VLIB_RX] = rx_sw_if_index0;
+	      vnet_buffer (org_p0)->ip.icmp.type = icmp_type0;
+	      vnet_buffer (org_p0)->ip.icmp.code = icmp_code0;
+	      vnet_buffer (org_p0)->ip.icmp.data = icmp_data0;
+	    }
 	  ip0 = vlib_buffer_get_current (org_p0);
 
 	  /* Rate limit based on the src,dst addresses in the original packet
@@ -272,8 +298,13 @@ ip4_icmp_error (vlib_main_t * vm,
 	    }
 
 	  p0 = vlib_buffer_copy_no_chain (vm, org_p0, &pi0);
-	  if (!p0 || pi0 == ~0)	/* Out of buffers */
-	    continue;
+	  if (!p0 || pi0 == ~0) /* Out of buffers */
+	    {
+	      org_p0->error = node->errors[ICMP4_ERROR_DROP];
+	      from += 1;
+	      n_left_from -= 1;
+	      continue;
+	    }
 
 	  /* Speculatively enqueue p0 to the current next frame */
 	  to_next[0] = pi0;

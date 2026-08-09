@@ -48,6 +48,7 @@ add_vpp_plugin(unittest
   fib_test.c
   gso_test.c
   ip_frag_shared_view_test.c
+  icmp_error_shared_view_test.c
   ip6_hbh_shared_view_test.c
   ip_rewrite_shared_view_test.c
   l2_flood_shared_view_test.c
