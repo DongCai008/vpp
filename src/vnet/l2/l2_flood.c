@@ -16,7 +16,6 @@
 #include <vppinfra/error.h>
 #include <vppinfra/hash.h>
 
-
 /**
  * @file
  * @brief Ethernet Flooding.
@@ -31,7 +30,6 @@
  * the same graph node. This node can tell if is it being called as the "prep"
  * or "recycle" using replication_is_recycled().
  */
-
 
 typedef struct
 {
@@ -59,19 +57,16 @@ typedef struct
   u16 bd_index;
 } l2flood_trace_t;
 
-
 /* packet trace format function */
 static u8 *
-format_l2flood_trace (u8 * s, va_list * args)
+format_l2flood_trace (u8 *s, va_list *args)
 {
   CLIB_UNUSED (vlib_main_t * vm) = va_arg (*args, vlib_main_t *);
   CLIB_UNUSED (vlib_node_t * node) = va_arg (*args, vlib_node_t *);
   l2flood_trace_t *t = va_arg (*args, l2flood_trace_t *);
 
-  s = format (s, "l2-flood: sw_if_index %d dst %U src %U bd_index %d",
-	      t->sw_if_index,
-	      format_ethernet_address, t->dst,
-	      format_ethernet_address, t->src, t->bd_index);
+  s = format (s, "l2-flood: sw_if_index %d dst %U src %U bd_index %d", t->sw_if_index,
+	      format_ethernet_address, t->dst, format_ethernet_address, t->src, t->bd_index);
   return s;
 }
 
@@ -81,23 +76,24 @@ extern l2flood_main_t l2flood_main;
 l2flood_main_t l2flood_main;
 #endif /* CLIB_MARCH_VARIANT */
 
-#define foreach_l2flood_error					\
-_(L2FLOOD,           "L2 flood packets")			\
-_(REPL_FAIL,         "L2 replication failures")			\
-_(NO_MEMBERS,        "L2 replication complete")			\
-_(BVI_BAD_MAC,       "BVI L3 mac mismatch")		        \
-_(BVI_ETHERTYPE,     "BVI packet with unhandled ethertype")
+#define foreach_l2flood_error                                                                      \
+  _ (L2FLOOD, "L2 flood packets")                                                                  \
+  _ (COW_FAIL, "L2 shared-view copy failures")                                                     \
+  _ (REPL_FAIL, "L2 replication failures")                                                         \
+  _ (NO_MEMBERS, "L2 replication complete")                                                        \
+  _ (BVI_BAD_MAC, "BVI L3 mac mismatch")                                                           \
+  _ (BVI_ETHERTYPE, "BVI packet with unhandled ethertype")
 
 typedef enum
 {
-#define _(sym,str) L2FLOOD_ERROR_##sym,
+#define _(sym, str) L2FLOOD_ERROR_##sym,
   foreach_l2flood_error
 #undef _
     L2FLOOD_N_ERROR,
 } l2flood_error_t;
 
 static char *l2flood_error_strings[] = {
-#define _(sym,string) string,
+#define _(sym, string) string,
   foreach_l2flood_error
 #undef _
 };
@@ -124,8 +120,8 @@ typedef enum
  * could be turned into an ICMP reply. If BVI processing is not performed
  * last, the modified packet would be replicated to the remaining members.
  */
-VLIB_NODE_FN (l2flood_node) (vlib_main_t * vm,
-			     vlib_node_runtime_t * node, vlib_frame_t * frame)
+VLIB_NODE_FN (l2flood_node)
+(vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
   u32 n_left_from, *from, *to_next;
   l2flood_next_t next_index;
@@ -147,6 +143,7 @@ VLIB_NODE_FN (l2flood_node) (vlib_main_t * vm,
 	  u16 n_clones, n_cloned, clone0;
 	  l2_bridge_domain_t *bd_config;
 	  u32 sw_if_index0, bi0, ci0;
+	  u16 bd_index0;
 	  l2_flood_member_t *member;
 	  vlib_buffer_t *b0, *c0;
 	  u16 next0;
@@ -160,15 +157,33 @@ VLIB_NODE_FN (l2flood_node) (vlib_main_t * vm,
 	  next0 = L2FLOOD_NEXT_L2_OUTPUT;
 
 	  b0 = vlib_get_buffer (vm, bi0);
-
-	  /* Get config for the bridge domain interface */
-	  bd_config = vec_elt_at_index (l2input_main.bd_configs,
-					vnet_buffer (b0)->l2.bd_index);
+	  bd_index0 = vnet_buffer (b0)->l2.bd_index;
 	  in_shg = vnet_buffer (b0)->l2.shg;
 	  sw_if_index0 = vnet_buffer (b0)->sw_if_index[VLIB_RX];
 
-	  vec_validate (msm->members[thread_index],
-			vec_len (bd_config->members));
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
+	    {
+	      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &bi0)))
+		{
+		  b0->error = node->errors[L2FLOOD_ERROR_COW_FAIL];
+		  to_next[0] = bi0;
+		  to_next += 1;
+		  n_left_to_next -= 1;
+		  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next, n_left_to_next,
+						   bi0, L2FLOOD_NEXT_DROP);
+		  continue;
+		}
+
+	      b0 = vlib_get_buffer (vm, bi0);
+	      vnet_buffer (b0)->l2.bd_index = bd_index0;
+	      vnet_buffer (b0)->l2.shg = in_shg;
+	      vnet_buffer (b0)->sw_if_index[VLIB_RX] = sw_if_index0;
+	    }
+
+	  /* Get config for the bridge domain interface */
+	  bd_config = vec_elt_at_index (l2input_main.bd_configs, bd_index0);
+
+	  vec_validate (msm->members[thread_index], vec_len (bd_config->members));
 
 	  vec_reset_length (msm->members[thread_index]);
 
@@ -176,8 +191,7 @@ VLIB_NODE_FN (l2flood_node) (vlib_main_t * vm,
 	  for (mi = bd_config->flood_count - 1; mi >= 0; mi--)
 	    {
 	      member = &bd_config->members[mi];
-	      if ((member->sw_if_index != sw_if_index0) &&
-		  (!in_shg || (member->shg != in_shg)))
+	      if ((member->sw_if_index != sw_if_index0) && (!in_shg || (member->shg != in_shg)))
 		{
 		  vec_add1 (msm->members[thread_index], member);
 		}
@@ -193,9 +207,8 @@ VLIB_NODE_FN (l2flood_node) (vlib_main_t * vm,
 	      n_left_to_next -= 1;
 
 	      b0->error = node->errors[L2FLOOD_ERROR_NO_MEMBERS];
-	      vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
-					       to_next, n_left_to_next,
-					       bi0, L2FLOOD_NEXT_DROP);
+	      vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next, n_left_to_next, bi0,
+					       L2FLOOD_NEXT_DROP);
 	      continue;
 	    }
 	  else if (n_clones > 1)
@@ -208,9 +221,7 @@ VLIB_NODE_FN (l2flood_node) (vlib_main_t * vm,
 	       * processing. So take the current l2 length plus 2 * IPv6
 	       * headers (for tunnel encap)
 	       */
-	      n_cloned = vlib_buffer_clone (vm, bi0,
-					    msm->clones[thread_index],
-					    n_clones,
+	      n_cloned = vlib_buffer_clone (vm, bi0, msm->clones[thread_index], n_clones,
 					    VLIB_BUFFER_CLONE_HEAD_SIZE);
 
 	      vec_set_len (msm->clones[thread_index], n_cloned);
@@ -255,18 +266,14 @@ VLIB_NODE_FN (l2flood_node) (vlib_main_t * vm,
 		    }
 
 		  /* Do normal L2 forwarding */
-		  vnet_buffer (c0)->sw_if_index[VLIB_TX] =
-		    member->sw_if_index;
+		  vnet_buffer (c0)->sw_if_index[VLIB_TX] = member->sw_if_index;
 
-		  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
-						   to_next, n_left_to_next,
+		  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next, n_left_to_next,
 						   ci0, next0);
 		  if (PREDICT_FALSE (0 == n_left_to_next))
 		    {
-		      vlib_put_next_frame (vm, node, next_index,
-					   n_left_to_next);
-		      vlib_get_next_frame (vm, node, next_index, to_next,
-					   n_left_to_next);
+		      vlib_put_next_frame (vm, node, next_index, n_left_to_next);
+		      vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
 		    }
 		}
 	      member = msm->members[thread_index][clone0];
@@ -307,9 +314,7 @@ VLIB_NODE_FN (l2flood_node) (vlib_main_t * vm,
 	    {
 	      /* Do BVI processing */
 	      u32 rc;
-	      rc = l2_to_bvi (vm,
-			      msm->vnet_main,
-			      c0, member->sw_if_index, &msm->l3_next, &next0);
+	      rc = l2_to_bvi (vm, msm->vnet_main, c0, member->sw_if_index, &msm->l3_next, &next0);
 
 	      if (PREDICT_FALSE (rc != TO_BVI_ERR_OK))
 		{
@@ -330,26 +335,22 @@ VLIB_NODE_FN (l2flood_node) (vlib_main_t * vm,
 	      vnet_buffer (c0)->sw_if_index[VLIB_TX] = member->sw_if_index;
 	    }
 
-	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index,
-					   to_next, n_left_to_next,
-					   ci0, next0);
+	  vlib_validate_buffer_enqueue_x1 (vm, node, next_index, to_next, n_left_to_next, ci0,
+					   next0);
 	  if (PREDICT_FALSE (0 == n_left_to_next))
 	    {
 	      vlib_put_next_frame (vm, node, next_index, n_left_to_next);
-	      vlib_get_next_frame (vm, node, next_index,
-				   to_next, n_left_to_next);
+	      vlib_get_next_frame (vm, node, next_index, to_next, n_left_to_next);
 	    }
 	}
 
       vlib_put_next_frame (vm, node, next_index, n_left_to_next);
     }
 
-  vlib_node_increment_counter (vm, node->node_index,
-			       L2FLOOD_ERROR_L2FLOOD, frame->n_vectors);
+  vlib_node_increment_counter (vm, node->node_index, L2FLOOD_ERROR_L2FLOOD, frame->n_vectors);
 
   return frame->n_vectors;
 }
-
 
 VLIB_REGISTER_NODE (l2flood_node) = {
   .name = "l2-flood",
@@ -371,7 +372,7 @@ VLIB_REGISTER_NODE (l2flood_node) = {
 
 #ifndef CLIB_MARCH_VARIANT
 clib_error_t *
-l2flood_init (vlib_main_t * vm)
+l2flood_init (vlib_main_t *vm)
 {
   l2flood_main_t *mp = &l2flood_main;
 
@@ -382,10 +383,7 @@ l2flood_init (vlib_main_t * vm)
   vec_validate (mp->members, vlib_num_workers ());
 
   /* Initialize the feature next-node indexes */
-  feat_bitmap_init_next_nodes (vm,
-			       l2flood_node.index,
-			       L2INPUT_N_FEAT,
-			       l2input_get_feat_names (),
+  feat_bitmap_init_next_nodes (vm, l2flood_node.index, L2INPUT_N_FEAT, l2input_get_feat_names (),
 			       mp->feat_next_node_index);
 
   return NULL;
@@ -393,12 +391,9 @@ l2flood_init (vlib_main_t * vm)
 
 VLIB_INIT_FUNCTION (l2flood_init);
 
-
-
 /** Add the L3 input node for this ethertype to the next nodes structure. */
 void
-l2flood_register_input_type (vlib_main_t * vm,
-			     ethernet_type_t type, u32 node_index)
+l2flood_register_input_type (vlib_main_t *vm, ethernet_type_t type, u32 node_index)
 {
   l2flood_main_t *mp = &l2flood_main;
   u32 next_index;
@@ -409,15 +404,13 @@ l2flood_register_input_type (vlib_main_t * vm,
 }
 #endif /* CLIB_MARCH_VARIANT */
 
-
 /**
  * Set subinterface flood enable/disable.
  * The CLI format is:
  * set interface l2 flood <interface> [disable]
  */
 static clib_error_t *
-int_flood (vlib_main_t * vm,
-	   unformat_input_t * input, vlib_cli_command_t * cmd)
+int_flood (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
 {
   vnet_main_t *vnm = vnet_get_main ();
   clib_error_t *error = 0;
@@ -426,8 +419,7 @@ int_flood (vlib_main_t * vm,
 
   if (!unformat_user (input, unformat_vnet_sw_interface, vnm, &sw_if_index))
     {
-      error = clib_error_return (0, "unknown interface `%U'",
-				 format_unformat_error, input);
+      error = clib_error_return (0, "unknown interface `%U'", format_unformat_error, input);
       goto done;
     }
 

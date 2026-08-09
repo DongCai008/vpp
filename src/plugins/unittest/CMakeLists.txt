@@ -49,6 +49,7 @@ add_vpp_plugin(unittest
   gso_test.c
   ip_frag_shared_view_test.c
   ip_rewrite_shared_view_test.c
+  l2_flood_shared_view_test.c
   hash_test.c
   interface_test.c
   ipsec_test.c
