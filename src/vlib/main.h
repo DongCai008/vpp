@@ -16,9 +16,9 @@
 #include <vppinfra/pool.h>
 #include <vppinfra/random_buffer.h>
 #include <vppinfra/time.h>
+#include <vlib/config.h>
 
 #include <pthread.h>
-
 
 /* By default turn off node/error event logging.
    Override with -DVLIB_ELOG_MAIN_LOOP */
@@ -241,9 +241,14 @@ typedef struct vlib_main_t
   uword *processing_rpc_requests;
   clib_spinlock_t pending_rpc_lock;
 
-  /* buffer fault injector */
+  /* Random buffer fault injector */
   u32 buffer_alloc_success_seed;
   f64 buffer_alloc_success_rate;
+#if VLIB_BUFFER_ALLOC_FAULT_INJECTOR > 0
+  /* Test-only ordered allocation-fault state for this VLIB thread. */
+  u64 buffer_alloc_fault_ordinal;
+  u64 buffer_alloc_fault_fail_at;
+#endif
 
   /* Timing wheel for scheduling time-based node dispatch. */
   void *timing_wheel;

@@ -284,13 +284,116 @@ done:
   return ret;
 }
 
+static int
+icmp_error_shared_view_output_copy_failure_test (vlib_main_t *vm, const char *node_name, int is_ip6,
+						 u32 expected_error)
+{
+  vlib_buffer_t *buffer;
+  vlib_buffer_t *root;
+  vlib_node_t *node;
+  vlib_node_runtime_t *runtime;
+  u32 buffers[2];
+  u32 forwarded_indices[2] = { ~0, ~0 };
+  u32 forwarded_runtime_indices[2] = { ~0, ~0 };
+  u32 n_alloc;
+  u32 n_forwarded = 0;
+  u32 pending_len = 0;
+  f64 success_rate;
+  int ret = 0;
+
+  if (vlib_buffer_alloc_fault_injector_set (vm, 0))
+    return 1;
+
+  success_rate = vm->buffer_alloc_success_rate;
+  vm->buffer_alloc_success_rate = 1.0;
+  n_alloc = vlib_buffer_alloc (vm, buffers, ARRAY_LEN (buffers));
+  if (n_alloc != ARRAY_LEN (buffers))
+    {
+      if (n_alloc)
+	vlib_buffer_free (vm, buffers, n_alloc);
+      vm->buffer_alloc_success_rate = success_rate;
+      return 0;
+    }
+
+  root = vlib_get_buffer (vm, buffers[0]);
+  if (is_ip6)
+    {
+      icmp_error_shared_view_init_ip6 (root);
+      ((ip6_header_t *) vlib_buffer_get_current (root))->src_address.as_u8[15] = 3;
+    }
+  else
+    {
+      ip4_header_t *ip;
+
+      icmp_error_shared_view_init_ip4 (root);
+      ip = vlib_buffer_get_current (root);
+      ip->src_address.as_u32 = clib_host_to_net_u32 (0xc0000203);
+      ip->checksum = ip4_header_checksum (ip);
+    }
+
+  ICMP_ERROR_SHARED_VIEW_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+			       "attach output-copy-failure descriptor");
+  buffer = vlib_get_buffer (vm, buffers[1]);
+  vnet_buffer (buffer)->sw_if_index[VLIB_RX] = 0;
+  vnet_buffer (buffer)->ip.icmp.type = is_ip6 ? ICMP6_time_exceeded : ICMP4_time_exceeded;
+  vnet_buffer (buffer)->ip.icmp.code = is_ip6 ? ICMP6_time_exceeded_ttl_exceeded_in_transit :
+						ICMP4_time_exceeded_ttl_exceeded_in_transit;
+  vnet_buffer (buffer)->ip.icmp.data = 0x55667788;
+
+  ICMP_ERROR_SHARED_VIEW_TEST (vlib_buffer_alloc_fault_injector_set (vm, 2) == 0,
+			       "fail ICMP output copy after shared-view COW");
+  ICMP_ERROR_SHARED_VIEW_TEST (
+    icmp_error_shared_view_dispatch (vm, node_name, buffers[1], forwarded_indices,
+				     forwarded_runtime_indices, ARRAY_LEN (forwarded_indices),
+				     &n_forwarded, &pending_len) == 0,
+    "dispatch shared view with failed ICMP output copy");
+
+  node = vlib_get_node_by_name (vm, (u8 *) node_name);
+  runtime = vlib_node_get_runtime (vm, node->index);
+  ICMP_ERROR_SHARED_VIEW_TEST (
+    n_forwarded == 1 && forwarded_indices[0] != buffers[1],
+    "retain only the ordinary COW replacement after output-copy failure");
+  ICMP_ERROR_SHARED_VIEW_TEST (
+    forwarded_runtime_indices[0] ==
+      vlib_node_runtime_get_next_frame (vm, runtime, 0)->node_runtime_index,
+    "send failed ICMP output copy to the existing drop next");
+  buffer = vlib_get_buffer (vm, forwarded_indices[0]);
+  ICMP_ERROR_SHARED_VIEW_TEST (buffer->error == runtime->errors[expected_error],
+			       "account failed ICMP output copy as a drop");
+  ICMP_ERROR_SHARED_VIEW_TEST (!vlib_buffer_shared_view_is_shared (buffer),
+			       "drop the ordinary COW replacement after output-copy failure");
+  if (is_ip6)
+    ICMP_ERROR_SHARED_VIEW_TEST (
+      ((ip6_header_t *) vlib_buffer_get_current (root))->src_address.as_u8[15] == 3,
+      "leave the canonical IPv6 root unchanged after output-copy failure");
+  else
+    ICMP_ERROR_SHARED_VIEW_TEST (
+      ((ip4_header_t *) vlib_buffer_get_current (root))->src_address.as_u32 ==
+	clib_host_to_net_u32 (0xc0000203),
+      "leave the canonical IPv4 root unchanged after output-copy failure");
+  ret = 1;
+
+done:
+  vlib_buffer_alloc_fault_injector_set (vm, 0);
+  vm->buffer_alloc_success_rate = success_rate;
+  if (pending_len || n_forwarded)
+    icmp_error_shared_view_clear_pending (vm, pending_len, 1);
+  else
+    vlib_buffer_free_one (vm, buffers[1]);
+  vlib_buffer_free_one (vm, buffers[0]);
+  return ret;
+}
+
 static clib_error_t *
 test_icmp_error_shared_view_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
 {
   if (!icmp_error_shared_view_success_test (vm, "ip4-icmp-error", 0) ||
       !icmp_error_shared_view_success_test (vm, "ip6-icmp-error", 1) ||
       !icmp_error_shared_view_failure_test (vm, "ip4-icmp-error", ICMP4_ERROR_DROP) ||
-      !icmp_error_shared_view_failure_test (vm, "ip6-icmp-error", ICMP6_ERROR_DROP))
+      !icmp_error_shared_view_failure_test (vm, "ip6-icmp-error", ICMP6_ERROR_DROP) ||
+      !icmp_error_shared_view_output_copy_failure_test (vm, "ip4-icmp-error", 0,
+							ICMP4_ERROR_DROP) ||
+      !icmp_error_shared_view_output_copy_failure_test (vm, "ip6-icmp-error", 1, ICMP6_ERROR_DROP))
     return clib_error_return (0, "ICMP error shared-view test failed");
 
   return 0;

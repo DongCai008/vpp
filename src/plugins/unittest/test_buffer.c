@@ -619,3 +619,47 @@ VLIB_CLI_COMMAND (test_linearize_speed_command, static) = {
   .short_help = "test chained-buffer-linearization speed",
   .function = test_linearize_speed_fn,
 };
+
+static clib_error_t *
+test_buffer_alloc_fault_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
+{
+  f64 success_rate;
+  u32 buffer_indices[2];
+  u32 n_alloc = 0;
+  u32 n_second_alloc = 0;
+  int ret = 0;
+
+  if (vlib_buffer_alloc_fault_injector_set (vm, 0))
+    {
+      vlib_cli_output (vm, "buffer allocation fault injector is not configured");
+      return 0;
+    }
+
+  success_rate = vm->buffer_alloc_success_rate;
+  vm->buffer_alloc_success_rate = 1.0;
+
+  TEST (vlib_buffer_alloc_fault_injector_set (vm, 2) == 0, "arm the second allocation request");
+  n_alloc = vlib_buffer_alloc (vm, &buffer_indices[0], 1);
+  TEST (n_alloc == 1, "allow the request before the selected ordinal");
+  TEST (vlib_buffer_alloc (vm, &buffer_indices[1], 1) == 0,
+	"fail exactly the selected allocation request");
+  n_second_alloc = vlib_buffer_alloc (vm, &buffer_indices[1], 1);
+  TEST (n_second_alloc == 1, "disarm after the selected allocation request");
+  TEST (vlib_buffer_alloc_fault_injector_set (vm, 0) == 0, "disarm an ordered allocation fault");
+  ret = 1;
+
+err:
+  vlib_buffer_alloc_fault_injector_set (vm, 0);
+  vm->buffer_alloc_success_rate = success_rate;
+  if (n_alloc)
+    vlib_buffer_free_one (vm, buffer_indices[0]);
+  if (n_second_alloc)
+    vlib_buffer_free_one (vm, buffer_indices[1]);
+  return ret ? 0 : clib_error_return (0, "buffer allocation fault test failed");
+}
+
+VLIB_CLI_COMMAND (test_buffer_alloc_fault_command, static) = {
+  .path = "test buffer-alloc-fault",
+  .short_help = "test buffer-alloc-fault",
+  .function = test_buffer_alloc_fault_fn,
+};

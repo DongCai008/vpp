@@ -23,6 +23,7 @@ typedef u32 vlib_log_class_t;
 /* All includes in alphabetical order. */
 #include <vlib/physmem.h>
 #include <vlib/buffer.h>
+#include <vlib/buffer_fault_injector.h>
 #include <vlib/cli.h>
 #include <vlib/counter.h>
 #include <vlib/error.h>

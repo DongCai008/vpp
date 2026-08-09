@@ -1186,6 +1186,18 @@ vlib_buffer_alloc_may_fail (vlib_main_t * vm, u32 n_buffers)
 {
   f64 r;
 
+  if (PREDICT_FALSE (vm->buffer_alloc_fault_fail_at))
+    {
+      vm->buffer_alloc_fault_ordinal++;
+      if (vm->buffer_alloc_fault_ordinal == vm->buffer_alloc_fault_fail_at)
+	{
+	  vm->buffer_alloc_fault_fail_at = 0;
+	  return 0;
+	}
+
+      return n_buffers;
+    }
+
   r = random_f64 (&vm->buffer_alloc_success_seed);
 
   /* Fail this request? */
@@ -1211,6 +1223,18 @@ vlib_buffer_set_alloc_free_callback (
   bm->alloc_callback_fn = alloc_callback_fn;
   bm->free_callback_fn = free_callback_fn;
   return 0;
+}
+
+int
+vlib_buffer_alloc_fault_injector_set (vlib_main_t *vm, u64 fail_at)
+{
+#if VLIB_BUFFER_ALLOC_FAULT_INJECTOR > 0
+  vm->buffer_alloc_fault_ordinal = 0;
+  vm->buffer_alloc_fault_fail_at = fail_at;
+  return 0;
+#else
+  return -1;
+#endif
 }
 
 /** @endcond */
