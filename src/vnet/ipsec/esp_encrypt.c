@@ -501,13 +501,12 @@ esp_encrypt_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
       if ((bufs[i]->flags & (VNET_BUFFER_F_SHARED_ROOT | VNET_BUFFER_F_SHARED_DESCRIPTOR)) == 0)
 	continue;
-      if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi)))
+      if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi, &bufs[i])))
 	{
 	  cow_failed[i] = 1;
 	  continue;
 	}
       from[i] = bi;
-      bufs[i] = vlib_get_buffer (vm, bi);
     }
 
   vec_reset_length (ptd->crypto_ops);
