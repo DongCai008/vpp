@@ -1061,6 +1061,91 @@ interface_drop_punt (vlib_main_t * vm,
   return frame->n_vectors;
 }
 
+static void
+pcap_drop_trace_shared_view (vlib_main_t *vm, vnet_pcap_t *pp,
+			     vlib_buffer_t *buffer, u32 buffer_index)
+{
+  vnet_buffer_shinfo_t shinfo;
+  vlib_error_main_t *em = &vm->error_main;
+  vlib_buffer_t *root, *tail, *capture, *last;
+  vlib_node_t *node;
+  u8 *contents = 0;
+  u32 root_index;
+  u32 capture_index = ~0;
+  i16 l2_hdr_offset;
+  i64 root_end;
+  uword first_buffer_bytes;
+  uword contents_len;
+  uword error_string_len;
+  uword drop_string_len;
+  u32 error_node_index;
+
+  if (vnet_buffer_shinfo_get (vm, buffer_index, &shinfo) ||
+      vlib_buffer_shared_view_root (vm, buffer_index, &root_index))
+    return;
+
+  root = vlib_get_buffer_checked (vm, root_index);
+  if (root == 0 || !(root->flags & VNET_BUFFER_F_L2_HDR_OFFSET_VALID))
+    return;
+
+  l2_hdr_offset = vnet_buffer (root)->l2_hdr_offset;
+  root_end = (i64) root->current_data + root->current_length;
+  if (l2_hdr_offset < -VLIB_BUFFER_PRE_DATA_SIZE || l2_hdr_offset >= root_end)
+    return;
+
+  first_buffer_bytes = root_end - l2_hdr_offset;
+  tail = vlib_get_next_buffer (vm, root);
+  if (first_buffer_bytes > ~0 - vlib_buffer_chain_view_length (vm, tail, 0))
+    return;
+  contents_len = first_buffer_bytes + vlib_buffer_chain_view_length (vm, tail, 0);
+  if (contents_len == 0)
+    return;
+
+  vec_validate (contents, contents_len - 1);
+  if (vnet_buffer_l2_snapshot (vm, buffer, contents, contents_len) != contents_len ||
+      vlib_buffer_add_data (vm, &capture_index, contents, contents_len))
+    goto done;
+
+  capture = vlib_get_buffer (vm, capture_index);
+  last = capture;
+  while (last->flags & VLIB_BUFFER_NEXT_PRESENT)
+    last = vlib_get_buffer (vm, last->next_buffer);
+
+  if (buffer->error >= vec_len (em->counters_heap) ||
+      buffer->error >= vec_len (vm->node_main.node_by_error))
+    goto capture;
+
+  error_string_len = clib_strnlen (em->counters_heap[buffer->error].name, 128);
+  error_node_index = vm->node_main.node_by_error[buffer->error];
+  node = vlib_get_node (vm, error_node_index);
+  if (node == 0)
+    goto capture;
+
+  drop_string_len = error_string_len + vec_len (node->name) + 2;
+  if (last->current_data + last->current_length <
+      VLIB_BUFFER_DEFAULT_DATA_SIZE - drop_string_len)
+    {
+      clib_memcpy_fast (vlib_buffer_get_current (last) + last->current_length,
+			node->name, vec_len (node->name));
+      clib_memcpy_fast (vlib_buffer_get_current (last) + last->current_length +
+			vec_len (node->name),
+			": ", 2);
+      clib_memcpy_fast (vlib_buffer_get_current (last) + last->current_length +
+			vec_len (node->name) + 2,
+			em->counters_heap[buffer->error].name, error_string_len);
+      last->current_length += drop_string_len;
+      capture->flags &= ~VLIB_BUFFER_TOTAL_LENGTH_VALID;
+    }
+
+capture:
+  pcap_add_buffer (&pp->pcap_main, vm, capture_index, pp->max_bytes_per_pkt);
+
+done:
+  if (capture_index != ~0)
+    vlib_buffer_free_one (vm, capture_index);
+  vec_free (contents);
+}
+
 static inline void
 pcap_drop_trace (vlib_main_t * vm,
 		 vnet_interface_main_t * im,
@@ -1089,9 +1174,18 @@ pcap_drop_trace (vlib_main_t * vm,
       from++;
       n_left--;
 
-      /* Drop capture rewinds and appends an error suffix in place. */
+      /* Shared descriptors are captured through a disposable ordinary chain. */
       if (vnet_buffer_shinfo_is_shared (b0))
-	continue;
+	{
+	  /* See if we're pointedly ignoring this specific error */
+	  if (im->pcap_drop_filter_hash &&
+	      hash_get (im->pcap_drop_filter_hash, b0->error))
+	    continue;
+
+	  if (vnet_is_packet_pcaped (pp, b0, ~0))
+	    pcap_drop_trace_shared_view (vm, pp, b0, bi0);
+	  continue;
+	}
 
       /* See if we're pointedly ignoring this specific error */
       if (im->pcap_drop_filter_hash
