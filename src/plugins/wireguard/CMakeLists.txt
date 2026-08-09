@@ -38,6 +38,7 @@ add_vpp_plugin(wireguard
   wireguard_if.h
   wireguard_input.c
   wireguard_output_tun.c
+  wireguard_output_shared_view_test.c
   wireguard_handoff.c
   wireguard_hchacha20.h
   wireguard_key.c
