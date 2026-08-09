@@ -52,6 +52,7 @@ add_vpp_plugin(unittest
   pmtu_shared_view_test.c
   icmp_error_shared_view_test.c
   ip6_hbh_shared_view_test.c
+  ip6_ra_shared_view_test.c
   ip_rewrite_shared_view_test.c
   l2_flood_shared_view_test.c
   hash_test.c

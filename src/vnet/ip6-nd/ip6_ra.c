@@ -41,6 +41,26 @@ typedef CLIB_PACKED (struct
   prefix[0];
 }) icmp6_router_advertisement_packet_t;
 
+static_always_inline int
+icmp6_router_solicitation_preparse_cow (vlib_main_t *vm, u32 *buffer_index, vlib_buffer_t **buffer)
+{
+  struct
+  {
+    ip6_header_t ip;
+    icmp6_neighbor_discovery_header_t neighbor;
+  } header;
+
+  if (!vlib_buffer_shared_view_is_shared (*buffer))
+    return 0;
+
+  if (vlib_buffer_chain_view_copy (vm, *buffer, (u8 *) &header, sizeof (header), 0) !=
+	sizeof (header) ||
+      clib_net_to_host_u16 (header.ip.payload_length) < sizeof (header.neighbor))
+    return -1;
+
+  return vnet_buffer_shinfo_make_writable (vm, buffer_index, buffer) ? -2 : 0;
+}
+
 #define DEF_MAX_RADV_INTERVAL 200
 #define DEF_MIN_RADV_INTERVAL .75 * DEF_MAX_RADV_INTERVAL
 #define DEF_CURR_HOP_LIMIT  64
@@ -249,6 +269,17 @@ icmp6_router_solicitation (vlib_main_t * vm,
 	  n_left_to_next -= 1;
 
 	  p0 = vlib_get_buffer (vm, bi0);
+	  error0 = ICMP6_ERROR_NONE;
+	  next0 = ICMP6_ROUTER_SOLICITATION_NEXT_DROP;
+	  int shared_view_result = icmp6_router_solicitation_preparse_cow (vm, &bi0, &p0);
+	  if (PREDICT_FALSE (shared_view_result))
+	    {
+	      if (shared_view_result == -2)
+		error0 = ICMP6_ERROR_ALLOC_FAILURE;
+	      goto drop0;
+	    }
+	  to_next[-1] = bi0;
+
 	  ip0 = vlib_buffer_get_current (p0);
 	  h0 = ip6_next_header (ip0);
 	  options_len0 =
@@ -257,7 +288,6 @@ icmp6_router_solicitation (vlib_main_t * vm,
 	  is_link_local =
 	    ip6_address_is_link_local_unicast (&ip0->src_address);
 
-	  error0 = ICMP6_ERROR_NONE;
 	  sw_if_index0 = vnet_buffer (p0)->sw_if_index[VLIB_RX];
 
 	  /* check if solicitation  (not from nd_timer node) */
@@ -305,9 +335,6 @@ icmp6_router_solicitation (vlib_main_t * vm,
 	      ip_neighbor_learn_dp (&learn);
 	    }
 
-	  /* default is to drop */
-	  next0 = ICMP6_ROUTER_SOLICITATION_NEXT_DROP;
-
 	  if (error0 == ICMP6_ERROR_NONE)
 	    {
 	      vnet_sw_interface_t *sw_if0;
@@ -333,17 +360,6 @@ icmp6_router_solicitation (vlib_main_t * vm,
 			      error0);
 		  if (error0 == ICMP6_ERROR_NONE)
 		    {
-		      if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
-			{
-			  error0 = ICMP6_ERROR_ALLOC_FAILURE;
-			  goto drop0;
-			}
-
-		      p0 = vlib_get_buffer (vm, bi0);
-		      ip0 = vlib_buffer_get_current (p0);
-		      h0 = ip6_next_header (ip0);
-		      to_next[-1] = bi0;
-
 		      f64 now = vlib_time_now (vm);
 
 		      /* adjust the sizeof the buffer to just include
