@@ -9,6 +9,7 @@
  *
  */
 #include <vlib/vlib.h>
+#include <vnet/buffer_shinfo.h>
 #include <lisp/lisp-gpe/lisp_gpe.h>
 
 typedef struct
@@ -134,7 +135,7 @@ lisp_gpe_make_shared_views_writable (vlib_main_t *vm, vlib_node_runtime_t *node,
       vlib_buffer_t *b0 = vlib_get_buffer (vm, bi0);
 
       if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)) &&
-	  vlib_buffer_shared_view_make_writable (vm, &bi0))
+	  vnet_buffer_shinfo_make_writable (vm, &bi0, &b0))
 	{
 	  b0->error = node->errors[LISP_GPE_ERROR_NO_BUFFERS];
 	  *failed++ = bi0;
