@@ -8,6 +8,7 @@
 #define __ARP_PACKET_H__
 
 #include <vnet/arp/arp.h>
+#include <vnet/buffer_shinfo.h>
 
 /* Either we drop the packet or we send a reply to the sender. */
 typedef enum
@@ -22,7 +23,7 @@ arp_buffer_make_writable (vlib_main_t *vm, u32 *buffer_index, vlib_buffer_t **bu
 {
   if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (*buffer)))
     {
-      if (vlib_buffer_shared_view_make_writable (vm, buffer_index))
+      if (vnet_buffer_shinfo_make_writable (vm, buffer_index, buffer))
 	return -1;
       *buffer = vlib_get_buffer (vm, *buffer_index);
     }

@@ -18,7 +18,7 @@
 
 static int
 arp_shared_view_dispatch (vlib_main_t *vm, const char *node_name, u32 descriptor_index,
-			  u32 *forwarded_index)
+			  u32 *forwarded_index, u32 *forwarded_runtime_index)
 {
   vlib_node_t *node;
   vlib_node_runtime_t *runtime;
@@ -50,6 +50,8 @@ arp_shared_view_dispatch (vlib_main_t *vm, const char *node_name, u32 descriptor
     goto done;
 
   *forwarded_index = ((u32 *) vlib_frame_vector_args (pending->frame))[0];
+  if (forwarded_runtime_index)
+    *forwarded_runtime_index = pending->node_runtime_index;
   ret = 0;
 
 done:
@@ -73,12 +75,14 @@ done:
 }
 
 static int
-arp_shared_view_node_test (vlib_main_t *vm, const char *node_name, u32 expected_error)
+arp_shared_view_node_test (vlib_main_t *vm, const char *node_name, u32 expected_error,
+			   int use_shared_view)
 {
   ethernet_arp_header_t *arp;
   vlib_buffer_t *root;
   vlib_node_t *node;
   u32 buffers[2];
+  u32 input_index;
   u32 forwarded_index = ~0;
   u32 n_alloc;
   int ret = 0;
@@ -98,13 +102,20 @@ arp_shared_view_node_test (vlib_main_t *vm, const char *node_name, u32 expected_
   clib_memset (arp, 0, sizeof (*arp));
   arp->opcode = clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_request);
 
-  ARP_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
-	    "attach ARP shared-view descriptor");
-  ARP_TEST (arp_shared_view_dispatch (vm, node_name, buffers[1], &forwarded_index) == 0,
-	    "dispatch ARP node with headerless descriptor");
-  ARP_TEST (forwarded_index != buffers[1] &&
+  input_index = buffers[0];
+  if (use_shared_view)
+    {
+      ARP_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+		"attach ARP shared-view descriptor");
+      input_index = buffers[1];
+    }
+
+  ARP_TEST (arp_shared_view_dispatch (vm, node_name, input_index, &forwarded_index, 0) == 0,
+	    "dispatch ARP node");
+  ARP_TEST (((use_shared_view && forwarded_index != input_index) ||
+	     (!use_shared_view && forwarded_index == input_index)) &&
 	      !vlib_buffer_shared_view_is_shared (vlib_get_buffer (vm, forwarded_index)),
-	    "replace descriptor in forwarded frame slot");
+	    "preserve ordinary index or replace shared descriptor");
   node = vlib_get_node_by_name (vm, (u8 *) node_name);
   if (vlib_get_buffer (vm, forwarded_index)->error !=
       vlib_node_get_runtime (vm, node->index)->errors[expected_error])
@@ -118,25 +129,101 @@ arp_shared_view_node_test (vlib_main_t *vm, const char *node_name, u32 expected_
   arp = vlib_buffer_get_current (vlib_get_buffer (vm, forwarded_index));
   ARP_TEST (arp->opcode == clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_request),
 	    "read canonical ARP request through replacement");
-  arp->opcode = clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_reply);
-  ARP_TEST (((ethernet_arp_header_t *) vlib_buffer_get_current (root))->opcode ==
-	      clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_request),
-	    "reply mutation leaves canonical root unchanged");
+  if (use_shared_view)
+    {
+      arp->opcode = clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_reply);
+      ARP_TEST (((ethernet_arp_header_t *) vlib_buffer_get_current (root))->opcode ==
+		  clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_request),
+		"reply mutation leaves canonical root unchanged");
+    }
 
   ret = 1;
 done:
+  if (use_shared_view)
+    {
+      vlib_buffer_free_one (vm, forwarded_index == ~0 ? buffers[1] : forwarded_index);
+      vlib_buffer_free_one (vm, buffers[0]);
+    }
+  else
+    {
+      vlib_buffer_free_one (vm, forwarded_index == ~0 ? buffers[0] : forwarded_index);
+      vlib_buffer_free_one (vm, buffers[1]);
+    }
+
+  return ret;
+}
+
+static int
+arp_shared_view_failure_test (vlib_main_t *vm, const char *node_name)
+{
+  ethernet_arp_header_t *arp;
+  vlib_buffer_t *descriptor = 0;
+  vlib_buffer_t *root;
+  vlib_node_t *drop_node;
+  vlib_node_t *node;
+  u32 buffers[2];
+  u32 descriptor_next = 0;
+  u32 forwarded_index = ~0;
+  u32 forwarded_runtime_index = ~0;
+  u32 n_alloc;
+  int ret = 0;
+
+  n_alloc = vlib_buffer_alloc (vm, buffers, ARRAY_LEN (buffers));
+  if (n_alloc != ARRAY_LEN (buffers))
+    {
+      if (n_alloc)
+	vlib_buffer_free (vm, buffers, n_alloc);
+      return 0;
+    }
+
+  root = vlib_get_buffer (vm, buffers[0]);
+  root->current_length = sizeof (*arp);
+  arp = vlib_buffer_get_current (root);
+  clib_memset (arp, 0, sizeof (*arp));
+  arp->opcode = clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_request);
+  ARP_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+	    "attach malformed ARP descriptor");
+  descriptor = vlib_get_buffer (vm, buffers[1]);
+  descriptor_next = descriptor->next_buffer;
+  descriptor->next_buffer = buffers[1];
+  ARP_TEST (arp_shared_view_dispatch (vm, node_name, buffers[1], &forwarded_index,
+				      &forwarded_runtime_index) == 0,
+	    "dispatch malformed ARP descriptor");
+  descriptor->next_buffer = descriptor_next;
+
+  node = vlib_get_node_by_name (vm, (u8 *) node_name);
+  drop_node = vlib_get_node_by_name (vm, (u8 *) "error-drop");
+  ARP_TEST (node && drop_node, "find ARP COW-failure route");
+  ARP_TEST (forwarded_index == buffers[1], "retain malformed ARP descriptor");
+  ARP_TEST (forwarded_runtime_index == drop_node->runtime_index,
+	    "send ARP COW failure to error-drop");
+
+  ARP_TEST (descriptor->error ==
+	      vlib_node_get_runtime (vm, node->index)->errors[ARP_ERROR_NO_BUFFERS],
+	    "account ARP COW failure as no buffers");
+  ARP_TEST (((ethernet_arp_header_t *) vlib_buffer_get_current (root))->opcode ==
+	      clib_host_to_net_u16 (ETHERNET_ARP_OPCODE_request),
+	    "leave canonical ARP root unchanged after COW failure");
+
+  ret = 1;
+done:
+  if (descriptor)
+    descriptor->next_buffer = descriptor_next;
   vlib_buffer_free_one (vm, forwarded_index == ~0 ? buffers[1] : forwarded_index);
   vlib_buffer_free_one (vm, buffers[0]);
-
   return ret;
 }
 
 static int
 arp_shared_view_test (vlib_main_t *vm)
 {
-  return arp_shared_view_node_test (vm, "arp-input", ARP_ERROR_L3_DST_ADDRESS_UNSET) &&
-	 arp_shared_view_node_test (vm, "arp-reply", ARP_ERROR_INTERFACE_NO_TABLE) &&
-	 arp_shared_view_node_test (vm, "arp-proxy", ARP_ERROR_INTERFACE_NO_TABLE);
+  return arp_shared_view_node_test (vm, "arp-input", ARP_ERROR_L3_DST_ADDRESS_UNSET, 0) &&
+	 arp_shared_view_node_test (vm, "arp-input", ARP_ERROR_L3_DST_ADDRESS_UNSET, 1) &&
+	 arp_shared_view_node_test (vm, "arp-reply", ARP_ERROR_INTERFACE_NO_TABLE, 1) &&
+	 arp_shared_view_node_test (vm, "arp-proxy", ARP_ERROR_INTERFACE_NO_TABLE, 1) &&
+	 arp_shared_view_failure_test (vm, "arp-input") &&
+	 arp_shared_view_failure_test (vm, "arp-reply") &&
+	 arp_shared_view_failure_test (vm, "arp-proxy");
 }
 
 static clib_error_t *
