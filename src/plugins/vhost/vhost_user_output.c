@@ -272,11 +272,7 @@ vhost_user_cow_shared_offload_buffer (vlib_main_t *vm, u32 *bi, vlib_buffer_t **
   if (PREDICT_TRUE (!vnet_buffer_shinfo_is_shared (*b)))
     return 0;
 
-  if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, bi)))
-    return -1;
-
-  *b = vlib_get_buffer (vm, *bi);
-  return 0;
+  return vnet_buffer_shinfo_make_writable (vm, bi, b);
 }
 
 static_always_inline void
