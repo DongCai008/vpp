@@ -4,6 +4,7 @@
  */
 
 #include <vlib/vlib.h>
+#include <vlib/buffer_fault_injector.h>
 #include <vnet/ip/ip_frag.h>
 #include <vnet/ip/ip4_packet.h>
 #include <vnet/ip/ip6_packet.h>
@@ -162,13 +163,126 @@ done:
   return ret;
 }
 
+static int
+ip_frag_shared_view_cow_failure_test (vlib_main_t *vm)
+{
+  vlib_buffer_t *descriptor = 0;
+  vlib_buffer_t *root;
+  vlib_node_runtime_t *runtime;
+  vlib_node_t *node;
+  vlib_pending_frame_t *pending;
+  vlib_frame_t *frame = 0;
+  u32 buffers[2];
+  u32 forwarded_index = ~0;
+  u32 forwarded_runtime_index = ~0;
+  u32 i;
+  u32 n_alloc;
+  u32 n_forwarded = 0;
+  u32 pending_len = vec_len (vm->node_main.pending_frames);
+  f64 success_rate;
+  int ret = 0;
+
+  if (vlib_buffer_alloc_fault_injector_set (vm, 0))
+    return 1;
+
+  success_rate = vm->buffer_alloc_success_rate;
+  vm->buffer_alloc_success_rate = 1.0;
+  n_alloc = vlib_buffer_alloc (vm, buffers, ARRAY_LEN (buffers));
+  if (n_alloc != ARRAY_LEN (buffers))
+    {
+      if (n_alloc)
+	vlib_buffer_free (vm, buffers, n_alloc);
+      vm->buffer_alloc_success_rate = success_rate;
+      return 0;
+    }
+
+  root = vlib_get_buffer (vm, buffers[0]);
+  ip_frag_shared_view_init_ip4 (root);
+  vnet_buffer (root)->ip_frag.mtu = 60;
+  vnet_buffer (root)->ip_frag.next_index = IP_FRAG_NEXT_DROP;
+  IP_FRAG_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+		"attach fragmentation COW-failure descriptor");
+  descriptor = vlib_get_buffer (vm, buffers[1]);
+
+  node = vlib_get_node_by_name (vm, (u8 *) "ip4-frag");
+  IP_FRAG_TEST (node != 0, "find IPv4 fragmentation node");
+  runtime = vlib_node_get_runtime (vm, node->index);
+  frame = vlib_get_frame_to_node (vm, node->index);
+  IP_FRAG_TEST (frame != 0, "allocate IPv4 fragmentation frame");
+  pending_len = vec_len (vm->node_main.pending_frames);
+
+  IP_FRAG_TEST (vlib_buffer_alloc_fault_injector_set (vm, 1) == 0,
+		"fail shared-view COW allocation");
+  ((u32 *) vlib_frame_vector_args (frame))[0] = buffers[1];
+  frame->n_vectors = 1;
+  runtime->function (vm, runtime, frame);
+
+  for (i = pending_len; i < vec_len (vm->node_main.pending_frames); i++)
+    {
+      pending = vec_elt_at_index (vm->node_main.pending_frames, i);
+      if (n_forwarded == 0 && pending->frame->n_vectors)
+	{
+	  forwarded_index = ((u32 *) vlib_frame_vector_args (pending->frame))[0];
+	  forwarded_runtime_index = pending->node_runtime_index;
+	}
+      n_forwarded += pending->frame->n_vectors;
+    }
+
+  IP_FRAG_TEST (n_forwarded == 1 && forwarded_index == buffers[1],
+		"retain descriptor after shared-view COW allocation failure");
+  IP_FRAG_TEST (
+    forwarded_runtime_index ==
+      vlib_node_runtime_get_next_frame (vm, runtime, IP_FRAG_NEXT_DROP)->node_runtime_index,
+    "send shared-view COW allocation failure to drop");
+  IP_FRAG_TEST (descriptor->error == runtime->errors[IP_FRAG_ERROR_MEMORY],
+		"account shared-view COW allocation failure as memory error");
+  IP_FRAG_TEST (vlib_buffer_shared_view_is_shared (descriptor),
+		"retain shared-view descriptor after COW allocation failure");
+  IP_FRAG_TEST (root->current_length == 96 &&
+		  ((ip4_header_t *) vlib_buffer_get_current (root))->ttl == 64,
+		"leave canonical IPv4 root unchanged after COW allocation failure");
+  ret = 1;
+
+done:
+  vlib_buffer_alloc_fault_injector_set (vm, 0);
+  vm->buffer_alloc_success_rate = success_rate;
+  if (frame)
+    vlib_frame_free (vm, frame);
+  if (pending_len < vec_len (vm->node_main.pending_frames))
+    ip_frag_shared_view_discard_pending (vm, pending_len);
+  else if (descriptor)
+    vlib_buffer_free_one (vm, buffers[1]);
+  vlib_buffer_free_one (vm, buffers[0]);
+  return ret;
+}
+
 static clib_error_t *
 test_ip_frag_shared_view_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
 {
-  if (!ip_frag_shared_view_test_node (vm, "ip4-frag", 0) ||
-      !ip_frag_shared_view_test_node (vm, "ip6-frag", 1))
-    return clib_error_return (0, "IP fragmentation shared-view test failed");
-  return 0;
+  clib_error_t *error = 0;
+  f64 success_rate;
+  int fault_injector_available;
+
+  fault_injector_available = vlib_buffer_alloc_fault_injector_set (vm, 0) == 0;
+  if (fault_injector_available)
+    {
+      success_rate = vm->buffer_alloc_success_rate;
+      vm->buffer_alloc_success_rate = 1.0;
+    }
+
+  if (!ip_frag_shared_view_test_node (vm, "ip4-frag", 0))
+    error = clib_error_return (0, "IP fragmentation IPv4 success test failed");
+  else if (!ip_frag_shared_view_test_node (vm, "ip6-frag", 1))
+    error = clib_error_return (0, "IP fragmentation IPv6 success test failed");
+  else if (!ip_frag_shared_view_cow_failure_test (vm))
+    error = clib_error_return (0, "IP fragmentation COW allocation failure test failed");
+
+  if (fault_injector_available)
+    {
+      vlib_buffer_alloc_fault_injector_set (vm, 0);
+      vm->buffer_alloc_success_rate = success_rate;
+    }
+  return error;
 }
 
 VLIB_CLI_COMMAND (test_ip_frag_shared_view_command, static) = {

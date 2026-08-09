@@ -9,6 +9,7 @@
 
 #include "ip_frag.h"
 
+#include <vnet/buffer_shinfo.h>
 #include <vnet/ip/ip.h>
 #include <vnet/interface_output.h>
 
@@ -261,11 +262,10 @@ frag_node_inline (vlib_main_t * vm, vlib_node_runtime_t * node,
 
 	  p0 = vlib_get_buffer (vm, pi0);
 	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)) &&
-	      vlib_buffer_shared_view_make_writable (vm, &pi0))
+	      vnet_buffer_shinfo_make_writable (vm, &pi0, &p0))
 	    error0 = IP_FRAG_ERROR_MEMORY;
 	  else
 	    {
-	      p0 = vlib_get_buffer (vm, pi0);
 	      mtu = vnet_buffer (p0)->ip_frag.mtu;
 	      if (is_ip6)
 		error0 = ip6_frag_do_fragment (vm, pi0, mtu, 0, &buffer);
