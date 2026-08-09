@@ -676,7 +676,7 @@ wg_input_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	{
 	  u32 bi = from[b - bufs];
 
-	  if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi)))
+	  if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi, &b[0])))
 	    {
 	      other_next[n_other] = WG_INPUT_NEXT_ERROR;
 	      b[0]->error = node->errors[WG_INPUT_ERROR_NO_BUFFERS];
@@ -686,7 +686,6 @@ wg_input_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	    }
 
 	  from[b - bufs] = bi;
-	  b[0] = vlib_get_buffer (vm, bi);
 	}
 
       header_type = ((message_header_t *) vlib_buffer_get_current (b[0]))->type;
