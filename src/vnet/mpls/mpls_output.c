@@ -5,6 +5,7 @@
 /* mpls_output.c: MPLS Adj rewrite */
 
 #include <vlib/vlib.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/ip/ip.h>
 #include <vnet/mpls/mpls.h>
 #include <vnet/ip/ip_frag.h>
@@ -395,7 +396,7 @@ mpls_frag (vlib_main_t * vm,
 	    from += 1;
 	    n_left_from -= 1;
 	    if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)) &&
-		vlib_buffer_shared_view_make_writable (vm, &pi0))
+		vnet_buffer_shinfo_make_writable (vm, &pi0, &p0))
 	      {
 		error0 = IP_FRAG_ERROR_MEMORY;
 		mtu = 0;
