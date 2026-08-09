@@ -31,6 +31,7 @@ add_vpp_plugin(unittest
   buffer_shared_view_worker_test.c
   reass_shared_view_test.c
   wireguard_shared_view_test.c
+  vhost_shared_view_test.c
   bier_shared_view_test.c
   bier_test.c
   bihash_test.c
