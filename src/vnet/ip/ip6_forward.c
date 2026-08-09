@@ -2258,17 +2258,18 @@ VLIB_REGISTER_NODE (ip6_mcast_midchain_node) =
 ip6_hop_by_hop_main_t ip6_hop_by_hop_main;
 #endif /* CLIB_MARCH_VARIANT */
 
-#define foreach_ip6_hop_by_hop_error \
-_(PROCESSED, "pkts with ip6 hop-by-hop options") \
-_(FORMAT, "incorrectly formatted hop-by-hop options") \
-_(UNKNOWN_OPTION, "unknown ip6 hop-by-hop options")
+#define foreach_ip6_hop_by_hop_error                                                               \
+  _ (PROCESSED, "pkts with ip6 hop-by-hop options")                                                \
+  _ (FORMAT, "incorrectly formatted hop-by-hop options")                                           \
+  _ (UNKNOWN_OPTION, "unknown ip6 hop-by-hop options")                                             \
+  _ (NO_BUFFERS, "no buffers for shared ip6 hop-by-hop view")
 
 typedef enum
 {
-#define _(sym,str) IP6_HOP_BY_HOP_ERROR_##sym,
+#define _(sym, str) IP6_HOP_BY_HOP_ERROR_##sym,
   foreach_ip6_hop_by_hop_error
 #undef _
-  IP6_HOP_BY_HOP_N_ERROR,
+    IP6_HOP_BY_HOP_N_ERROR,
 } ip6_hop_by_hop_error_t;
 
 /*
@@ -2290,9 +2291,50 @@ static char *ip6_hop_by_hop_error_strings[] = {
 #undef _
 };
 
+#define IP6_HBH_SHARED_VIEW_METADATA_FLAGS                                                         \
+  (VLIB_BUFFER_IS_TRACED | VLIB_BUFFER_EXT_HDR_VALID | ~VLIB_BUFFER_FLAGS_ALL)
+
+always_inline int
+ip6_hbh_make_shared_view_writable (vlib_main_t *vm, u32 *buffer_index, vlib_buffer_t **buffer)
+{
+  vlib_buffer_t *b0 = *buffer;
+  u32 opaque[ARRAY_LEN (b0->opaque)];
+  u32 opaque2[ARRAY_LEN (b0->opaque2)];
+  u32 current_config_index;
+  u32 error;
+  u32 flags;
+  u32 flow_id;
+  u32 trace_handle;
+
+  if (!vlib_buffer_shared_view_is_shared (b0))
+    return 0;
+
+  clib_memcpy_fast (opaque, b0->opaque, sizeof (opaque));
+  clib_memcpy_fast (opaque2, b0->opaque2, sizeof (opaque2));
+  current_config_index = b0->current_config_index;
+  error = b0->error;
+  flags = b0->flags & IP6_HBH_SHARED_VIEW_METADATA_FLAGS;
+  flow_id = b0->flow_id;
+  trace_handle = b0->trace_handle;
+
+  if (vlib_buffer_shared_view_make_writable (vm, buffer_index))
+    return -1;
+
+  b0 = vlib_get_buffer (vm, *buffer_index);
+  clib_memcpy_fast (b0->opaque, opaque, sizeof (opaque));
+  clib_memcpy_fast (b0->opaque2, opaque2, sizeof (opaque2));
+  b0->current_config_index = current_config_index;
+  b0->error = error;
+  b0->flags = (b0->flags & ~IP6_HBH_SHARED_VIEW_METADATA_FLAGS) | flags;
+  b0->flow_id = flow_id;
+  b0->trace_handle = trace_handle;
+  *buffer = b0;
+  return 0;
+}
+
 #ifndef CLIB_MARCH_VARIANT
 u8 *
-format_ip6_hop_by_hop_ext_hdr (u8 * s, va_list * args)
+format_ip6_hop_by_hop_ext_hdr (u8 *s, va_list *args)
 {
   ip6_hop_by_hop_header_t *hbh0 = va_arg (*args, ip6_hop_by_hop_header_t *);
   int total_len = va_arg (*args, int);
@@ -2498,9 +2540,6 @@ VLIB_NODE_FN (ip6_hop_by_hop_node) (vlib_main_t * vm,
 
 	    vlib_prefetch_buffer_header (p2, LOAD);
 	    vlib_prefetch_buffer_header (p3, LOAD);
-
-	    CLIB_PREFETCH (p2->data, 2 * CLIB_CACHE_LINE_BYTES, LOAD);
-	    CLIB_PREFETCH (p3->data, 2 * CLIB_CACHE_LINE_BYTES, LOAD);
 	  }
 
 	  /* Speculatively enqueue b0, b1 to the current next frame */
@@ -2514,57 +2553,75 @@ VLIB_NODE_FN (ip6_hop_by_hop_node) (vlib_main_t * vm,
 	  b0 = vlib_get_buffer (vm, bi0);
 	  b1 = vlib_get_buffer (vm, bi1);
 
-	  /* Default use the next_index from the adjacency. A HBH option rarely redirects to a different node */
-	  u32 adj_index0 = vnet_buffer (b0)->ip.adj_index[VLIB_TX];
-	  ip_adjacency_t *adj0 = adj_get (adj_index0);
-	  u32 adj_index1 = vnet_buffer (b1)->ip.adj_index[VLIB_TX];
-	  ip_adjacency_t *adj1 = adj_get (adj_index1);
-
-	  /* Default use the next_index from the adjacency. A HBH option rarely redirects to a different node */
-	  next0 = adj0->lookup_next_index;
-	  next1 = adj1->lookup_next_index;
-
-	  ip0 = vlib_buffer_get_current (b0);
-	  ip1 = vlib_buffer_get_current (b1);
-	  hbh0 = (ip6_hop_by_hop_header_t *) (ip0 + 1);
-	  hbh1 = (ip6_hop_by_hop_header_t *) (ip1 + 1);
-	  opt0 = (ip6_hop_by_hop_option_t *) (hbh0 + 1);
-	  opt1 = (ip6_hop_by_hop_option_t *) (hbh1 + 1);
-	  limit0 =
-	    (ip6_hop_by_hop_option_t *) ((u8 *) hbh0 +
-					 ((hbh0->length + 1) << 3));
-	  limit1 =
-	    (ip6_hop_by_hop_option_t *) ((u8 *) hbh1 +
-					 ((hbh1->length + 1) << 3));
-
-	  /*
-	   * Basic validity checks
-	   */
-	  if ((hbh0->length + 1) << 3 >
-	      clib_net_to_host_u16 (ip0->payload_length))
+	  if (PREDICT_FALSE (ip6_hbh_make_shared_view_writable (vm, &bi0, &b0)))
 	    {
-	      error0 = IP6_HOP_BY_HOP_ERROR_FORMAT;
+	      error0 = IP6_HOP_BY_HOP_ERROR_NO_BUFFERS;
 	      next0 = IP_LOOKUP_NEXT_DROP;
-	      goto outdual;
 	    }
-	  /* Scan the set of h-b-h options, process ones that we understand */
-	  error0 = ip6_scan_hbh_options (b0, ip0, hbh0, opt0, limit0, &next0);
+	  else
+	    to_next[-2] = bi0;
 
-	  if ((hbh1->length + 1) << 3 >
-	      clib_net_to_host_u16 (ip1->payload_length))
+	  if (PREDICT_FALSE (ip6_hbh_make_shared_view_writable (vm, &bi1, &b1)))
 	    {
-	      error1 = IP6_HOP_BY_HOP_ERROR_FORMAT;
+	      error1 = IP6_HOP_BY_HOP_ERROR_NO_BUFFERS;
 	      next1 = IP_LOOKUP_NEXT_DROP;
-	      goto outdual;
 	    }
-	  /* Scan the set of h-b-h options, process ones that we understand */
-	  error1 = ip6_scan_hbh_options (b1, ip1, hbh1, opt1, limit1, &next1);
+	  else
+	    to_next[-1] = bi1;
 
-	outdual:
+	  if (error0 == 0)
+	    {
+	      u32 adj_index0 = vnet_buffer (b0)->ip.adj_index[VLIB_TX];
+	      ip_adjacency_t *adj0 = adj_get (adj_index0);
+
+	      /* A HBH option rarely redirects to a different node. */
+	      next0 = adj0->lookup_next_index;
+	    }
+	  if (error1 == 0)
+	    {
+	      u32 adj_index1 = vnet_buffer (b1)->ip.adj_index[VLIB_TX];
+	      ip_adjacency_t *adj1 = adj_get (adj_index1);
+
+	      /* A HBH option rarely redirects to a different node. */
+	      next1 = adj1->lookup_next_index;
+	    }
+	  if (error0 == 0)
+	    {
+	      ip0 = vlib_buffer_get_current (b0);
+	      hbh0 = (ip6_hop_by_hop_header_t *) (ip0 + 1);
+	      opt0 = (ip6_hop_by_hop_option_t *) (hbh0 + 1);
+	      limit0 = (ip6_hop_by_hop_option_t *) ((u8 *) hbh0 + ((hbh0->length + 1) << 3));
+
+	      if ((hbh0->length + 1) << 3 > clib_net_to_host_u16 (ip0->payload_length))
+		{
+		  error0 = IP6_HOP_BY_HOP_ERROR_FORMAT;
+		  next0 = IP_LOOKUP_NEXT_DROP;
+		}
+	      else
+		/* Scan the set of h-b-h options, process ones we understand. */
+		error0 = ip6_scan_hbh_options (b0, ip0, hbh0, opt0, limit0, &next0);
+	    }
+
+	  if (error1 == 0)
+	    {
+	      ip1 = vlib_buffer_get_current (b1);
+	      hbh1 = (ip6_hop_by_hop_header_t *) (ip1 + 1);
+	      opt1 = (ip6_hop_by_hop_option_t *) (hbh1 + 1);
+	      limit1 = (ip6_hop_by_hop_option_t *) ((u8 *) hbh1 + ((hbh1->length + 1) << 3));
+
+	      if ((hbh1->length + 1) << 3 > clib_net_to_host_u16 (ip1->payload_length))
+		{
+		  error1 = IP6_HOP_BY_HOP_ERROR_FORMAT;
+		  next1 = IP_LOOKUP_NEXT_DROP;
+		}
+	      else
+		/* Scan the set of h-b-h options, process ones we understand. */
+		error1 = ip6_scan_hbh_options (b1, ip1, hbh1, opt1, limit1, &next1);
+	    }
+
 	  /* Has the classifier flagged this buffer for special treatment? */
-	  if (PREDICT_FALSE
-	      ((error0 == 0)
-	       && (vnet_buffer (b0)->l2_classify.opaque_index & OI_DECAP)))
+	  if (PREDICT_FALSE ((error0 == 0) &&
+			     (vnet_buffer (b0)->l2_classify.opaque_index & OI_DECAP)))
 	    next0 = hm->next_override;
 
 	  /* Has the classifier flagged this buffer for special treatment? */
@@ -2575,10 +2632,9 @@ VLIB_NODE_FN (ip6_hop_by_hop_node) (vlib_main_t * vm,
 
 	  if (PREDICT_FALSE ((node->flags & VLIB_NODE_FLAG_TRACE)))
 	    {
-	      if (b0->flags & VLIB_BUFFER_IS_TRACED)
+	      if (error0 != IP6_HOP_BY_HOP_ERROR_NO_BUFFERS && b0->flags & VLIB_BUFFER_IS_TRACED)
 		{
-		  ip6_hop_by_hop_trace_t *t =
-		    vlib_add_trace (vm, node, b0, sizeof (*t));
+		  ip6_hop_by_hop_trace_t *t = vlib_add_trace (vm, node, b0, sizeof (*t));
 		  u32 trace_len = (hbh0->length + 1) << 3;
 		  t->next_index = next0;
 		  /* Capture the h-b-h option verbatim */
@@ -2589,10 +2645,9 @@ VLIB_NODE_FN (ip6_hop_by_hop_node) (vlib_main_t * vm,
 		  t->trace_len = trace_len;
 		  clib_memcpy_fast (t->option_data, hbh0, trace_len);
 		}
-	      if (b1->flags & VLIB_BUFFER_IS_TRACED)
+	      if (error1 != IP6_HOP_BY_HOP_ERROR_NO_BUFFERS && b1->flags & VLIB_BUFFER_IS_TRACED)
 		{
-		  ip6_hop_by_hop_trace_t *t =
-		    vlib_add_trace (vm, node, b1, sizeof (*t));
+		  ip6_hop_by_hop_trace_t *t = vlib_add_trace (vm, node, b1, sizeof (*t));
 		  u32 trace_len = (hbh1->length + 1) << 3;
 		  t->next_index = next1;
 		  /* Capture the h-b-h option verbatim */
@@ -2603,7 +2658,6 @@ VLIB_NODE_FN (ip6_hop_by_hop_node) (vlib_main_t * vm,
 		  t->trace_len = trace_len;
 		  clib_memcpy_fast (t->option_data, hbh1, trace_len);
 		}
-
 	    }
 
 	  b0->error = error_node->errors[error0];
@@ -2634,6 +2688,13 @@ VLIB_NODE_FN (ip6_hop_by_hop_node) (vlib_main_t * vm,
 	  n_left_to_next -= 1;
 
 	  b0 = vlib_get_buffer (vm, bi0);
+	  if (PREDICT_FALSE (ip6_hbh_make_shared_view_writable (vm, &bi0, &b0)))
+	    {
+	      error0 = IP6_HOP_BY_HOP_ERROR_NO_BUFFERS;
+	      next0 = IP_LOOKUP_NEXT_DROP;
+	      goto out0;
+	    }
+	  to_next[-1] = bi0;
 	  /*
 	   * Default use the next_index from the adjacency.
 	   * A HBH option rarely redirects to a different node
@@ -2665,15 +2726,14 @@ VLIB_NODE_FN (ip6_hop_by_hop_node) (vlib_main_t * vm,
 
 	out0:
 	  /* Has the classifier flagged this buffer for special treatment? */
-	  if (PREDICT_FALSE
-	      ((error0 == 0)
-	       && (vnet_buffer (b0)->l2_classify.opaque_index & OI_DECAP)))
+	  if (PREDICT_FALSE ((error0 == 0) &&
+			     (vnet_buffer (b0)->l2_classify.opaque_index & OI_DECAP)))
 	    next0 = hm->next_override;
 
-	  if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
+	  if (PREDICT_FALSE (error0 != IP6_HOP_BY_HOP_ERROR_NO_BUFFERS &&
+			     b0->flags & VLIB_BUFFER_IS_TRACED))
 	    {
-	      ip6_hop_by_hop_trace_t *t =
-		vlib_add_trace (vm, node, b0, sizeof (*t));
+	      ip6_hop_by_hop_trace_t *t = vlib_add_trace (vm, node, b0, sizeof (*t));
 	      u32 trace_len = (hbh0->length + 1) << 3;
 	      t->next_index = next0;
 	      /* Capture the h-b-h option verbatim */
