@@ -4,8 +4,11 @@
  */
 
 #include <vlib/vlib.h>
+#include <vlib/buffer_fault_injector.h>
 #include <lisp/lisp-cp/control.h>
 #include <lisp/lisp-gpe/lisp_gpe.h>
+#include <lisp/lisp-gpe/lisp_gpe_fwd_entry.h>
+#include <lisp/lisp-gpe/lisp_gpe_tenant.h>
 #include <vnet/ethernet/arp_packet.h>
 #include <vnet/l2/l2_input.h>
 
@@ -21,8 +24,8 @@
   while (0)
 
 static int
-lisp_shared_view_dispatch (vlib_main_t *vm, const char *node_name, u32 buffer_index,
-			   u32 *forwarded_index)
+lisp_shared_view_dispatch_node (vlib_main_t *vm, u32 node_index, u32 buffer_index,
+				u8 expect_forward, u32 *forwarded_index)
 {
   vlib_node_t *node;
   vlib_node_runtime_t *runtime;
@@ -32,9 +35,7 @@ lisp_shared_view_dispatch (vlib_main_t *vm, const char *node_name, u32 buffer_in
   u32 i;
   int ret = -1;
 
-  node = vlib_get_node_by_name (vm, (u8 *) node_name);
-  if (node == 0)
-    return -1;
+  node = vlib_get_node (vm, node_index);
   runtime = vlib_node_get_runtime (vm, node->index);
   frame = vlib_get_frame_to_node (vm, node->index);
   if (frame == 0)
@@ -45,12 +46,15 @@ lisp_shared_view_dispatch (vlib_main_t *vm, const char *node_name, u32 buffer_in
   frame->n_vectors = 1;
   runtime->function (vm, runtime, frame);
 
-  if (vec_len (vm->node_main.pending_frames) != pending_len + 1)
+  if (vec_len (vm->node_main.pending_frames) != pending_len + expect_forward)
     goto done;
-  pending = vec_elt_at_index (vm->node_main.pending_frames, pending_len);
-  if (pending->frame->n_vectors != 1)
-    goto done;
-  *forwarded_index = ((u32 *) vlib_frame_vector_args (pending->frame))[0];
+  if (expect_forward)
+    {
+      pending = vec_elt_at_index (vm->node_main.pending_frames, pending_len);
+      if (pending->frame->n_vectors != 1)
+	goto done;
+      *forwarded_index = ((u32 *) vlib_frame_vector_args (pending->frame))[0];
+    }
   ret = 0;
 
 done:
@@ -69,6 +73,19 @@ done:
   vec_set_len (vm->node_main.pending_frames, pending_len);
   vlib_frame_free (vm, frame);
   return ret;
+}
+
+static int
+lisp_shared_view_dispatch (vlib_main_t *vm, const char *node_name, u32 buffer_index,
+			   u32 *forwarded_index)
+{
+  vlib_node_t *node;
+
+  node = vlib_get_node_by_name (vm, (u8 *) node_name);
+  if (node == 0)
+    return -1;
+
+  return lisp_shared_view_dispatch_node (vm, node->index, buffer_index, 1, forwarded_index);
 }
 
 static void
@@ -498,6 +515,298 @@ done:
   vlib_buffer_free_one (vm, buffers[0]);
   return ret;
 }
+
+static void
+lisp_output_init_l2_fwd_entry (vnet_lisp_gpe_add_del_fwd_entry_args_t *args, u32 vni, u32 bd_id,
+			       const u8 src[6], const u8 dst[6])
+{
+  clib_memset (args, 0, sizeof (*args));
+  args->is_add = 1;
+  args->is_negative = 1;
+  args->action = DROP;
+  args->vni = vni;
+  args->bd_id = bd_id;
+  gid_address_type (&args->lcl_eid) = GID_ADDR_MAC;
+  gid_address_vni (&args->lcl_eid) = vni;
+  clib_memcpy_fast (gid_address_mac (&args->lcl_eid), src, 6);
+  gid_address_type (&args->rmt_eid) = GID_ADDR_MAC;
+  gid_address_vni (&args->rmt_eid) = vni;
+  clib_memcpy_fast (gid_address_mac (&args->rmt_eid), dst, 6);
+}
+
+static void
+lisp_output_init_nsh_fwd_entry (vnet_lisp_gpe_add_del_fwd_entry_args_t *args, u32 spi_si)
+{
+  clib_memset (args, 0, sizeof (*args));
+  args->is_add = 1;
+  args->is_negative = 1;
+  args->action = DROP;
+  gid_address_type (&args->lcl_eid) = GID_ADDR_NSH;
+  gid_address_nsh_spi (&args->lcl_eid) = spi_si >> 8;
+  gid_address_nsh_si (&args->lcl_eid) = spi_si;
+  gid_address_type (&args->rmt_eid) = GID_ADDR_NSH;
+  gid_address_nsh_spi (&args->rmt_eid) = spi_si >> 8;
+  gid_address_nsh_si (&args->rmt_eid) = spi_si;
+}
+
+static int
+lisp_output_alloc (vlib_main_t *vm, u32 buffers[2])
+{
+  u32 n_alloc = vlib_buffer_alloc (vm, buffers, 2);
+
+  if (n_alloc != 2)
+    {
+      if (n_alloc)
+	vlib_buffer_free (vm, buffers, n_alloc);
+      return 0;
+    }
+
+  return 1;
+}
+
+static int
+lisp_l2_output_shared_view_test (vlib_main_t *vm)
+{
+  const u32 vni = 0x7151;
+  const u32 bd_id = 0x7152;
+  u8 src[6] = { 0, 1, 2, 3, 4, 5 };
+  u8 dst[6] = { 6, 7, 8, 9, 10, 11 };
+  vnet_lisp_gpe_add_del_fwd_entry_args_t args;
+  vnet_hw_interface_t *hi;
+  vlib_node_t *node;
+  vlib_buffer_t *root;
+  vlib_buffer_t *forwarded;
+  ethernet_header_t *eth;
+  u32 buffers[2];
+  u32 forwarded_index = ~0;
+  u32 sw_if_index = ~0;
+  u32 lbi;
+  u16 bd_index;
+  u64 error_count;
+  u8 entry_added = 0;
+  u8 interface_added = 0;
+  int ret = 0;
+
+  sw_if_index = lisp_gpe_tenant_l2_iface_add_or_lock (vni, bd_id);
+  LISP_TEST (sw_if_index != ~0, "create L2 LISP-GPE interface");
+  interface_added = 1;
+  hi = vnet_get_sup_hw_interface (vnet_get_main (), sw_if_index);
+  node = vlib_get_node (vm, hi->tx_node_index);
+  LISP_TEST (node != 0, "find runtime L2 LISP-GPE TX node");
+  LISP_TEST (l2input_main.configs[sw_if_index].bd_index != (u16) ~0,
+	     "configure L2 bridge-domain state");
+  bd_index = l2input_main.configs[sw_if_index].bd_index;
+
+  lisp_output_init_l2_fwd_entry (&args, vni, bd_id, src, dst);
+  LISP_TEST (vnet_lisp_gpe_add_del_fwd_entry (&args, 0) == 0,
+	     "install L2 LISP-GPE forwarding entry");
+  entry_added = 1;
+
+  LISP_TEST (lisp_output_alloc (vm, buffers), "allocate L2 output shared-view buffers");
+  root = vlib_get_buffer (vm, buffers[0]);
+  root->current_length = sizeof (*eth);
+  eth = vlib_buffer_get_current (root);
+  clib_memset (eth, 0, sizeof (*eth));
+  clib_memcpy_fast (eth->src_address, src, 6);
+  clib_memcpy_fast (eth->dst_address, dst, 6);
+  vnet_buffer (root)->l2.bd_index = bd_index;
+  LISP_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+	     "attach L2 output shared-view descriptor");
+  vnet_buffer (vlib_get_buffer (vm, buffers[1]))->l2.bd_index = bd_index;
+  LISP_TEST (
+    lisp_shared_view_dispatch_node (vm, hi->tx_node_index, buffers[1], 1, &forwarded_index) == 0,
+    "dispatch through runtime L2 LISP-GPE TX node");
+  LISP_TEST (forwarded_index != buffers[1], "replace L2 output descriptor");
+  forwarded = vlib_get_buffer (vm, forwarded_index);
+  LISP_TEST (!vlib_buffer_shared_view_is_shared (forwarded),
+	     "forward ordinary L2 output replacement");
+  lbi = lisp_l2_fib_lookup (vnet_lisp_gpe_get_main (), bd_index, src, dst);
+  LISP_TEST (vnet_buffer (forwarded)->ip.adj_index[VLIB_TX] == lbi,
+	     "apply L2 output forwarding state");
+  ((ethernet_header_t *) vlib_buffer_get_current (forwarded))->src_address[0] ^= 0xff;
+  LISP_TEST (((ethernet_header_t *) vlib_buffer_get_current (root))->src_address[0] == src[0],
+	     "leave canonical L2 output root unchanged");
+  vlib_buffer_free_one (vm, forwarded_index);
+  forwarded_index = ~0;
+  vlib_buffer_free_one (vm, buffers[0]);
+
+  if (vlib_buffer_alloc_fault_injector_set (vm, 0) == 0)
+    {
+      LISP_TEST (lisp_output_alloc (vm, buffers), "allocate L2 output failure buffers");
+      root = vlib_get_buffer (vm, buffers[0]);
+      root->current_length = sizeof (*eth);
+      eth = vlib_buffer_get_current (root);
+      clib_memset (eth, 0, sizeof (*eth));
+      clib_memcpy_fast (eth->src_address, src, 6);
+      clib_memcpy_fast (eth->dst_address, dst, 6);
+      vnet_buffer (root)->l2.bd_index = bd_index;
+      LISP_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+		 "attach L2 output failure descriptor");
+      vnet_buffer (vlib_get_buffer (vm, buffers[1]))->l2.bd_index = bd_index;
+      LISP_TEST (node->n_errors == 1, "find L2 output no-buffers counter");
+      error_count = vm->error_main.counters[node->error_heap_index];
+      LISP_TEST (vlib_buffer_alloc_fault_injector_set (vm, 1) == 0,
+		 "arm L2 output COW allocation failure");
+      LISP_TEST (lisp_shared_view_dispatch_node (vm, hi->tx_node_index, buffers[1], 0, 0) == 0,
+		 "dispatch L2 output COW allocation failure");
+      vlib_buffer_alloc_fault_injector_set (vm, 0);
+      LISP_TEST (vm->error_main.counters[node->error_heap_index] == error_count + 1,
+		 "count L2 output COW allocation failure");
+      vlib_buffer_free_one (vm, buffers[0]);
+    }
+  ret = 1;
+
+done:
+  if (forwarded_index != ~0)
+    vlib_buffer_free_one (vm, forwarded_index);
+  vlib_buffer_alloc_fault_injector_set (vm, 0);
+  if (entry_added)
+    {
+      args.is_add = 0;
+      vnet_lisp_gpe_add_del_fwd_entry (&args, 0);
+    }
+  if (interface_added)
+    lisp_gpe_tenant_l2_iface_unlock (vni);
+  return ret;
+}
+
+static int
+lisp_nsh_output_shared_view_test (vlib_main_t *vm)
+{
+  const u32 spi_si = 0x715301;
+  vnet_lisp_gpe_add_del_fwd_entry_args_t args;
+  vnet_hw_interface_t *hi;
+  vlib_node_t *node;
+  vlib_buffer_t *root;
+  vlib_buffer_t *forwarded;
+  lisp_nsh_hdr_t *nsh;
+  u32 buffers[2];
+  u32 forwarded_index = ~0;
+  uword *sw_if_indexp;
+  u64 error_count;
+  u8 entry_added = 0;
+  u8 interface_added = 0;
+  int ret = 0;
+
+  LISP_TEST (vnet_lisp_gpe_add_nsh_iface (vnet_lisp_gpe_get_main ()) != ~0,
+	     "create NSH LISP-GPE interface");
+  interface_added = 1;
+  sw_if_indexp = hash_get (vnet_lisp_gpe_get_main ()->nsh_ifaces.sw_if_index_by_vni, 0);
+  LISP_TEST (sw_if_indexp != 0, "find NSH LISP-GPE interface state");
+  hi = vnet_get_sup_hw_interface (vnet_get_main (), sw_if_indexp[0]);
+  node = vlib_get_node (vm, hi->tx_node_index);
+  LISP_TEST (node != 0, "find runtime NSH LISP-GPE TX node");
+
+  lisp_output_init_nsh_fwd_entry (&args, spi_si);
+  LISP_TEST (vnet_lisp_gpe_add_del_fwd_entry (&args, 0) == 0,
+	     "install NSH LISP-GPE forwarding entry");
+  entry_added = 1;
+
+  LISP_TEST (lisp_output_alloc (vm, buffers), "allocate NSH output shared-view buffers");
+  root = vlib_get_buffer (vm, buffers[0]);
+  root->current_length = sizeof (*nsh);
+  nsh = vlib_buffer_get_current (root);
+  clib_memset (nsh, 0, sizeof (*nsh));
+  nsh->spi_si = clib_host_to_net_u32 (spi_si);
+  LISP_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+	     "attach NSH output shared-view descriptor");
+  LISP_TEST (
+    lisp_shared_view_dispatch_node (vm, hi->tx_node_index, buffers[1], 1, &forwarded_index) == 0,
+    "dispatch through runtime NSH LISP-GPE TX node");
+  LISP_TEST (forwarded_index != buffers[1], "replace NSH output descriptor");
+  forwarded = vlib_get_buffer (vm, forwarded_index);
+  LISP_TEST (!vlib_buffer_shared_view_is_shared (forwarded),
+	     "forward ordinary NSH output replacement");
+  ((lisp_nsh_hdr_t *) vlib_buffer_get_current (forwarded))->spi_si ^= 0xffffffff;
+  LISP_TEST (((lisp_nsh_hdr_t *) vlib_buffer_get_current (root))->spi_si ==
+	       clib_host_to_net_u32 (spi_si),
+	     "leave canonical NSH output root unchanged");
+  vlib_buffer_free_one (vm, forwarded_index);
+  forwarded_index = ~0;
+  vlib_buffer_free_one (vm, buffers[0]);
+
+  if (vlib_buffer_alloc_fault_injector_set (vm, 0) == 0)
+    {
+      LISP_TEST (lisp_output_alloc (vm, buffers), "allocate NSH output failure buffers");
+      root = vlib_get_buffer (vm, buffers[0]);
+      root->current_length = sizeof (*nsh);
+      nsh = vlib_buffer_get_current (root);
+      clib_memset (nsh, 0, sizeof (*nsh));
+      nsh->spi_si = clib_host_to_net_u32 (spi_si);
+      LISP_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+		 "attach NSH output failure descriptor");
+      LISP_TEST (node->n_errors == 1, "find NSH output no-buffers counter");
+      error_count = vm->error_main.counters[node->error_heap_index];
+      LISP_TEST (vlib_buffer_alloc_fault_injector_set (vm, 1) == 0,
+		 "arm NSH output COW allocation failure");
+      LISP_TEST (lisp_shared_view_dispatch_node (vm, hi->tx_node_index, buffers[1], 0, 0) == 0,
+		 "dispatch NSH output COW allocation failure");
+      vlib_buffer_alloc_fault_injector_set (vm, 0);
+      LISP_TEST (vm->error_main.counters[node->error_heap_index] == error_count + 1,
+		 "count NSH output COW allocation failure");
+      vlib_buffer_free_one (vm, buffers[0]);
+    }
+  ret = 1;
+
+done:
+  if (forwarded_index != ~0)
+    vlib_buffer_free_one (vm, forwarded_index);
+  vlib_buffer_alloc_fault_injector_set (vm, 0);
+  if (entry_added)
+    {
+      args.is_add = 0;
+      vnet_lisp_gpe_add_del_fwd_entry (&args, 0);
+    }
+  if (interface_added)
+    vnet_lisp_gpe_del_nsh_iface (vnet_lisp_gpe_get_main ());
+  return ret;
+}
+
+static clib_error_t *
+test_lisp_gpe_output_shared_view_fn (vlib_main_t *vm, unformat_input_t *input,
+				     vlib_cli_command_t *cmd)
+{
+  vnet_lisp_gpe_enable_disable_args_t args = { .is_en = 1 };
+  u8 was_enabled = vnet_lisp_gpe_enable_disable_status ();
+  clib_error_t *error = 0;
+  f64 success_rate;
+  int fault_injector_available;
+
+  fault_injector_available = vlib_buffer_alloc_fault_injector_set (vm, 0) == 0;
+  if (fault_injector_available)
+    {
+      success_rate = vm->buffer_alloc_success_rate;
+      vm->buffer_alloc_success_rate = 1.0;
+    }
+
+  if (!was_enabled)
+    {
+      if ((error = vnet_lisp_gpe_enable_disable (&args)))
+	return error;
+    }
+
+  if (!lisp_l2_output_shared_view_test (vm) || !lisp_nsh_output_shared_view_test (vm))
+    error = clib_error_return (0, "LISP-GPE output shared-view test failed");
+
+  if (!was_enabled)
+    {
+      args.is_en = 0;
+      vnet_lisp_gpe_enable_disable (&args);
+    }
+  if (fault_injector_available)
+    {
+      vlib_buffer_alloc_fault_injector_set (vm, 0);
+      vm->buffer_alloc_success_rate = success_rate;
+    }
+
+  return error;
+}
+
+VLIB_CLI_COMMAND (test_lisp_gpe_output_shared_view_command, static) = {
+  .path = "test lisp-gpe-output-shared-view",
+  .short_help = "test lisp-gpe-output-shared-view",
+  .function = test_lisp_gpe_output_shared_view_fn,
+};
 
 static clib_error_t *
 test_lisp_shared_view_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
