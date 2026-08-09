@@ -116,6 +116,35 @@ done:
 }
 
 static int
+bfd_shared_view_ordinary_test (vlib_main_t *vm, const char *node_name, u32 expected_error)
+{
+  vlib_buffer_t *buffer;
+  vlib_node_t *node;
+  u32 buffer_index;
+  u32 forwarded_index = ~0;
+  int ret = 0;
+
+  if (vlib_buffer_alloc (vm, &buffer_index, 1) != 1)
+    return 0;
+
+  buffer = vlib_get_buffer (vm, buffer_index);
+  buffer->current_length = 1;
+  ((u8 *) vlib_buffer_get_current (buffer))[0] = 0x5a;
+  BFD_TEST (bfd_shared_view_dispatch (vm, node_name, buffer_index, &forwarded_index) == 0,
+	    "dispatch ordinary BFD input");
+  BFD_TEST (forwarded_index == buffer_index, "retain ordinary BFD frame slot");
+  node = vlib_get_node_by_name (vm, (u8 *) node_name);
+  BFD_TEST (node != 0, "find ordinary BFD input node");
+  BFD_TEST (buffer->error == vlib_node_get_runtime (vm, node->index)->errors[expected_error],
+	    "preserve ordinary BFD packet disposition");
+  ret = 1;
+
+done:
+  vlib_buffer_free_one (vm, buffer_index);
+  return ret;
+}
+
+static int
 bfd_shared_view_failure_test (vlib_main_t *vm, const char *node_name)
 {
   vlib_buffer_t *descriptor = 0;
@@ -168,6 +197,10 @@ test_bfd_shared_view_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_comm
       !bfd_shared_view_success_test (vm, "bfd-udp6-input", BFD_UDP_ERROR_BAD) ||
       !bfd_shared_view_success_test (vm, "bfd-udp-echo4-input", BFD_UDP_ERROR_NONE) ||
       !bfd_shared_view_success_test (vm, "bfd-udp-echo6-input", BFD_UDP_ERROR_NONE) ||
+      !bfd_shared_view_ordinary_test (vm, "bfd-udp4-input", BFD_UDP_ERROR_BAD) ||
+      !bfd_shared_view_ordinary_test (vm, "bfd-udp6-input", BFD_UDP_ERROR_BAD) ||
+      !bfd_shared_view_ordinary_test (vm, "bfd-udp-echo4-input", BFD_UDP_ERROR_NONE) ||
+      !bfd_shared_view_ordinary_test (vm, "bfd-udp-echo6-input", BFD_UDP_ERROR_NONE) ||
       !bfd_shared_view_failure_test (vm, "bfd-udp4-input") ||
       !bfd_shared_view_failure_test (vm, "bfd-udp6-input") ||
       !bfd_shared_view_failure_test (vm, "bfd-udp-echo4-input") ||

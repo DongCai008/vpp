@@ -21,6 +21,7 @@
 #include <vnet/ip/ip6.h>
 #include <vnet/ip/ip6_packet.h>
 #include <vnet/ip/ip6_link.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/adj/adj.h>
 #include <vnet/adj/adj_nbr.h>
 #include <vnet/dpo/receive_dpo.h>
@@ -1397,18 +1398,14 @@ bfd_udp_input (vlib_main_t * vm, vlib_node_runtime_t * rt,
       u32 next0, error0;
 
       bi0 = from[0];
-      if (vlib_buffer_shared_view_is_shared (vlib_get_buffer (vm, bi0)))
+
+      if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi0, &b0)))
 	{
-	  if (vlib_buffer_shared_view_make_writable (vm, &bi0))
-	    {
-	      b0 = vlib_get_buffer (vm, bi0);
-	      b0->error = rt->errors[BFD_UDP_ERROR_NO_BUFFERS];
-	      vlib_set_next_frame_buffer (vm, rt, BFD_UDP_INPUT_NEXT_NORMAL, bi0);
-	      goto next;
-	    }
-	  from[0] = bi0;
+	  b0->error = rt->errors[BFD_UDP_ERROR_NO_BUFFERS];
+	  vlib_set_next_frame_buffer (vm, rt, BFD_UDP_INPUT_NEXT_NORMAL, bi0);
+	  goto next;
 	}
-      b0 = vlib_get_buffer (vm, bi0);
+      from[0] = bi0;
 
       bfd_session_t *bs = NULL;
 
@@ -1581,18 +1578,14 @@ bfd_udp_echo_input (vlib_main_t * vm, vlib_node_runtime_t * rt,
       u32 next0;
 
       bi0 = from[0];
-      if (vlib_buffer_shared_view_is_shared (vlib_get_buffer (vm, bi0)))
+
+      if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi0, &b0)))
 	{
-	  if (vlib_buffer_shared_view_make_writable (vm, &bi0))
-	    {
-	      b0 = vlib_get_buffer (vm, bi0);
-	      b0->error = rt->errors[BFD_UDP_ERROR_NO_BUFFERS];
-	      vlib_set_next_frame_buffer (vm, rt, BFD_UDP_ECHO_INPUT_NEXT_NORMAL, bi0);
-	      goto next;
-	    }
-	  from[0] = bi0;
+	  b0->error = rt->errors[BFD_UDP_ERROR_NO_BUFFERS];
+	  vlib_set_next_frame_buffer (vm, rt, BFD_UDP_ECHO_INPUT_NEXT_NORMAL, bi0);
+	  goto next;
 	}
-      b0 = vlib_get_buffer (vm, bi0);
+      from[0] = bi0;
 
       /* If this pkt is traced, snapshot the data */
       if (b0->flags & VLIB_BUFFER_IS_TRACED)
