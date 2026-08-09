@@ -35,6 +35,7 @@ add_vpp_plugin(bpf_trace_filter
   cli.c
   plugin.c
   bpf_trace_filter.c
+  bpf_trace_filter_test.c
   api.c
 
   API_FILES

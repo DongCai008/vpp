@@ -10,8 +10,11 @@ clib_error_t *
 bpf_trace_filter_init (vlib_main_t *vm)
 {
   bpf_trace_filter_main_t *btm = &bpf_trace_filter_main;
+  vlib_thread_main_t *tm = vlib_get_thread_main ();
+
   btm->pcap = pcap_open_dead (DLT_EN10MB, 65535);
   btm->pcap_raw = pcap_open_dead (DLT_RAW, 65535);
+  vec_validate_aligned (btm->per_thread_data, tm->n_vlib_mains - 1, CLIB_CACHE_LINE_BYTES);
 
   return 0;
 }
@@ -72,11 +75,30 @@ bpf_trace_filter_set_unset (const char *bpf_expr, u8 is_del, u8 optimize)
   return 0;
 };
 
+static_always_inline u8 *
+bpf_trace_filter_packet_data (vlib_main_t *vm, vlib_buffer_t *b, struct pcap_pkthdr *phdr)
+{
+  bpf_trace_filter_main_t *btm = &bpf_trace_filter_main;
+  bpf_trace_filter_per_thread_data_t *ptd;
+  uword logical_length;
+  uword copied;
+
+  ptd = vec_elt_at_index (btm->per_thread_data, vlib_get_thread_index ());
+  logical_length = vlib_buffer_chain_view_length (vm, b, 0);
+  copied = vlib_buffer_chain_view_copy (vm, b, ptd->workspace, BPF_TRACE_FILTER_WORKSPACE_SIZE, 0);
+  phdr->len = logical_length;
+  phdr->caplen = copied;
+
+  return ptd->workspace;
+}
+
 int
 bpf_is_packet_traced (vlib_buffer_t *b, u32 classify_table_index, int func)
 {
   bpf_trace_filter_main_t *bfm = &bpf_trace_filter_main;
   struct pcap_pkthdr phdr = { 0 };
+  vlib_main_t *vm = vlib_get_main ();
+  u8 *packet_data;
   int res;
   int res1;
 
@@ -87,8 +109,7 @@ bpf_is_packet_traced (vlib_buffer_t *b, u32 classify_table_index, int func)
   if (!bfm->prog_set)
     return 1;
 
-  phdr.caplen = b->current_length;
-  phdr.len = b->current_length;
+  packet_data = bpf_trace_filter_packet_data (vm, b, &phdr);
 
   /*
    * Determine if packet is at L3 (raw IP without Ethernet header)
@@ -97,9 +118,9 @@ bpf_is_packet_traced (vlib_buffer_t *b, u32 classify_table_index, int func)
    */
   if (bfm->prog_raw_set && (b->flags & VNET_BUFFER_F_L3_HDR_OFFSET_VALID) &&
       (b->current_data == vnet_buffer (b)->l3_hdr_offset))
-    res = pcap_offline_filter (&bfm->prog_raw, &phdr, vlib_buffer_get_current (b));
+    res = pcap_offline_filter (&bfm->prog_raw, &phdr, packet_data);
   else
-    res = pcap_offline_filter (&bfm->prog, &phdr, vlib_buffer_get_current (b));
+    res = pcap_offline_filter (&bfm->prog, &phdr, packet_data);
   return res != 0;
 }
 
