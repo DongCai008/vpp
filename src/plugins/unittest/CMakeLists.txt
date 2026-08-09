@@ -22,6 +22,7 @@ add_vpp_plugin(unittest
   api_fuzz_test.c
   arp_shared_view_test.c
   ah_shared_view_test.c
+  esp_shared_view_test.c
   bfd_shared_view_test.c
   bond_trace_shared_view_test.c
   drop_capture_shared_view_test.c
