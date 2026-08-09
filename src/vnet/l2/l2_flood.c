@@ -12,6 +12,7 @@
 #include <vnet/l2/feat_bitmap.h>
 #include <vnet/l2/l2_bvi.h>
 #include <vnet/l2/l2_fib.h>
+#include <vnet/buffer_shinfo.h>
 
 #include <vppinfra/error.h>
 #include <vppinfra/hash.h>
@@ -163,7 +164,7 @@ VLIB_NODE_FN (l2flood_node)
 
 	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
 	    {
-	      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &bi0)))
+	      if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi0, &b0)))
 		{
 		  b0->error = node->errors[L2FLOOD_ERROR_COW_FAIL];
 		  to_next[0] = bi0;
@@ -173,8 +174,6 @@ VLIB_NODE_FN (l2flood_node)
 						   bi0, L2FLOOD_NEXT_DROP);
 		  continue;
 		}
-
-	      b0 = vlib_get_buffer (vm, bi0);
 	      vnet_buffer (b0)->l2.bd_index = bd_index0;
 	      vnet_buffer (b0)->l2.shg = in_shg;
 	      vnet_buffer (b0)->sw_if_index[VLIB_RX] = sw_if_index0;
