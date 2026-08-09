@@ -8,6 +8,7 @@
 #include <vnet/dpo/drop_dpo.h>
 #include <vnet/dpo/receive_dpo.h>
 #include <vnet/adj/adj.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/mpls/mpls_types.h>
 
 /**
@@ -759,7 +760,7 @@ replicate_inline (vlib_main_t * vm,
 
 	    if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
 	      {
-		if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &bi0)))
+		if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi0, &b0)))
 		  {
 		    b0->error = node->errors[REPLICATE_DPO_ERROR_COW_FAIL];
 		    to_next[0] = bi0;
@@ -770,8 +771,6 @@ replicate_inline (vlib_main_t * vm,
 						     bi0, 0);
 		    continue;
 		  }
-
-		b0 = vlib_get_buffer (vm, bi0);
 		vnet_buffer (b0)->ip.adj_index[VLIB_TX] = repi0;
 	      }
 
