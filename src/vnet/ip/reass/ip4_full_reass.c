@@ -1190,13 +1190,12 @@ ip4_full_reass_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
       b0 = vlib_get_buffer (vm, bi0);
       u32 reass_next_index = vnet_buffer (b0)->ip.reass.next_index;
       u32 reass_error_next_index = vnet_buffer (b0)->ip.reass.error_next_index;
-      if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+      if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi0, &b0)))
 	{
 	  next0 = IP4_FULL_REASS_NEXT_DROP;
 	  error0 = IP4_ERROR_REASS_NO_BUF;
 	  goto packet_enqueue;
 	}
-      b0 = vlib_get_buffer (vm, bi0);
       if (CUSTOM == type)
 	{
 	  vnet_buffer (b0)->ip.reass.next_index = reass_next_index;
