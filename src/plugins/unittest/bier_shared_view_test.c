@@ -186,7 +186,7 @@ bier_shared_view_init_header (vlib_buffer_t *buffer)
 }
 
 static int
-bier_shared_view_success_test (vlib_main_t *vm)
+bier_shared_view_success_test (vlib_main_t *vm, int use_shared_view)
 {
   vlib_add_trace_callback_t *saved_add_trace_callback = 0;
   bier_shared_view_topology_t topology;
@@ -199,6 +199,7 @@ bier_shared_view_success_test (vlib_main_t *vm)
   u32 forwarded_runtime_indices[2] = { ~0, ~0 };
   u32 n_alloc;
   u32 n_forwarded = 0;
+  u32 input_index;
   u8 saw_fmask[2] = {};
   u8 root_first_byte;
   u32 i;
@@ -218,18 +219,23 @@ bier_shared_view_success_test (vlib_main_t *vm)
   bier_shared_view_init_header (root);
   root_first_byte = ((u8 *) vlib_buffer_get_current (root))[0];
   root->flags |= VLIB_BUFFER_IS_TRACED;
-  BIER_SHARED_VIEW_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
-			 "attach BIER shared-view descriptor");
-  BIER_SHARED_VIEW_TEST (vlib_get_buffer (vm, buffers[1])->current_length == 0,
-			 "use headerless BIER descriptor");
-  vnet_buffer (vlib_get_buffer (vm, buffers[1]))->ip.adj_index[VLIB_TX] = topology.bti;
+  input_index = buffers[0];
+  if (use_shared_view)
+    {
+      BIER_SHARED_VIEW_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+			     "attach BIER shared-view descriptor");
+      BIER_SHARED_VIEW_TEST (vlib_get_buffer (vm, buffers[1])->current_length == 0,
+			     "use headerless BIER descriptor");
+      input_index = buffers[1];
+    }
+  vnet_buffer (vlib_get_buffer (vm, input_index))->ip.adj_index[VLIB_TX] = topology.bti;
 
   bier_shared_view_trace_count = 0;
   clib_memset (bier_shared_view_traces, 0, sizeof (bier_shared_view_traces));
   saved_add_trace_callback = vm->trace_main.add_trace_callback;
   vm->trace_main.add_trace_callback = bier_shared_view_add_trace;
   BIER_SHARED_VIEW_TEST (
-    bier_shared_view_dispatch (vm, buffers[1], forwarded_indices, forwarded_runtime_indices,
+    bier_shared_view_dispatch (vm, input_index, forwarded_indices, forwarded_runtime_indices,
 			       ARRAY_LEN (forwarded_indices), &n_forwarded) == 0,
     "dispatch BIER shared-view descriptor");
   vm->trace_main.add_trace_callback = saved_add_trace_callback;
@@ -242,7 +248,7 @@ bier_shared_view_success_test (vlib_main_t *vm)
   for (i = 0; i < n_forwarded; i++)
     {
       forwarded = vlib_get_buffer (vm, forwarded_indices[i]);
-      BIER_SHARED_VIEW_TEST (forwarded_indices[i] != buffers[1],
+      BIER_SHARED_VIEW_TEST (!use_shared_view || forwarded_indices[i] != input_index,
 			     "replace BIER descriptor before cloning");
       BIER_SHARED_VIEW_TEST (!vlib_buffer_shared_view_is_shared (forwarded),
 			     "forward ordinary BIER clone");
@@ -275,8 +281,10 @@ done:
     vm->trace_main.add_trace_callback = saved_add_trace_callback;
   for (i = 0; i < n_forwarded; i++)
     vlib_buffer_free_one (vm, forwarded_indices[i]);
-  if (!n_forwarded)
+  if (!use_shared_view)
     vlib_buffer_free_one (vm, buffers[1]);
+  if (!n_forwarded && input_index != buffers[0])
+    vlib_buffer_free_one (vm, input_index);
   vlib_buffer_free_one (vm, buffers[0]);
   bier_shared_view_topology_destroy (&topology);
   return ret;
@@ -352,7 +360,8 @@ done:
 static clib_error_t *
 test_bier_shared_view_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
 {
-  if (!bier_shared_view_success_test (vm) || !bier_shared_view_failure_test (vm))
+  if (!bier_shared_view_success_test (vm, 0) || !bier_shared_view_success_test (vm, 1) ||
+      !bier_shared_view_failure_test (vm))
     return clib_error_return (0, "BIER shared-view test failed");
   return 0;
 }

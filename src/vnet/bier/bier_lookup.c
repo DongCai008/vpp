@@ -4,6 +4,7 @@
  */
 
 #include <vnet/buffer.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/vnet.h>
 
 #include <vnet/bier/bier_fmask.h>
@@ -75,7 +76,7 @@ bier_lookup_make_writable (vlib_main_t *vm, vlib_node_runtime_t *node, u32 *bi0,
   if (!vlib_buffer_shared_view_is_shared (*b0))
     return 0;
 
-  if (vlib_buffer_shared_view_make_writable (vm, bi0))
+  if (vnet_buffer_shinfo_make_writable (vm, bi0, b0))
     {
       (*b0)->error = node->errors[BIER_LOOKUP_ERROR_COW_FAIL];
       vlib_node_increment_counter (vm, node->node_index, BIER_LOOKUP_ERROR_COW_FAIL, 1);
@@ -86,8 +87,6 @@ bier_lookup_make_writable (vlib_main_t *vm, vlib_node_runtime_t *node, u32 *bi0,
 				       BIER_LOOKUP_NEXT_DROP);
       return -1;
     }
-
-  *b0 = vlib_get_buffer (vm, *bi0);
   vnet_buffer (*b0)->ip.adj_index[VLIB_TX] = bti0;
   return 0;
 }
