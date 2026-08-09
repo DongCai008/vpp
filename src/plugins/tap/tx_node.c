@@ -35,7 +35,7 @@ tap_cow_shared_buffers (vlib_main_t *vm, u32 *buffers, u16 n_buffers)
 
       if (PREDICT_FALSE (vnet_buffer_shinfo_is_shared (b)))
 	{
-	  if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi)))
+	  if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi, &b)))
 	    {
 	      vlib_buffer_free_one (vm, bi);
 	      continue;
