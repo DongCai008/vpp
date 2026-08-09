@@ -8,6 +8,7 @@
 
 #include <vnet/ip/ip_path_mtu.h>
 #include <vnet/ip/ip_frag.h>
+#include <vnet/buffer_shinfo.h>
 
 typedef enum
 {
@@ -68,14 +69,13 @@ ip_pmtu_dpo_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 
 	  p0 = vlib_get_buffer (vm, pi0);
 	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)) &&
-	      vlib_buffer_shared_view_make_writable (vm, &pi0))
+	      vnet_buffer_shinfo_make_writable (vm, &pi0, &p0))
 	    {
 	      error0 = IP_FRAG_ERROR_MEMORY;
 	      next0 = IP_PMTU_DROP;
 	    }
 	  else
 	    {
-	      p0 = vlib_get_buffer (vm, pi0);
 	      ipm0 = ip_pmtu_dpo_get (vnet_buffer (p0)->ip.adj_index[VLIB_TX]);
 	      vnet_buffer (p0)->ip.adj_index[VLIB_TX] = ipm0->ipm_dpo.dpoi_index;
 	      next0 = ipm0->ipm_dpo.dpoi_next_node;
