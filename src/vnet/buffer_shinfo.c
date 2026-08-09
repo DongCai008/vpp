@@ -249,13 +249,5 @@ vnet_buffer_shinfo_cow (vlib_main_t *vm, u32 *buffer_index)
 int
 vnet_buffer_shinfo_make_writable (vlib_main_t *vm, u32 *buffer_index, vlib_buffer_t **buffer)
 {
-  if (buffer == 0)
-    return -1;
-
-  *buffer = vlib_get_buffer (vm, *buffer_index);
-  if (vlib_buffer_shared_view_make_writable (vm, buffer_index))
-    return -1;
-
-  *buffer = vlib_get_buffer (vm, *buffer_index);
-  return 0;
+  return vlib_buffer_shared_view_make_writable_and_get (vm, buffer_index, buffer);
 }

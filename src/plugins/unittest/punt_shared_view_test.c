@@ -24,6 +24,7 @@ typedef struct
   vlib_punt_hdl_t client0;
   vlib_punt_hdl_t client1;
   vlib_punt_reason_t reason;
+  vlib_punt_reason_t single_reason;
   u8 initialized;
 } punt_shared_view_test_main_t;
 
@@ -165,8 +166,10 @@ punt_shared_view_setup (void)
   tm->client1 = vlib_punt_client_register ("punt-shared-view-client-1");
   if (tm->owner < 0 || tm->client0 < 0 || tm->client1 < 0 ||
       vlib_punt_reason_alloc (tm->owner, "shared-view", 0, 0, &tm->reason, 0, 0) ||
+      vlib_punt_reason_alloc (tm->owner, "shared-view-single", 0, 0, &tm->single_reason, 0, 0) ||
       vlib_punt_register (tm->client0, tm->reason, "punt-shared-view-client-0") ||
-      vlib_punt_register (tm->client1, tm->reason, "punt-shared-view-client-1"))
+      vlib_punt_register (tm->client1, tm->reason, "punt-shared-view-client-1") ||
+      vlib_punt_register (tm->client0, tm->single_reason, "punt-shared-view-client-0"))
     return -1;
 
   tm->initialized = 1;
@@ -255,15 +258,13 @@ punt_shared_view_success_test (vlib_main_t *vm)
       source = ((u8 *) vlib_buffer_get_current (forwarded))[0] - 0x50;
       PUNT_SHARED_VIEW_TEST (source < PUNT_SHARED_VIEW_TEST_N_INPUTS,
 			     "preserve punt packet identity after COW");
-      PUNT_SHARED_VIEW_TEST (forwarded_indices[i] != descriptor_indices[source],
-			     "replace punt descriptor output slot");
+      PUNT_SHARED_VIEW_TEST (forwarded_runtime_indices[i] == client0_node->runtime_index ||
+			       forwarded_runtime_indices[i] == client1_node->runtime_index,
+			     "dispatch punt frame to registered client");
       PUNT_SHARED_VIEW_TEST (!vlib_buffer_shared_view_is_shared (forwarded),
 			     "dispatch ordinary punt replacement");
       PUNT_SHARED_VIEW_TEST (forwarded->punt_reason == tm->reason,
 			     "preserve punt reason for every client");
-      PUNT_SHARED_VIEW_TEST (forwarded_runtime_indices[i] == client0_node->runtime_index ||
-			       forwarded_runtime_indices[i] == client1_node->runtime_index,
-			     "dispatch punt frame to registered client");
       saw_client0[source] |= forwarded_runtime_indices[i] == client0_node->runtime_index;
       saw_client1[source] |= forwarded_runtime_indices[i] == client1_node->runtime_index;
       n_client_frames[source]++;
@@ -296,6 +297,64 @@ done:
       vlib_buffer_free_one (vm, descriptor_indices[i]);
   for (i = 0; i < PUNT_SHARED_VIEW_TEST_N_INPUTS; i++)
     vlib_buffer_free_one (vm, root_indices[i]);
+  return ret;
+}
+
+static int
+punt_shared_view_original_slot_test (vlib_main_t *vm)
+{
+  punt_shared_view_test_main_t *tm = &punt_shared_view_test_main;
+  vlib_buffer_t *descriptor = 0;
+  vlib_buffer_t *forwarded;
+  vlib_buffer_t *root;
+  u32 buffers[2];
+  u32 forwarded_indices[1] = { ~0 };
+  u32 forwarded_runtime_indices[1] = { ~0 };
+  u32 n_forwarded = 0;
+  u32 n_alloc;
+  u32 original_index;
+  int ret = 0;
+
+  n_alloc = vlib_buffer_alloc (vm, buffers, ARRAY_LEN (buffers));
+  if (n_alloc != ARRAY_LEN (buffers))
+    {
+      if (n_alloc)
+	vlib_buffer_free (vm, buffers, n_alloc);
+      return 0;
+    }
+
+  root = vlib_get_buffer (vm, buffers[0]);
+  root->current_length = 1;
+  root->data[0] = 0x5a;
+  PUNT_SHARED_VIEW_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+			 "attach original-slot punt descriptor");
+  descriptor = vlib_get_buffer (vm, buffers[1]);
+  descriptor->punt_reason = tm->single_reason;
+
+  PUNT_SHARED_VIEW_TEST (
+    punt_shared_view_dispatch (vm, &buffers[1], 1, forwarded_indices, forwarded_runtime_indices,
+			       ARRAY_LEN (forwarded_indices), &n_forwarded) == 0,
+    "dispatch original-slot punt descriptor");
+  PUNT_SHARED_VIEW_TEST (n_forwarded == 1, "dispatch exactly one original-slot punt frame");
+
+  /* The single-client reason has no clone that could reuse the descriptor. */
+  original_index = forwarded_indices[0];
+  forwarded = vlib_get_buffer (vm, original_index);
+  PUNT_SHARED_VIEW_TEST (original_index != buffers[1] &&
+			   !vlib_buffer_shared_view_is_shared (forwarded),
+			 "replace original-slot punt descriptor");
+  PUNT_SHARED_VIEW_TEST (forwarded->punt_reason == tm->single_reason,
+			 "preserve original-slot punt reason");
+  ((u8 *) vlib_buffer_get_current (forwarded))[0] = 0xa5;
+  PUNT_SHARED_VIEW_TEST (root->data[0] == 0x5a, "leave original-slot root unchanged");
+  ret = 1;
+
+done:
+  if (n_forwarded)
+    vlib_buffer_free_one (vm, forwarded_indices[0]);
+  else
+    vlib_buffer_free_one (vm, buffers[1]);
+  vlib_buffer_free_one (vm, buffers[0]);
   return ret;
 }
 
@@ -361,11 +420,102 @@ done:
   return ret;
 }
 
+static int
+punt_shared_view_helper_test (vlib_main_t *vm)
+{
+  vlib_buffer_t *buffer = 0;
+  vlib_buffer_t *descriptor = 0;
+  vlib_buffer_t *root;
+  u32 buffers[2];
+  u32 buffer_index = ~0;
+  u32 copy_index;
+  u32 descriptor_next = 0;
+  u32 n_alloc = 0;
+  u8 restore_next = 0;
+  int ret = 0;
+
+  n_alloc = vlib_buffer_alloc (vm, buffers, ARRAY_LEN (buffers));
+  if (n_alloc != ARRAY_LEN (buffers))
+    {
+      if (n_alloc)
+	vlib_buffer_free (vm, buffers, n_alloc);
+      return 0;
+    }
+
+  root = vlib_get_buffer (vm, buffers[0]);
+  root->current_length = 1;
+  root->data[0] = 0x5a;
+  PUNT_SHARED_VIEW_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+			 "attach pointer helper descriptor");
+
+  buffer_index = buffers[1];
+  descriptor = buffer = vlib_get_buffer (vm, buffer_index);
+  PUNT_SHARED_VIEW_TEST (
+    vlib_buffer_shared_view_make_writable_and_get (vm, &buffer_index, &buffer) == 0,
+    "make pointer helper descriptor writable");
+  PUNT_SHARED_VIEW_TEST (buffer_index != buffers[1] &&
+			   buffer == vlib_get_buffer (vm, buffer_index) && buffer != descriptor &&
+			   !vlib_buffer_shared_view_is_shared (buffer),
+			 "reload ordinary pointer helper replacement");
+  PUNT_SHARED_VIEW_TEST (((u8 *) vlib_buffer_get_current (buffer))[0] == 0x5a,
+			 "preserve pointer helper payload");
+  copy_index = buffer_index;
+  descriptor = buffer;
+  PUNT_SHARED_VIEW_TEST (
+    vlib_buffer_shared_view_make_writable_and_get (vm, &buffer_index, &buffer) == 0 &&
+      buffer_index == copy_index && buffer == descriptor,
+    "retain ordinary pointer helper outputs");
+  vlib_buffer_free_one (vm, buffer_index);
+  vlib_buffer_free_one (vm, buffers[0]);
+  n_alloc = 0;
+
+  n_alloc = vlib_buffer_alloc (vm, buffers, ARRAY_LEN (buffers));
+  if (n_alloc != ARRAY_LEN (buffers))
+    {
+      if (n_alloc)
+	vlib_buffer_free (vm, buffers, n_alloc);
+      return ret;
+    }
+
+  root = vlib_get_buffer (vm, buffers[0]);
+  root->current_length = 1;
+  PUNT_SHARED_VIEW_TEST (vlib_buffer_shared_view_attach (vm, buffers[1], buffers[0]) == 0,
+			 "attach malformed pointer helper descriptor");
+  buffer_index = buffers[1];
+  descriptor = buffer = vlib_get_buffer (vm, buffer_index);
+  descriptor_next = descriptor->next_buffer;
+  descriptor->next_buffer = buffer_index;
+  restore_next = 1;
+  PUNT_SHARED_VIEW_TEST (
+    vlib_buffer_shared_view_make_writable_and_get (vm, &buffer_index, &buffer) != 0 &&
+      buffer_index == buffers[1] && buffer == descriptor,
+    "preserve pointer helper input on malformed COW failure");
+  descriptor->next_buffer = descriptor_next;
+  restore_next = 0;
+  vlib_buffer_free_one (vm, buffers[1]);
+  vlib_buffer_free_one (vm, buffers[0]);
+  return 1;
+
+done:
+  if (n_alloc == ARRAY_LEN (buffers))
+    {
+      if (restore_next)
+	descriptor->next_buffer = descriptor_next;
+      if (buffer_index != ~0)
+	vlib_buffer_free_one (vm, buffer_index);
+      else
+	vlib_buffer_free_one (vm, buffers[1]);
+      vlib_buffer_free_one (vm, buffers[0]);
+    }
+  return ret;
+}
+
 static clib_error_t *
 test_punt_shared_view_fn (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd)
 {
   if (punt_shared_view_setup () || !punt_shared_view_success_test (vm) ||
-      !punt_shared_view_failure_test (vm))
+      !punt_shared_view_original_slot_test (vm) || !punt_shared_view_failure_test (vm) ||
+      !punt_shared_view_helper_test (vm))
     return clib_error_return (0, "punt shared-view test failed");
 
   return 0;

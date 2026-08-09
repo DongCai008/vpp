@@ -1389,6 +1389,14 @@ int vlib_buffer_shared_view_attach (vlib_main_t *vm, u32 descriptor_index, u32 r
 */
 int vlib_buffer_shared_view_make_writable (vlib_main_t *vm, u32 *buffer_index);
 
+/** \brief Make a shared packet view writable and reload its buffer pointer.
+
+    The caller owns @c *buffer_index. On success @c *buffer is reloaded from
+    that index. On failure both outputs continue to describe the input view.
+*/
+int vlib_buffer_shared_view_make_writable_and_get (vlib_main_t *vm, u32 *buffer_index,
+						   vlib_buffer_t **buffer);
+
 /* Define vlib_buffer and vnet_buffer flags bits preserved for copy/clone */
 #define VLIB_BUFFER_COPY_CLONE_FLAGS_MASK                     	\
   (VLIB_BUFFER_NEXT_PRESENT | VLIB_BUFFER_TOTAL_LENGTH_VALID |	\

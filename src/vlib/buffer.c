@@ -211,6 +211,27 @@ vlib_buffer_shared_view_make_writable (vlib_main_t *vm, u32 *buffer_index)
   return 0;
 }
 
+int
+vlib_buffer_shared_view_make_writable_and_get (vlib_main_t *vm, u32 *buffer_index,
+					       vlib_buffer_t **buffer)
+{
+  vlib_buffer_t *input_buffer;
+
+  if (buffer_index == 0 || buffer == 0)
+    return -1;
+
+  input_buffer = vlib_get_buffer_checked (vm, *buffer_index);
+  if (input_buffer == 0)
+    return -1;
+
+  *buffer = input_buffer;
+  if (vlib_buffer_shared_view_make_writable (vm, buffer_index))
+    return -1;
+
+  *buffer = vlib_get_buffer (vm, *buffer_index);
+  return 0;
+}
+
 u8 *
 format_vlib_buffer_no_chain (u8 * s, va_list * args)
 {

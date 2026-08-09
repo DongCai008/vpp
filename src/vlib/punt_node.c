@@ -136,13 +136,12 @@ punt_dispatch_one (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_combined_cou
 
   if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
     {
-      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, bi0)))
+      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable_and_get (vm, bi0, &b0)))
 	{
 	  b0->error = node->errors[PUNT_ERROR_COW_FAIL];
 	  return PUNT_NEXT_DROP;
 	}
 
-      b0 = vlib_get_buffer (vm, *bi0);
       b0->punt_reason = pr0;
       *output_slot = *bi0;
     }
