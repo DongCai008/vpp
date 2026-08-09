@@ -11,6 +11,7 @@ add_vpp_plugin(tap
     tap_pre_input.c
     format.c
     tx_node.c
+    tap_shared_view_test.c
     rx_node.c
     tapv2_api.c
 
