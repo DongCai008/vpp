@@ -7,6 +7,7 @@
 
 #include <vlib/vlib.h>
 #include <vnet/ip/ip.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/pg/pg.h>
 #include <vnet/ip/ip_sas.h>
 #include <vnet/util/throttle.h>
@@ -267,7 +268,7 @@ ip4_icmp_error (vlib_main_t * vm,
 	      icmp_code0 = vnet_buffer (org_p0)->ip.icmp.code;
 	      icmp_data0 = vnet_buffer (org_p0)->ip.icmp.data;
 
-	      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, &org_pi0)))
+	      if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &org_pi0, &org_p0)))
 		{
 		  org_p0->error = node->errors[ICMP4_ERROR_DROP];
 		  from += 1;
@@ -276,7 +277,6 @@ ip4_icmp_error (vlib_main_t * vm,
 		}
 
 	      from[0] = org_pi0;
-	      org_p0 = vlib_get_buffer (vm, org_pi0);
 	      vnet_buffer (org_p0)->sw_if_index[VLIB_RX] = rx_sw_if_index0;
 	      vnet_buffer (org_p0)->ip.icmp.type = icmp_type0;
 	      vnet_buffer (org_p0)->ip.icmp.code = icmp_code0;
