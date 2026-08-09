@@ -16,3 +16,4 @@
 bier_error (NONE, "no error")
 bier_error (FMASK_UNRES, "fmask unresolved")
 bier_error (BUFFER_ALLOCATION_FAILURE, "Buffer Allocation Failure")
+bier_error (COW_FAIL, "Shared-view copy-on-write failure")
