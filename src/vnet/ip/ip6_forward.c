@@ -26,6 +26,7 @@
 #include <vppinfra/bihash_template.c>
 #endif
 #include <vnet/ip/ip6_forward.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/interface_output.h>
 
 /* Flag used by IOAM code. Classifier sets it pop-hop-by-hop checks it */
@@ -2317,10 +2318,9 @@ ip6_hbh_make_shared_view_writable (vlib_main_t *vm, u32 *buffer_index, vlib_buff
   flow_id = b0->flow_id;
   trace_handle = b0->trace_handle;
 
-  if (vlib_buffer_shared_view_make_writable (vm, buffer_index))
+  if (vnet_buffer_shinfo_make_writable (vm, buffer_index, &b0))
     return -1;
 
-  b0 = vlib_get_buffer (vm, *buffer_index);
   clib_memcpy_fast (b0->opaque, opaque, sizeof (opaque));
   clib_memcpy_fast (b0->opaque2, opaque2, sizeof (opaque2));
   b0->current_config_index = current_config_index;
