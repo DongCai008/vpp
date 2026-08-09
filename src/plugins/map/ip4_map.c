@@ -171,20 +171,17 @@ ip4_map (vlib_main_t * vm, vlib_node_runtime_t * node, vlib_frame_t * frame)
 
 	  p0 = vlib_get_buffer (vm, pi0);
 	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (p0)) &&
-	      vlib_buffer_shared_view_make_writable (vm, &pi0))
+	      vnet_buffer_shinfo_make_writable (vm, &pi0, &p0))
 	    {
 	      error0 = MAP_ERROR_NO_BUFFERS;
 	      next0 = IP4_MAP_NEXT_DROP;
 	      goto exit;
 	    }
-	  p0 = vlib_get_buffer (vm, pi0);
 	  ip40 = vlib_buffer_get_current (p0);
 
-	  d0 =
-	    ip4_map_get_domain (&ip40->dst_address, &map_domain_index0,
-				&error0);
+	  d0 = ip4_map_get_domain (&ip40->dst_address, &map_domain_index0, &error0);
 	  if (!d0)
-	    {			/* Guess it wasn't for us */
+	    { /* Guess it wasn't for us */
 	      vnet_feature_next (&next0, p0);
 	      goto exit;
 	    }
