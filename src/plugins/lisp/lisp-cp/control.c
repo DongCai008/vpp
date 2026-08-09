@@ -12,6 +12,7 @@
 #include <lisp/lisp-gpe/lisp_gpe_tunnel.h>
 #include <vnet/fib/fib_entry.h>
 #include <vnet/fib/fib_table.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/ethernet/arp_packet.h>
 #include <vnet/ethernet/packet.h>
 
@@ -3367,11 +3368,11 @@ lisp_cp_lookup_inline (vlib_main_t * vm,
 	  to_next[0] = pi0;
 	  to_next += 1;
 	  n_left_to_next -= 1;
-	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (vlib_get_buffer (vm, pi0))))
+	  b0 = vlib_get_buffer (vm, pi0);
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
 	    {
-	      if (vlib_buffer_shared_view_make_writable (vm, &pi0))
+	      if (vnet_buffer_shinfo_make_writable (vm, &pi0, &b0))
 		{
-		  b0 = vlib_get_buffer (vm, pi0);
 		  b0->error = node->errors[LISP_CP_LOOKUP_ERROR_NO_BUFFERS];
 		  next0 = LISP_CP_LOOKUP_NEXT_DROP;
 		  goto enqueue_cow_failure;
@@ -3379,9 +3380,6 @@ lisp_cp_lookup_inline (vlib_main_t * vm,
 	      from[-1] = pi0;
 	      to_next[-1] = pi0;
 	    }
-
-	  b0 = vlib_get_buffer (vm, pi0);
-
 	  /* src/dst eid pair */
 	  get_src_and_dst_eids_from_buffer (lcm, b0, &src, &dst, overlay);
 
@@ -4328,11 +4326,11 @@ lisp_cp_input (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  bi0 = from[0];
 	  from += 1;
 	  n_left_from -= 1;
-	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (vlib_get_buffer (vm, bi0))))
+	  b0 = vlib_get_buffer (vm, bi0);
+	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
 	    {
-	      if (vlib_buffer_shared_view_make_writable (vm, &bi0))
+	      if (vnet_buffer_shinfo_make_writable (vm, &bi0, &b0))
 		{
-		  b0 = vlib_get_buffer (vm, bi0);
 		  b0->error = node->errors[LISP_CP_INPUT_ERROR_NO_BUFFERS];
 		  cow_failed = 1;
 		}
@@ -4344,8 +4342,6 @@ lisp_cp_input (vlib_main_t * vm, vlib_node_runtime_t * node,
 	  n_left_to_next_drop -= 1;
 	  if (PREDICT_FALSE (cow_failed))
 	    continue;
-
-	  b0 = vlib_get_buffer (vm, bi0);
 
 	  type = lisp_msg_type (vlib_buffer_get_current (b0));
 	  switch (type)
