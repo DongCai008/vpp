@@ -875,13 +875,12 @@ slow_path:
 	  u32 reass_next_index = vnet_buffer (b0)->ip.reass.next_index;
 	  u8 save_rewrite_length = vnet_buffer (b0)->ip.save_rewrite_length;
 	  u32 current_config_index = b0->current_config_index;
-	  if (PREDICT_FALSE (vnet_buffer_shinfo_cow (vm, &bi0)))
+	  if (PREDICT_FALSE (vnet_buffer_shinfo_make_writable (vm, &bi0, &b0)))
 	    {
 	      next0 = IP4_SV_REASSEMBLY_NEXT_DROP;
 	      error0 = IP4_ERROR_REASS_NO_BUF;
 	      goto packet_enqueue;
 	    }
-	  b0 = vlib_get_buffer (vm, bi0);
 	  if (a.is_custom)
 	    vnet_buffer (b0)->ip.reass.next_index = reass_next_index;
 	  if (a.is_output_feature)
