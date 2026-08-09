@@ -60,6 +60,7 @@ add_vpp_plugin(unittest
   mpcap_node.c
   policer_test.c
   pool_test.c
+  punt_shared_view_test.c
   punt_test.c
   rbtree_test.c
   session_test.c

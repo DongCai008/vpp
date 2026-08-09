@@ -5,22 +5,23 @@
 
 #include <vlib/punt.h>
 
-#define foreach_punt_error                     \
-  _(DISPATCHED, "dispatched")                  \
-  _(NO_REASON, "No such punt reason")          \
-  _(NO_REG, "No registrations")                \
-  _(REP_FAIL, "Replication Failure")
+#define foreach_punt_error                                                                         \
+  _ (DISPATCHED, "dispatched")                                                                     \
+  _ (NO_REASON, "No such punt reason")                                                             \
+  _ (NO_REG, "No registrations")                                                                   \
+  _ (REP_FAIL, "Replication Failure")                                                              \
+  _ (COW_FAIL, "shared-view copy failed")
 
 typedef enum punt_error_t_
 {
-#define _(v,s) PUNT_ERROR_##v,
+#define _(v, s) PUNT_ERROR_##v,
   foreach_punt_error
 #undef _
     PUNT_N_ERRORS,
 } punt_error_t;
 
 static char *punt_error_strings[] = {
-#define _(v,s) [PUNT_ERROR_##v] = s,
+#define _(v, s) [PUNT_ERROR_##v] = s,
   foreach_punt_error
 #undef _
 };
@@ -66,6 +67,7 @@ punt_replicate (vlib_main_t *vm, vlib_node_runtime_t *node,
   /* multiple clients => replicate a copy to each */
   u16 n_clones0, n_cloned0, clone0;
   u32 ci0, next0;
+  vlib_buffer_t *c0;
 
   n_clones0 = vec_len (punt_dp_db[pr0]);
   vec_validate (punt_clones[thread_index], n_clones0);
@@ -83,6 +85,9 @@ punt_replicate (vlib_main_t *vm, vlib_node_runtime_t *node,
     {
       ci0 = punt_clones[thread_index][clone0];
 
+      c0 = vlib_get_buffer (vm, ci0);
+      c0->punt_reason = pr0;
+
       *to_next[0] = ci0;
       *to_next += 1;
       *n_left_to_next -= 1;
@@ -91,10 +96,8 @@ punt_replicate (vlib_main_t *vm, vlib_node_runtime_t *node,
 
       if (PREDICT_FALSE (b0->flags & VLIB_BUFFER_IS_TRACED))
 	{
-	  vlib_buffer_t *c0;
 	  punt_trace_t *t;
 
-	  c0 = vlib_get_buffer (vm, ci0);
 	  t = vlib_add_trace (vm, node, c0, sizeof (*t));
 	  t->pt_reason = pr0;
 	}
@@ -120,17 +123,29 @@ punt_replicate (vlib_main_t *vm, vlib_node_runtime_t *node,
 }
 
 always_inline u32
-punt_dispatch_one (vlib_main_t *vm, vlib_node_runtime_t *node,
-		   vlib_combined_counter_main_t *cm,
-		   clib_thread_index_t thread_index, u32 bi0, u32 *next_index,
+punt_dispatch_one (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_combined_counter_main_t *cm,
+		   clib_thread_index_t thread_index, u32 *bi0, u32 *output_slot, u32 *next_index,
 		   u32 *n_left_to_next, u32 **to_next, u32 *n_dispatched)
 {
   vlib_punt_reason_t pr0;
   vlib_buffer_t *b0;
   u32 next0;
 
-  b0 = vlib_get_buffer (vm, bi0);
+  b0 = vlib_get_buffer (vm, *bi0);
   pr0 = b0->punt_reason;
+
+  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)))
+    {
+      if (PREDICT_FALSE (vlib_buffer_shared_view_make_writable (vm, bi0)))
+	{
+	  b0->error = node->errors[PUNT_ERROR_COW_FAIL];
+	  return PUNT_NEXT_DROP;
+	}
+
+      b0 = vlib_get_buffer (vm, *bi0);
+      b0->punt_reason = pr0;
+      *output_slot = *bi0;
+    }
 
   if (PREDICT_FALSE (pr0 >= vec_len (punt_dp_db)))
     {
@@ -162,9 +177,8 @@ punt_dispatch_one (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  /*
 	   * multiple registered clients => replicate
 	   */
-	  next0 = punt_replicate (vm, node, thread_index, b0, bi0, pr0,
-				  next_index, n_left_to_next, to_next,
-				  n_dispatched);
+	  next0 = punt_replicate (vm, node, thread_index, b0, *bi0, pr0, next_index, n_left_to_next,
+				  to_next, n_dispatched);
 	}
     }
 
@@ -204,6 +218,7 @@ VLIB_NODE_FN (punt_dispatch_node) (vlib_main_t * vm,
 	{
 	  punt_next_t next0, next1;
 	  u32 bi0, bi1;
+	  u32 *output_slots;
 
 	  {
 	    vlib_buffer_t *b2, *b3;
@@ -215,17 +230,16 @@ VLIB_NODE_FN (punt_dispatch_node) (vlib_main_t * vm,
 	    vlib_prefetch_buffer_header (b3, LOAD);
 	  }
 
-	  bi0 = to_next[0] = from[0];
-	  bi1 = to_next[1] = from[1];
+	  output_slots = to_next;
+	  bi0 = output_slots[0] = from[0];
+	  bi1 = output_slots[1] = from[1];
 	  from += 2;
 	  n_left_from -= 2;
 
-	  next0 = punt_dispatch_one (vm, node, cm, thread_index, bi0,
-				     &next_index, &n_left_to_next,
-				     &to_next, &n_dispatched);
-	  next1 = punt_dispatch_one (vm, node, cm, thread_index, bi1,
-				     &next_index, &n_left_to_next,
-				     &to_next, &n_dispatched);
+	  next0 = punt_dispatch_one (vm, node, cm, thread_index, &bi0, &output_slots[0],
+				     &next_index, &n_left_to_next, &to_next, &n_dispatched);
+	  next1 = punt_dispatch_one (vm, node, cm, thread_index, &bi1, &output_slots[1],
+				     &next_index, &n_left_to_next, &to_next, &n_dispatched);
 
 	  to_next += 2;
 	  n_left_to_next -= 2;
@@ -243,9 +257,8 @@ VLIB_NODE_FN (punt_dispatch_node) (vlib_main_t * vm,
 	  from += 1;
 	  n_left_from -= 1;
 
-	  next0 = punt_dispatch_one (vm, node, cm, thread_index, bi0,
-				     &next_index, &n_left_to_next,
-				     &to_next, &n_dispatched);
+	  next0 = punt_dispatch_one (vm, node, cm, thread_index, &bi0, to_next, &next_index,
+				     &n_left_to_next, &to_next, &n_dispatched);
 
 	  to_next += 1;
 	  n_left_to_next -= 1;
