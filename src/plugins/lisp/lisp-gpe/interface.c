@@ -12,6 +12,7 @@
 #include <vppinfra/error.h>
 #include <vppinfra/hash.h>
 #include <vnet/vnet.h>
+#include <vnet/buffer_shinfo.h>
 #include <vnet/ip/ip.h>
 #include <vnet/udp/udp_inlines.h>
 #include <vnet/ethernet/ethernet.h>
@@ -265,13 +266,12 @@ l2_lisp_gpe_interface_tx (vlib_main_t * vm, vlib_node_runtime_t * node,
 
 	  b0 = vlib_get_buffer (vm, bi0);
 	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)) &&
-	      vlib_buffer_shared_view_make_writable (vm, &bi0))
+	      vnet_buffer_shinfo_make_writable (vm, &bi0, &b0))
 	    {
 	      vlib_buffer_free_one (vm, bi0);
 	      vlib_error_count (vm, node->node_index, LISP_GPE_TX_ERROR_NO_BUFFERS, 1);
 	      continue;
 	    }
-	  b0 = vlib_get_buffer (vm, bi0);
 	  to_next[0] = bi0;
 	  to_next += 1;
 	  n_left_to_next -= 1;
@@ -378,13 +378,12 @@ nsh_lisp_gpe_interface_tx (vlib_main_t * vm, vlib_node_runtime_t * node,
 
 	  b0 = vlib_get_buffer (vm, bi0);
 	  if (PREDICT_FALSE (vlib_buffer_shared_view_is_shared (b0)) &&
-	      vlib_buffer_shared_view_make_writable (vm, &bi0))
+	      vnet_buffer_shinfo_make_writable (vm, &bi0, &b0))
 	    {
 	      vlib_buffer_free_one (vm, bi0);
 	      vlib_error_count (vm, node->node_index, LISP_GPE_TX_ERROR_NO_BUFFERS, 1);
 	      continue;
 	    }
-	  b0 = vlib_get_buffer (vm, bi0);
 	  to_next[0] = bi0;
 	  to_next += 1;
 	  n_left_to_next -= 1;
