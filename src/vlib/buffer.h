@@ -462,6 +462,10 @@ typedef struct
 
 #define VLIB_BUFFER_MAX_NUMA_NODES 32
 
+typedef u32 (vlib_buffer_alloc_free_callback_t) (struct vlib_main_t *vm,
+						 u8 buffer_pool_index,
+						 u32 *buffers, u32 n_buffers);
+
 typedef struct vlib_buffer_extension_t vlib_buffer_extension_t;
 
 typedef void (vlib_buffer_extension_init_fn_t) (
@@ -495,6 +499,8 @@ typedef struct
   uword buffer_mem_size;
   vlib_buffer_pool_t *buffer_pools;
   vlib_buffer_extension_t **extensions;
+  vlib_buffer_alloc_free_callback_t *alloc_callback_fn;
+  vlib_buffer_alloc_free_callback_t *free_callback_fn;
   u8 has_extension_lifecycle_callbacks;
 
   u8 default_buffer_pool_index_for_numa[VLIB_BUFFER_MAX_NUMA_NODES];
@@ -526,6 +532,10 @@ clib_error_t *vlib_buffer_pool_create (struct vlib_main_t *vm, u32 data_size,
 				       u8 *buffer_pool_index);
 
 format_function_t format_vlib_buffer_pool_all;
+
+int vlib_buffer_set_alloc_free_callback (
+  struct vlib_main_t *vm, vlib_buffer_alloc_free_callback_t *alloc_callback_fn,
+  vlib_buffer_alloc_free_callback_t *free_callback_fn);
 
 int vlib_buffer_register_extension (vlib_buffer_extension_t *extension);
 void vlib_buffer_extension_init (struct vlib_main_t *vm, vlib_buffer_t *b);

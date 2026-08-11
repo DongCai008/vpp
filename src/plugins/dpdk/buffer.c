@@ -39,6 +39,40 @@ dpdk_buffer_extension_register (void)
     clib_panic ("failed to register DPDK buffer extension");
 }
 
+static clib_error_t *
+test_dpdk_buffer_extension (vlib_main_t *vm, unformat_input_t *input,
+			    vlib_cli_command_t *cmd)
+{
+  vlib_buffer_t *b;
+  struct rte_mbuf *mb;
+  u32 bi;
+
+  (void) input;
+  (void) cmd;
+
+  if (vlib_buffer_alloc (vm, &bi, 1) != 1)
+    return clib_error_return (0, "failed to allocate a buffer");
+
+  b = vlib_get_buffer (vm, bi);
+  mb = rte_mbuf_from_vlib_buffer (b);
+  if ((u8 *) vlib_buffer_get_extension (b, &dpdk_buffer_extension) +
+	dpdk_buffer_extension.size != (u8 *) b ||
+      vlib_buffer_from_rte_mbuf (mb) != b)
+    {
+      vlib_buffer_free (vm, &bi, 1);
+      return clib_error_return (0, "DPDK buffer extension layout is invalid");
+    }
+
+  vlib_buffer_free (vm, &bi, 1);
+  return 0;
+}
+
+VLIB_CLI_COMMAND (test_dpdk_buffer_extension_command, static) = {
+  .path = "test dpdk extension",
+  .short_help = "test dpdk extension",
+  .function = test_dpdk_buffer_extension,
+};
+
 clib_error_t *
 dpdk_buffer_pool_init (vlib_main_t * vm, vlib_buffer_pool_t * bp)
 {

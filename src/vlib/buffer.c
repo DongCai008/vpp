@@ -137,16 +137,24 @@ void
 vlib_buffer_extension_alloc (vlib_main_t *vm, u8 buffer_pool_index,
 			     u32 *buffers, u32 n_buffers)
 {
+  vlib_buffer_main_t *bm = vm->buffer_main;
+
   vlib_buffer_extension_lifecycle (vm, buffer_pool_index, buffers, n_buffers,
 				   1);
+  if (bm->alloc_callback_fn)
+    bm->alloc_callback_fn (vm, buffer_pool_index, buffers, n_buffers);
 }
 
 void
 vlib_buffer_extension_free (vlib_main_t *vm, u8 buffer_pool_index,
 			    u32 *buffers, u32 n_buffers)
 {
+  vlib_buffer_main_t *bm = vm->buffer_main;
+
   vlib_buffer_extension_lifecycle (vm, buffer_pool_index, buffers, n_buffers,
 				   0);
+  if (bm->free_callback_fn)
+    bm->free_callback_fn (vm, buffer_pool_index, buffers, n_buffers);
 }
 
 uword
@@ -1374,6 +1382,21 @@ vlib_buffer_alloc_fault_injector_set (vlib_main_t *vm, u64 fail_at)
 #else
   return -1;
 #endif
+}
+
+__clib_export int
+vlib_buffer_set_alloc_free_callback (
+  vlib_main_t *vm, vlib_buffer_alloc_free_callback_t *alloc_callback_fn,
+  vlib_buffer_alloc_free_callback_t *free_callback_fn)
+{
+  vlib_buffer_main_t *bm = vm->buffer_main;
+
+  if ((alloc_callback_fn && bm->alloc_callback_fn) ||
+      (free_callback_fn && bm->free_callback_fn))
+    return 1;
+  bm->alloc_callback_fn = alloc_callback_fn;
+  bm->free_callback_fn = free_callback_fn;
+  return 0;
 }
 
 /** @endcond */

@@ -22,6 +22,8 @@ typedef struct
 static u32 buffer_extension_test_init_count;
 static u32 buffer_extension_test_alloc_count;
 static u32 buffer_extension_test_free_count;
+static u32 buffer_extension_test_compat_alloc_count;
+static u32 buffer_extension_test_compat_free_count;
 
 static void
 buffer_extension_test_init (vlib_main_t *vm, vlib_buffer_t *b, void *data)
@@ -56,6 +58,28 @@ buffer_extension_test_free (vlib_main_t *vm, u8 buffer_pool_index, u32 *buffers,
   buffer_extension_test_free_count += n_buffers;
 }
 
+static u32
+buffer_extension_test_compat_alloc (vlib_main_t *vm, u8 buffer_pool_index, u32 *buffers,
+				    u32 n_buffers)
+{
+  (void) vm;
+  (void) buffer_pool_index;
+  (void) buffers;
+  buffer_extension_test_compat_alloc_count += n_buffers;
+  return 0;
+}
+
+static u32
+buffer_extension_test_compat_free (vlib_main_t *vm, u8 buffer_pool_index, u32 *buffers,
+				   u32 n_buffers)
+{
+  (void) vm;
+  (void) buffer_pool_index;
+  (void) buffers;
+  buffer_extension_test_compat_free_count += n_buffers;
+  return 0;
+}
+
 static vlib_buffer_extension_t buffer_extension_test_a = {
   .name = "unittest-buffer-extension-a",
   .size = sizeof (buffer_extension_test_data_t),
@@ -69,6 +93,12 @@ static vlib_buffer_extension_t buffer_extension_test_b = {
   .name = "unittest-buffer-extension-b",
   .size = CLIB_CACHE_LINE_BYTES,
   .align = 2 * CLIB_CACHE_LINE_BYTES,
+};
+
+static vlib_buffer_extension_t buffer_extension_test_after_freeze = {
+  .name = "unittest-buffer-extension-after-freeze",
+  .size = 1,
+  .align = 1,
 };
 
 static void __clib_constructor
@@ -87,6 +117,8 @@ test_buffer_extensions (vlib_main_t *vm, unformat_input_t *input, vlib_cli_comma
   u32 buffers[4];
   u32 n_buffers;
   u32 alloc_count;
+  u32 compat_alloc_count;
+  u32 compat_free_count;
   u32 free_count;
   uword i;
 
@@ -94,12 +126,20 @@ test_buffer_extensions (vlib_main_t *vm, unformat_input_t *input, vlib_cli_comma
   (void) cmd;
 
   TEST (buffer_extension_test_init_count != 0, "buffer extension initializers were not called");
+  TEST (vlib_buffer_register_extension (&buffer_extension_test_after_freeze) != 0,
+	"buffer extension registration succeeded after layout freeze");
+  TEST (vlib_buffer_set_alloc_free_callback (vm, buffer_extension_test_compat_alloc,
+					     buffer_extension_test_compat_free) == 0,
+	"failed to register compatibility lifecycle observer");
 
   alloc_count = buffer_extension_test_alloc_count;
+  compat_alloc_count = buffer_extension_test_compat_alloc_count;
   n_buffers = vlib_buffer_alloc (vm, buffers, ARRAY_LEN (buffers));
   TEST (n_buffers == ARRAY_LEN (buffers), "failed to allocate test buffers");
   TEST (buffer_extension_test_alloc_count == alloc_count + n_buffers,
 	"buffer allocation observer was not called");
+  TEST (buffer_extension_test_compat_alloc_count == compat_alloc_count + n_buffers,
+	"compatibility allocation observer was not called");
 
   for (i = 0; i < n_buffers; i++)
     {
@@ -119,9 +159,14 @@ test_buffer_extensions (vlib_main_t *vm, unformat_input_t *input, vlib_cli_comma
     }
 
   free_count = buffer_extension_test_free_count;
+  compat_free_count = buffer_extension_test_compat_free_count;
   vlib_buffer_free (vm, buffers, n_buffers);
   TEST (buffer_extension_test_free_count == free_count + n_buffers,
 	"buffer free observer was not called");
+  TEST (buffer_extension_test_compat_free_count == compat_free_count + n_buffers,
+	"compatibility free observer was not called");
+  TEST (vlib_buffer_set_alloc_free_callback (vm, 0, 0) == 0,
+	"failed to unregister compatibility lifecycle observer");
 
   vlib_cli_output (vm, "buffer extension test passed");
   return 0;
