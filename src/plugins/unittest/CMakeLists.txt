@@ -79,6 +79,7 @@ add_vpp_plugin(unittest
   svm_fifo_test.c
   segment_manager_test.c
   tcp_test.c
+  buffer_extension_test.c
   test_buffer.c
   time_test.c
   unittest.c

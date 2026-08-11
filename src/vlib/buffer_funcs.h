@@ -778,8 +778,8 @@ done:
   if (CLIB_DEBUG > 0)
     vlib_buffer_validate_alloc_free (vm, buffers, n_buffers,
 				     VLIB_BUFFER_KNOWN_FREE);
-  if (PREDICT_FALSE (bm->alloc_callback_fn != 0))
-    bm->alloc_callback_fn (vm, buffer_pool_index, buffers, n_buffers);
+  if (PREDICT_FALSE (bm->has_extension_lifecycle_callbacks))
+    vlib_buffer_extension_alloc (vm, buffer_pool_index, buffers, n_buffers);
   return n_buffers;
 }
 
@@ -890,8 +890,8 @@ vlib_buffer_pool_put (vlib_main_t * vm, u8 buffer_pool_index,
   if (CLIB_DEBUG > 0)
     vlib_buffer_validate_alloc_free (vm, buffers, n_buffers,
 				     VLIB_BUFFER_KNOWN_ALLOCATED);
-  if (PREDICT_FALSE (bm->free_callback_fn != 0))
-    bm->free_callback_fn (vm, buffer_pool_index, buffers, n_buffers);
+  if (PREDICT_FALSE (bm->has_extension_lifecycle_callbacks))
+    vlib_buffer_extension_free (vm, buffer_pool_index, buffers, n_buffers);
 
   n_cached = bpt->n_cached;
   n_empty = VLIB_BUFFER_POOL_PER_THREAD_CACHE_SZ - n_cached;

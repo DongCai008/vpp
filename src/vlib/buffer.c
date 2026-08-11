@@ -27,7 +27,127 @@ STATIC_ASSERT_FITS_IN (vlib_buffer_t, ref_count, 16);
 STATIC_ASSERT_FITS_IN (vlib_buffer_t, buffer_pool_index, 16);
 #endif
 
-u16 __vlib_buffer_external_hdr_size = 0;
+static vlib_buffer_extension_t **vlib_buffer_extensions;
+static u8 vlib_buffer_extensions_frozen;
+
+int
+vlib_buffer_register_extension (vlib_buffer_extension_t *extension)
+{
+  vlib_buffer_extension_t **ext;
+
+  if (vlib_buffer_extensions_frozen || !extension || !extension->name ||
+      !extension->size || !extension->align || !is_pow2 (extension->align))
+    return 1;
+
+  if ((extension->flags & VLIB_BUFFER_EXTENSION_F_ADJACENT) &&
+      extension->size % extension->align)
+    return 1;
+
+  vec_foreach (ext, vlib_buffer_extensions)
+    {
+      if (*ext == extension || !strcmp ((*ext)->name, extension->name))
+	return 1;
+
+      if ((extension->flags & VLIB_BUFFER_EXTENSION_F_ADJACENT) &&
+	  ((*ext)->flags & VLIB_BUFFER_EXTENSION_F_ADJACENT))
+	return 1;
+    }
+
+  vec_add1 (vlib_buffer_extensions, extension);
+  return 0;
+}
+
+static clib_error_t *
+vlib_buffer_extensions_layout_init (vlib_buffer_main_t *bm)
+{
+  vlib_buffer_extension_t **ext;
+  uword size = 0;
+  uword align = CLIB_CACHE_LINE_BYTES;
+  u8 has_adjacent = 0;
+
+  vec_foreach (ext, vlib_buffer_extensions)
+    if (!((*ext)->flags & VLIB_BUFFER_EXTENSION_F_ADJACENT))
+      {
+	size = round_pow2 (size, (*ext)->align);
+	(*ext)->offset = size;
+	size += (*ext)->size;
+	align = clib_max (align, (*ext)->align);
+      }
+
+  vec_foreach (ext, vlib_buffer_extensions)
+    if ((*ext)->flags & VLIB_BUFFER_EXTENSION_F_ADJACENT)
+      {
+	uword extension_align =
+	  clib_max ((*ext)->align, CLIB_CACHE_LINE_BYTES);
+
+	size = round_pow2 (size + (*ext)->size, extension_align);
+	(*ext)->offset = size - (*ext)->size;
+	align = clib_max (align, (*ext)->align);
+	has_adjacent = 1;
+      }
+
+  if (!has_adjacent)
+    size = CLIB_CACHE_LINE_ROUND (size);
+
+  if (size > (u16) ~0)
+    return clib_error_return (0, "buffer extension header is too large");
+
+  bm->extensions = vec_dup (vlib_buffer_extensions);
+  bm->ext_hdr_size = size;
+  bm->ext_hdr_align = align;
+  vlib_buffer_extensions_frozen = 1;
+
+  vec_foreach (ext, bm->extensions)
+    {
+      (*ext)->offset -= size;
+      if ((*ext)->alloc || (*ext)->free)
+	bm->has_extension_lifecycle_callbacks = 1;
+    }
+
+  return 0;
+}
+
+void
+vlib_buffer_extension_init (vlib_main_t *vm, vlib_buffer_t *b)
+{
+  vlib_buffer_extension_t **ext;
+
+  vec_foreach (ext, vm->buffer_main->extensions)
+    if ((*ext)->init)
+      (*ext)->init (vm, b, vlib_buffer_get_extension (b, *ext));
+}
+
+static void
+vlib_buffer_extension_lifecycle (vlib_main_t *vm, u8 buffer_pool_index,
+				 u32 *buffers, u32 n_buffers, u8 is_alloc)
+{
+  vlib_buffer_extension_t **ext;
+
+  vec_foreach (ext, vm->buffer_main->extensions)
+    {
+      vlib_buffer_extension_lifecycle_fn_t *fn =
+	is_alloc ? (*ext)->alloc : (*ext)->free;
+
+      if (fn)
+	fn (vm, buffer_pool_index, buffers, n_buffers, *ext);
+    }
+}
+
+void
+vlib_buffer_extension_alloc (vlib_main_t *vm, u8 buffer_pool_index,
+			     u32 *buffers, u32 n_buffers)
+{
+  vlib_buffer_extension_lifecycle (vm, buffer_pool_index, buffers, n_buffers,
+				   1);
+}
+
+void
+vlib_buffer_extension_free (vlib_main_t *vm, u8 buffer_pool_index,
+			    u32 *buffers, u32 n_buffers)
+{
+  vlib_buffer_extension_lifecycle (vm, buffer_pool_index, buffers, n_buffers,
+				   0);
+}
 
 uword
 vlib_buffer_length_in_chain_slow_path (vlib_main_t *vm, vlib_buffer_t *b_first)
@@ -622,14 +742,17 @@ vlib_buffer_chain_append_data_with_alloc (vlib_main_t * vm,
 }
 
 static uword
-vlib_buffer_alloc_size (uword ext_hdr_size, uword data_size)
+vlib_buffer_alloc_size (uword ext_hdr_size, uword ext_hdr_align,
+			uword data_size)
 {
+  uword align = clib_max (VLIB_BUFFER_ALIGN, ext_hdr_align);
   uword alloc_size = ext_hdr_size + sizeof (vlib_buffer_t) + data_size;
-  alloc_size = round_pow2 (alloc_size, VLIB_BUFFER_ALIGN);
+  alloc_size = round_pow2 (alloc_size, align);
 
   /* in case when we have even number of 'cachelines', we add one more for
    * better cache occupancy */
-  alloc_size |= VLIB_BUFFER_ALIGN;
+  if (align == VLIB_BUFFER_ALIGN)
+    alloc_size |= VLIB_BUFFER_ALIGN;
 
   return alloc_size;
 }
@@ -695,7 +818,8 @@ vlib_buffer_pool_create_from_map (vlib_main_t *vm, u32 data_size,
   vec_validate_aligned (bp->threads, vlib_get_n_threads () - 1,
 			CLIB_CACHE_LINE_BYTES);
 
-  alloc_size = vlib_buffer_alloc_size (bm->ext_hdr_size, data_size);
+  alloc_size = vlib_buffer_alloc_size (bm->ext_hdr_size, bm->ext_hdr_align,
+				       data_size);
   bp->alloc_size = alloc_size;
 
   /* preallocate buffer indices memory */
@@ -729,6 +853,7 @@ vlib_buffer_pool_create_from_map (vlib_main_t *vm, u32 data_size,
 
       b = (vlib_buffer_t *) (p + bm->ext_hdr_size);
       b->template = bp->buffer_template;
+      vlib_buffer_extension_init (vm, b);
       bi = vlib_get_buffer_index (vm, b);
       bp->buffers[bp->n_avail++] = bi;
       vlib_get_buffer (vm, bi);
@@ -757,7 +882,7 @@ vlib_buffer_pool_create (vlib_main_t *vm, u32 data_size, u32 n_buffers,
     return clib_error_return (0, "vlib main threads are not initialized");
 
   alloc_size = vlib_buffer_alloc_size (vm->buffer_main->ext_hdr_size,
-				       data_size);
+				       vm->buffer_main->ext_hdr_align, data_size);
   map_size = round_pow2 ((uword) (n_buffers + 2) * alloc_size,
 			 CLIB_MEM_PAGE_SZ_2M);
   error = vlib_physmem_shared_map_create (vm, name, map_size,
@@ -785,22 +910,28 @@ format_vlib_buffer_pool (u8 * s, va_list * va)
   u32 cached = 0;
 
   if (!bp)
-    return format (s, "%-20s%=6s%=6s%=6s%=11s%=6s%=8s%=8s%=8s",
-		   "Pool Name", "Index", "NUMA", "Size", "Data Size",
-		   "Total", "Avail", "Cached", "Used");
+    return format (s, "%-20s%=6s%=6s%=6s%=9s%=11s%=6s%=8s%=8s%=8s",
+		   "Pool Name", "Index", "NUMA", "Size", "Ext Size",
+		   "Data Size", "Total", "Avail", "Cached", "Used");
 
   vec_foreach (bpt, bp->threads)
     cached += bpt->n_cached;
 
-  s = format (s, "%-20v%=6d%=6d%=6u%=11u%=6u%=8u%=8u%=8u", bp->name, bp->index,
-	      bp->numa_node,
-	      bp->data_size + sizeof (vlib_buffer_t) +
+  s = format (s, "%-20v%=6d%=6d%=6u%=9u%=11u%=6u%=8u%=8u%=8u", bp->name,
+		      bp->index, bp->numa_node,
+		      bp->data_size + sizeof (vlib_buffer_t) +
 		vm->buffer_main->ext_hdr_size,
-	      bp->data_size, bp->n_buffers, bp->n_avail, cached,
-	      bp->n_buffers - bp->n_avail - cached);
+		      vm->buffer_main->ext_hdr_size, bp->data_size, bp->n_buffers,
+		      bp->n_avail, cached, bp->n_buffers - bp->n_avail - cached);
 
   if (detail)
     {
+      vlib_buffer_extension_t **ext;
+
+      vec_foreach (ext, vm->buffer_main->extensions)
+	s = format (s, "\n  extension %s: offset %ld, size %lu, align %lu",
+		    (*ext)->name, (*ext)->offset, (*ext)->size, (*ext)->align);
+
       vec_foreach (bpt, bp->threads)
 	s = format (s, "\n%20s%=6d%=37s%=8u", "thread", bpt - bp->threads, "",
 		    bpt->n_cached);
@@ -889,7 +1020,7 @@ vlib_buffer_main_init_numa_alloc (struct vlib_main_t *vm, u32 numa_node,
   if (pagesize == 0)
     return clib_error_return (0, "page size unknown");
 
-  buffer_size = vlib_buffer_alloc_size (bm->ext_hdr_size,
+  buffer_size = vlib_buffer_alloc_size (bm->ext_hdr_size, bm->ext_hdr_align,
 					vlib_buffer_get_default_data_size
 					(vm));
   if (buffer_size > pagesize)
@@ -1054,7 +1185,8 @@ vlib_buffer_main_init (struct vlib_main_t * vm)
 
   bm = vm->buffer_main;
   bm->log_default = vlib_log_register_class ("buffer", 0);
-  bm->ext_hdr_size = __vlib_buffer_external_hdr_size;
+  if ((err = vlib_buffer_extensions_layout_init (bm)))
+    return err;
 
   clib_spinlock_init (&bm->buffer_known_hash_lockp);
 
@@ -1231,20 +1363,6 @@ vlib_buffer_alloc_may_fail (vlib_main_t * vm, u32 n_buffers)
   return n_buffers;
 }
 #endif
-
-__clib_export int
-vlib_buffer_set_alloc_free_callback (
-  vlib_main_t *vm, vlib_buffer_alloc_free_callback_t *alloc_callback_fn,
-  vlib_buffer_alloc_free_callback_t *free_callback_fn)
-{
-  vlib_buffer_main_t *bm = vm->buffer_main;
-  if ((alloc_callback_fn && bm->alloc_callback_fn) ||
-      (free_callback_fn && bm->free_callback_fn))
-    return 1;
-  bm->alloc_callback_fn = alloc_callback_fn;
-  bm->free_callback_fn = free_callback_fn;
-  return 0;
-}
 
 int
 vlib_buffer_alloc_fault_injector_set (vlib_main_t *vm, u64 fail_at)

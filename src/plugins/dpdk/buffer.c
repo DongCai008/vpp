@@ -25,6 +25,20 @@ struct rte_mempool **dpdk_mempool_by_buffer_pool_index = 0;
 struct rte_mempool **dpdk_no_cache_mempool_by_buffer_pool_index = 0;
 struct rte_mbuf *dpdk_mbuf_template_by_pool_index = 0;
 
+static vlib_buffer_extension_t dpdk_buffer_extension = {
+  .name = "dpdk-rte-mbuf",
+  .size = sizeof (struct rte_mempool_objhdr) + sizeof (struct rte_mbuf),
+  .align = CLIB_CACHE_LINE_BYTES,
+  .flags = VLIB_BUFFER_EXTENSION_F_ADJACENT,
+};
+
+static void __clib_constructor
+dpdk_buffer_extension_register (void)
+{
+  if (vlib_buffer_register_extension (&dpdk_buffer_extension))
+    clib_panic ("failed to register DPDK buffer extension");
+}
+
 clib_error_t *
 dpdk_buffer_pool_init (vlib_main_t * vm, vlib_buffer_pool_t * bp)
 {
@@ -97,6 +111,8 @@ dpdk_buffer_pool_init (vlib_main_t * vm, vlib_buffer_pool_t * bp)
       struct rte_mempool_objhdr *hdr;
       vlib_buffer_t *b = vlib_get_buffer (vm, bp->buffers[i]);
       struct rte_mbuf *mb = rte_mbuf_from_vlib_buffer (b);
+      ASSERT ((u8 *) vlib_buffer_get_extension (b, &dpdk_buffer_extension) +
+	      dpdk_buffer_extension.size == (u8 *) b);
       hdr = (struct rte_mempool_objhdr *) RTE_PTR_SUB (mb, sizeof (*hdr));
       hdr->mp = mp;
       hdr->iova = (iova_mode == RTE_IOVA_VA) ?
@@ -433,9 +449,6 @@ dpdk_buffer_pools_create (vlib_main_t * vm)
       return err;
   return 0;
 }
-
-VLIB_BUFFER_SET_EXT_HDR_SIZE (sizeof (struct rte_mempool_objhdr) +
-			      sizeof (struct rte_mbuf));
 
 #endif
 

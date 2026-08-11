@@ -462,9 +462,29 @@ typedef struct
 
 #define VLIB_BUFFER_MAX_NUMA_NODES 32
 
-typedef u32 (vlib_buffer_alloc_free_callback_t) (struct vlib_main_t *vm,
-						 u8 buffer_pool_index,
-						 u32 *buffers, u32 n_buffers);
+typedef struct vlib_buffer_extension_t vlib_buffer_extension_t;
+
+typedef void (vlib_buffer_extension_init_fn_t) (
+  struct vlib_main_t *vm, vlib_buffer_t *b, void *extension);
+typedef void (vlib_buffer_extension_lifecycle_fn_t) (
+  struct vlib_main_t *vm, u8 buffer_pool_index, u32 *buffers, u32 n_buffers,
+  vlib_buffer_extension_t *extension);
+
+/* The extension is immediately before vlib_buffer_t. */
+#define VLIB_BUFFER_EXTENSION_F_ADJACENT (1 << 0)
+
+struct vlib_buffer_extension_t
+{
+  char *name;
+  uword size;
+  uword align;
+  word offset;
+  u32 flags;
+  void *opaque;
+  vlib_buffer_extension_init_fn_t *init;
+  vlib_buffer_extension_lifecycle_fn_t *alloc;
+  vlib_buffer_extension_lifecycle_fn_t *free;
+};
 
 typedef struct
 {
@@ -474,9 +494,8 @@ typedef struct
   uword buffer_mem_start;
   uword buffer_mem_size;
   vlib_buffer_pool_t *buffer_pools;
-
-  vlib_buffer_alloc_free_callback_t *alloc_callback_fn;
-  vlib_buffer_alloc_free_callback_t *free_callback_fn;
+  vlib_buffer_extension_t **extensions;
+  u8 has_extension_lifecycle_callbacks;
 
   u8 default_buffer_pool_index_for_numa[VLIB_BUFFER_MAX_NUMA_NODES];
 
@@ -484,6 +503,7 @@ typedef struct
   u32 default_buffers_per_numa;
   u32 buffers_per_numa[VLIB_BUFFER_MAX_NUMA_NODES];
   u16 ext_hdr_size;
+  uword ext_hdr_align;
   u32 default_data_size;
   clib_mem_page_sz_t log2_page_size;
 
@@ -507,18 +527,20 @@ clib_error_t *vlib_buffer_pool_create (struct vlib_main_t *vm, u32 data_size,
 
 format_function_t format_vlib_buffer_pool_all;
 
-int vlib_buffer_set_alloc_free_callback (
-  struct vlib_main_t *vm, vlib_buffer_alloc_free_callback_t *alloc_callback_fn,
-  vlib_buffer_alloc_free_callback_t *free_callback_fn);
+int vlib_buffer_register_extension (vlib_buffer_extension_t *extension);
+void vlib_buffer_extension_init (struct vlib_main_t *vm, vlib_buffer_t *b);
+void vlib_buffer_extension_alloc (struct vlib_main_t *vm,
+				  u8 buffer_pool_index, u32 *buffers,
+				  u32 n_buffers);
+void vlib_buffer_extension_free (struct vlib_main_t *vm,
+				 u8 buffer_pool_index, u32 *buffers,
+				 u32 n_buffers);
 
-extern u16 __vlib_buffer_external_hdr_size;
-#define VLIB_BUFFER_SET_EXT_HDR_SIZE(x) \
-static void __clib_constructor \
-vnet_buffer_set_ext_hdr_size() \
-{ \
-  if (__vlib_buffer_external_hdr_size) \
-    clib_error ("buffer external header space already set"); \
-  __vlib_buffer_external_hdr_size = CLIB_CACHE_LINE_ROUND (x); \
+always_inline void *
+vlib_buffer_get_extension (vlib_buffer_t *b,
+			   const vlib_buffer_extension_t *extension)
+{
+  return (u8 *) b + extension->offset;
 }
 
 #endif /* included_vlib_buffer_h */
