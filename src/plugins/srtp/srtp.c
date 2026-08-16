@@ -574,7 +574,7 @@ srtp_enable (vlib_main_t *vm, u8 is_en)
 }
 
 int
-srtp_connect (transport_endpoint_cfg_t *tep)
+srtp_connect (transport_endpoint_cfg_t *tep, transport_connection_t **tconn)
 {
   vnet_connect_args_t _cargs = { {}, }, *cargs = &_cargs;
   u32 thread_index = transport_cl_thread ();
@@ -616,7 +616,8 @@ srtp_connect (transport_endpoint_cfg_t *tep)
     return rv;
 
   SRTP_DBG (1, "New connect request %u", ctx_index);
-  return ctx_index;
+  *tconn = &ctx->connection;
+  return 0;
 }
 
 static void

@@ -816,7 +816,7 @@ tcp_alloc_custom_local_endpoint (ip46_address_t *lcl_addr, u16 *lcl_port,
 }
 
 static int
-tcp_session_open (transport_endpoint_cfg_t * rmt)
+tcp_session_open (transport_endpoint_cfg_t *rmt, transport_connection_t **tconn)
 {
   tcp_connection_t *tc;
   ip46_address_t lcl_addr;
@@ -861,7 +861,8 @@ tcp_session_open (transport_endpoint_cfg_t * rmt)
   tcp_init_snd_vars (tc);
   tcp_send_syn (tc);
 
-  return tc->c_c_index;
+  *tconn = &tc->connection;
+  return 0;
 }
 
 static u8 *

@@ -441,8 +441,8 @@ ct_program_connect_to_wrk (u32 ho_index)
 }
 
 static int
-ct_connect (app_worker_t *client_wrk, session_t *ll,
-	    session_endpoint_cfg_t *sep)
+ct_connect (app_worker_t *client_wrk, session_t *ll, session_endpoint_cfg_t *sep,
+	    transport_connection_t **tconn)
 {
   ct_connection_t *ho;
   u32 ho_index;
@@ -472,7 +472,8 @@ ct_connect (app_worker_t *client_wrk, session_t *ll,
    */
   ct_program_connect_to_wrk (ho_index);
 
-  return ho_index;
+  *tconn = &ho->connection;
+  return 0;
 }
 
 static u32
@@ -551,7 +552,7 @@ ct_listener_is_self_proxy (application_t *app, session_t *ll)
 }
 
 static int
-ct_session_connect (transport_endpoint_cfg_t * tep)
+ct_session_connect (transport_endpoint_cfg_t *tep, transport_connection_t **tconn)
 {
   session_endpoint_cfg_t *sep_ext;
   session_endpoint_t _sep, *sep = &_sep;
@@ -585,7 +586,7 @@ ct_session_connect (transport_endpoint_cfg_t * tep)
   if (ct_listener_is_self_proxy (app, ll))
     goto global_scope;
 
-  return ct_connect (app_wrk, ll, sep_ext);
+  return ct_connect (app_wrk, ll, sep_ext, tconn);
 
   /*
    * If nothing found, check the global scope for locally attached
@@ -607,7 +608,7 @@ global_scope:
   if (ll)
     {
       if (!ct_listener_is_self_proxy (app, ll))
-	return ct_connect (app_wrk, ll, sep_ext);
+	return ct_connect (app_wrk, ll, sep_ext, tconn);
     }
 
   /* Failed to connect but no error */

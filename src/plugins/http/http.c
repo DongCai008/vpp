@@ -1109,7 +1109,7 @@ http_transport_enable (vlib_main_t *vm, u8 is_en)
 }
 
 static int
-http_connect_connection (session_endpoint_cfg_t *sep)
+http_connect_connection (session_endpoint_cfg_t *sep, transport_connection_t **tconn)
 {
   vnet_connect_args_t _cargs, *cargs = &_cargs;
   http_main_t *hm = &http_main;
@@ -1212,7 +1212,8 @@ http_connect_connection (session_endpoint_cfg_t *sep)
   props = application_segment_manager_properties (app);
   ho_hc->hc_app_rx_fifo_size = props->rx_fifo_size;
 
-  return ho_hc_index;
+  *tconn = &ho_hc->connection;
+  return 0;
 }
 
 static int
@@ -1253,12 +1254,12 @@ http_connect_stream (u64 parent_handle, u32 *req_index)
 }
 
 static int
-http_transport_connect (transport_endpoint_cfg_t *tep)
+http_transport_connect (transport_endpoint_cfg_t *tep, transport_connection_t **tconn)
 {
   session_endpoint_cfg_t *sep = (session_endpoint_cfg_t *) tep;
 
   ASSERT (sep->parent_handle == SESSION_INVALID_HANDLE);
-  return http_connect_connection (sep);
+  return http_connect_connection (sep, tconn);
 }
 
 static int

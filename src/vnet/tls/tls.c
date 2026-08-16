@@ -601,7 +601,7 @@ static session_cb_vft_t tls_app_cb_vft = {
 };
 
 int
-tls_connect (transport_endpoint_cfg_t * tep)
+tls_connect (transport_endpoint_cfg_t *tep, transport_connection_t **tconn)
 {
   vnet_connect_args_t _cargs = { {}, }, *cargs = &_cargs;
   transport_endpt_crypto_cfg_t *ccfg;
@@ -681,7 +681,8 @@ tls_connect (transport_endpoint_cfg_t * tep)
   ctx->tls_session_handle = cargs->sh;
 
   TLS_DBG (1, "New connect request %u engine %d", ctx_index, engine_type);
-  return ctx_index;
+  *tconn = &ctx->connection;
+  return 0;
 }
 
 void
@@ -1250,7 +1251,7 @@ static const transport_proto_vft_t tls_proto = {
 };
 
 int
-dtls_connect (transport_endpoint_cfg_t *tep)
+dtls_connect (transport_endpoint_cfg_t *tep, transport_connection_t **tconn)
 {
   vnet_connect_args_t _cargs = { {}, }, *cargs = &_cargs;
   transport_endpt_crypto_cfg_t *ccfg;
@@ -1267,7 +1268,7 @@ dtls_connect (transport_endpoint_cfg_t *tep)
   sep = (session_endpoint_cfg_t *) tep;
   ext_cfg = session_endpoint_get_ext_cfg (sep, TRANSPORT_ENDPT_EXT_CFG_CRYPTO);
   if (!ext_cfg)
-    return -1;
+    return SESSION_E_UNKNOWN;
 
   app_wrk = app_worker_get (sep->app_wrk_index);
   app = application_get (app_wrk->app_index);
@@ -1278,7 +1279,7 @@ dtls_connect (transport_endpoint_cfg_t *tep)
   if (engine_type == CRYPTO_ENGINE_NONE)
     {
       clib_warning ("No tls engine_type available");
-      return -1;
+      return SESSION_E_UNKNOWN;
     }
 
   ctx_handle = tls_ctx_alloc_w_thread (engine_type, transport_cl_thread ());
@@ -1313,7 +1314,8 @@ dtls_connect (transport_endpoint_cfg_t *tep)
 
   TLS_DBG (1, "New DTLS connect request %x engine %d", ctx_handle,
 	   engine_type);
-  return ctx_handle;
+  *tconn = &ctx->connection;
+  return 0;
 }
 
 static transport_connection_t *

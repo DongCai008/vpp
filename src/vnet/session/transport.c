@@ -489,11 +489,13 @@ transport_cleanup_half_open (transport_proto_t tp, u32 conn_index, clib_thread_i
 }
 
 int
-transport_connect (transport_proto_t tp, transport_endpoint_cfg_t * tep)
+transport_connect (transport_proto_t tp, transport_endpoint_cfg_t *tep,
+		   transport_connection_t **tconn)
 {
+  *tconn = 0;
   if (PREDICT_FALSE (!tp_vfts[tp].connect))
     return SESSION_E_TRANSPORT_NO_REG;
-  return tp_vfts[tp].connect (tep);
+  return tp_vfts[tp].connect (tep, tconn);
 }
 
 int

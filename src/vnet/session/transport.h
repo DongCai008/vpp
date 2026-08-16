@@ -64,7 +64,7 @@ typedef struct _transport_proto_vft
    */
   u32 (*start_listen) (u32 session_index, transport_endpoint_cfg_t *lcl);
   u32 (*stop_listen) (u32 conn_index);
-  int (*connect) (transport_endpoint_cfg_t * rmt);
+  int (*connect) (transport_endpoint_cfg_t *rmt, transport_connection_t **tconn);
   int (*connect_stream) (transport_endpoint_cfg_t *rmt,
 			 session_t *session_index, u32 *conn_index);
   void (*half_close) (u32 conn_index, clib_thread_index_t thread_index);
@@ -128,7 +128,8 @@ extern transport_proto_vft_t *tp_vfts;
     if (tp_vfts[VAR].push_header != 0)                                        \
       if (VAR_ALLOW_BM & (1 << VAR))
 
-int transport_connect (transport_proto_t tp, transport_endpoint_cfg_t * tep);
+int transport_connect (transport_proto_t tp, transport_endpoint_cfg_t *tep,
+		       transport_connection_t **tconn);
 int transport_connect_stream (transport_proto_t tp,
 			      transport_endpoint_cfg_t *tep,
 			      session_t *stream_session, u32 *conn_index);

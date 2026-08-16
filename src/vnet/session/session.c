@@ -1289,14 +1289,17 @@ session_open_cl (session_endpoint_cfg_t *rmt, session_handle_t *rsh)
   int rv;
 
   tep = session_endpoint_to_transport_cfg (rmt);
-  rv = transport_connect (rmt->transport_proto, tep);
-  if (rv < 0)
+  rv = transport_connect (rmt->transport_proto, tep, &tc);
+  if (rv)
     {
       SESSION_DBG ("Transport failed to open connection.");
       return rv;
     }
-
-  tc = transport_get_half_open (rmt->transport_proto, (u32) rv, transport_cl_thread ());
+  if (!tc)
+    {
+      SESSION_DBG ("Transport failed to open connection.");
+      return SESSION_E_UNKNOWN;
+    }
 
   /* For dgram type of service, allocate session and fifos now */
   app_wrk = app_worker_get (rmt->app_wrk_index);
@@ -1331,14 +1334,17 @@ session_open_vc (session_endpoint_cfg_t *rmt, session_handle_t *rsh)
   int rv;
 
   tep = session_endpoint_to_transport_cfg (rmt);
-  rv = transport_connect (rmt->transport_proto, tep);
-  if (rv < 0)
+  rv = transport_connect (rmt->transport_proto, tep, &tc);
+  if (rv)
     {
       SESSION_DBG ("Transport failed to open connection.");
       return rv;
     }
-
-  tc = transport_get_half_open (rmt->transport_proto, (u32) rv, transport_cl_thread ());
+  if (!tc)
+    {
+      SESSION_DBG ("Transport failed to open connection.");
+      return SESSION_E_UNKNOWN;
+    }
 
   app_wrk = app_worker_get (rmt->app_wrk_index);
 

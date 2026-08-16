@@ -405,7 +405,7 @@ udp_session_send_params (transport_connection_t * tconn,
 }
 
 static int
-udp_open_connection (transport_endpoint_cfg_t * rmt)
+udp_open_connection (transport_endpoint_cfg_t *rmt, transport_connection_t **tconn)
 {
   udp_main_t *um = &udp_main;
   ip46_address_t lcl_addr;
@@ -467,7 +467,8 @@ udp_open_connection (transport_endpoint_cfg_t * rmt)
 
   udp_connection_register_port (uc->c_lcl_port, rmt->is_ip4);
 
-  return uc->c_c_index;
+  *tconn = &uc->connection;
+  return 0;
 }
 
 static transport_connection_t *

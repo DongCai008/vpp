@@ -75,7 +75,7 @@ quic_ctx_set_alpn_protos (quic_ctx_t *ctx, transport_endpt_crypto_cfg_t *ccfg)
 }
 
 static int
-quic_connect_connection (transport_endpoint_cfg_t *tep)
+quic_connect_connection (transport_endpoint_cfg_t *tep, transport_connection_t **tconn)
 {
   session_endpoint_cfg_t *sep = (session_endpoint_cfg_t *) tep;
   vnet_connect_args_t _cargs = {}, *cargs = &_cargs;
@@ -157,7 +157,8 @@ quic_connect_connection (transport_endpoint_cfg_t *tep)
   if (error)
     return error;
 
-  return ctx_index;
+  *tconn = &ctx->connection;
+  return 0;
 }
 
 static int
