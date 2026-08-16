@@ -8,6 +8,7 @@
  */
 
 #include "map.h"
+#include <vnet/buffer_shinfo.h>
 #include <vnet/ip/ip_frag.h>
 #include <vnet/ip/ip4_to_ip6.h>
 

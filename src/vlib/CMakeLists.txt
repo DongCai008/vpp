@@ -137,8 +137,9 @@ add_vpp_library(vlib
   node_init.c
 
   INSTALL_HEADERS
-  buffer_funcs.h
   buffer.h
+  buffer_fault_injector.h
+  buffer_funcs.h
   buffer_node.h
   cli.h
   counter.h
