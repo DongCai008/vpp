@@ -867,20 +867,20 @@ tls_listener_get (u32 listener_index)
 }
 
 static transport_connection_t *
-tls_half_open_get (u32 ho_index)
+tls_half_open_get (u32 ho_index, clib_thread_index_t thread_index)
 {
   tls_ctx_t *ctx;
-  ctx = tls_ctx_half_open_get (ho_index);
+  ctx = tls_ctx_get_w_thread (ho_index, thread_index);
   return &ctx->connection;
 }
 
 static void
-tls_cleanup_ho (u32 ho_index)
+tls_cleanup_ho (u32 ho_index, clib_thread_index_t thread_index)
 {
   tls_ctx_t *ctx;
   session_t *s;
 
-  ctx = tls_ctx_half_open_get (ho_index);
+  ctx = tls_ctx_get_w_thread (ho_index, thread_index);
   /* Already pending cleanup */
   if (ctx->tls_session_handle == SESSION_INVALID_HANDLE)
     {
@@ -1317,10 +1317,10 @@ dtls_connect (transport_endpoint_cfg_t *tep)
 }
 
 static transport_connection_t *
-dtls_half_open_get (u32 ho_index)
+dtls_half_open_get (u32 ho_index, clib_thread_index_t thread_index)
 {
   tls_ctx_t *ho_ctx;
-  ho_ctx = tls_ctx_get_w_thread (ho_index, transport_cl_thread ());
+  ho_ctx = tls_ctx_get_w_thread (ho_index, thread_index);
   return &ho_ctx->connection;
 }
 
@@ -1331,10 +1331,10 @@ dtls_cleanup_callback (u32 ctx_index, clib_thread_index_t thread_index)
 }
 
 static void
-dtls_cleanup_ho (u32 ho_index)
+dtls_cleanup_ho (u32 ho_index, clib_thread_index_t thread_index)
 {
   tls_ctx_t *ctx;
-  ctx = tls_ctx_get_w_thread (ho_index, transport_cl_thread ());
+  ctx = tls_ctx_get_w_thread (ho_index, thread_index);
   tls_ctx_free (ctx);
 }
 

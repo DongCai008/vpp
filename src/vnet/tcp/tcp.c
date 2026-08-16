@@ -487,12 +487,12 @@ tcp_session_cleanup (u32 conn_index, clib_thread_index_t thread_index)
 }
 
 static void
-tcp_session_cleanup_ho (u32 conn_index)
+tcp_session_cleanup_ho (u32 conn_index, clib_thread_index_t thread_index)
 {
   tcp_worker_ctx_t *wrk;
   tcp_connection_t *tc;
 
-  tc = tcp_ho_connection_get (conn_index);
+  tc = tcp_connection_get (conn_index, thread_index);
   wrk = tcp_get_worker (tc->c_thread_index);
   tcp_timer_reset (&wrk->timer_wheel, tc, TCP_TIMER_RETRANSMIT_SYN);
   tcp_half_open_connection_free (tc);
@@ -959,10 +959,10 @@ tcp_session_get_transport (u32 conn_index, clib_thread_index_t thread_index)
 }
 
 static transport_connection_t *
-tcp_half_open_session_get_transport (u32 conn_index)
+tcp_half_open_session_get_transport (u32 conn_index, clib_thread_index_t thread_index)
 {
-  tcp_connection_t *tc = tcp_ho_connection_get_if_valid (conn_index);
-  return &tc->connection;
+  tcp_connection_t *tc = tcp_connection_get_if_valid (conn_index, thread_index);
+  return tc ? &tc->connection : 0;
 }
 
 static int

@@ -71,7 +71,7 @@ typedef struct _transport_proto_vft
   void (*close) (u32 conn_index, clib_thread_index_t thread_index);
   void (*reset) (u32 conn_index, clib_thread_index_t thread_index);
   void (*cleanup) (u32 conn_index, clib_thread_index_t thread_index);
-  void (*cleanup_ho) (u32 conn_index);
+  void (*cleanup_ho) (u32 conn_index, clib_thread_index_t thread_index);
   clib_error_t *(*enable) (vlib_main_t * vm, u8 is_en);
 
   /*
@@ -93,7 +93,7 @@ typedef struct _transport_proto_vft
   transport_connection_t *(*get_connection) (u32 conn_idx,
 					     clib_thread_index_t thread_idx);
   transport_connection_t *(*get_listener) (u32 conn_index);
-  transport_connection_t *(*get_half_open) (u32 conn_index);
+  transport_connection_t *(*get_half_open) (u32 conn_index, clib_thread_index_t thread_index);
 
   /*
    * Format
@@ -141,7 +141,8 @@ u32 transport_start_listen (transport_proto_t tp, u32 session_index,
 u32 transport_stop_listen (transport_proto_t tp, u32 conn_index);
 void transport_cleanup (transport_proto_t tp, u32 conn_index,
 			u8 thread_index);
-void transport_cleanup_half_open (transport_proto_t tp, u32 conn_index);
+void transport_cleanup_half_open (transport_proto_t tp, u32 conn_index,
+				  clib_thread_index_t thread_index);
 void transport_get_endpoint (transport_proto_t tp, u32 conn_index,
 			     clib_thread_index_t thread_index,
 			     transport_endpoint_t *tep_rmt,
@@ -167,9 +168,9 @@ transport_get_listener (transport_proto_t tp, u32 conn_index)
 }
 
 static inline transport_connection_t *
-transport_get_half_open (transport_proto_t tp, u32 conn_index)
+transport_get_half_open (transport_proto_t tp, u32 conn_index, clib_thread_index_t thread_index)
 {
-  return tp_vfts[tp].get_half_open (conn_index);
+  return tp_vfts[tp].get_half_open (conn_index, thread_index);
 }
 
 static inline int

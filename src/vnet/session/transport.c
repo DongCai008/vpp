@@ -168,7 +168,7 @@ format_transport_half_open_connection (u8 * s, va_list * args)
     return s;
 
   s = format (s, "%U", tp_vft->format_half_open, conn_index, thread_index, fmt.as_u32);
-  tc = tp_vft->get_half_open ? tp_vft->get_half_open (conn_index) : 0;
+  tc = tp_vft->get_half_open ? tp_vft->get_half_open (conn_index, thread_index) : 0;
   if (tc && fmt.transport_detail)
     {
       indent = format_get_indent (s) + 1;
@@ -482,10 +482,10 @@ transport_cleanup (transport_proto_t tp, u32 conn_index, u8 thread_index)
 }
 
 void
-transport_cleanup_half_open (transport_proto_t tp, u32 conn_index)
+transport_cleanup_half_open (transport_proto_t tp, u32 conn_index, clib_thread_index_t thread_index)
 {
   if (tp_vfts[tp].cleanup_ho)
-    tp_vfts[tp].cleanup_ho (conn_index);
+    tp_vfts[tp].cleanup_ho (conn_index, thread_index);
 }
 
 int

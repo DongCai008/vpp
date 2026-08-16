@@ -1778,22 +1778,22 @@ format_http_transport_half_open (u8 *s, va_list *args)
 }
 
 static transport_connection_t *
-http_transport_get_ho (u32 ho_hc_index)
+http_transport_get_ho (u32 ho_hc_index, clib_thread_index_t thread_index)
 {
   http_ctx_t *ho_hc;
 
   HTTP_DBG (1, "half open: %x", ho_hc_index);
-  ho_hc = http_ho_conn_get (ho_hc_index);
+  ho_hc = http_ctx_get_w_thread (ho_hc_index, thread_index);
   return &ho_hc->connection;
 }
 
 static void
-http_transport_cleanup_ho (u32 ho_hc_index)
+http_transport_cleanup_ho (u32 ho_hc_index, clib_thread_index_t thread_index)
 {
   http_ctx_t *ho_hc;
 
   HTTP_DBG (1, "half open: %x", ho_hc_index);
-  ho_hc = http_ho_conn_get (ho_hc_index);
+  ho_hc = http_ctx_get_w_thread (ho_hc_index, thread_index);
   if (ho_hc->hc_tc_session_handle == SESSION_INVALID_HANDLE)
     {
       HTTP_DBG (1, "already pending cleanup");

@@ -471,13 +471,10 @@ udp_open_connection (transport_endpoint_cfg_t * rmt)
 }
 
 static transport_connection_t *
-udp_session_get_half_open (u32 conn_index)
+udp_session_get_half_open (u32 conn_index, clib_thread_index_t thread_index)
 {
   udp_connection_t *uc;
-  clib_thread_index_t thread_index;
 
-  /* We don't poll main thread if we have workers */
-  thread_index = transport_cl_thread ();
   uc = udp_connection_get (conn_index, thread_index);
   if (!uc)
     return 0;

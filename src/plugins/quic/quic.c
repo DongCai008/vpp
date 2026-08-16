@@ -400,10 +400,10 @@ quic_listener_get (u32 listener_index)
 }
 
 static transport_connection_t *
-quic_half_open_get (u32 ho_index)
+quic_half_open_get (u32 ho_index, clib_thread_index_t thread_index)
 {
   quic_ctx_t *ctx;
-  ctx = quic_ctx_get (ho_index, transport_cl_thread ());
+  ctx = quic_ctx_get (ho_index, thread_index);
   return &ctx->connection;
 }
 
@@ -880,10 +880,9 @@ quic_enable (vlib_main_t *vm, u8 is_en)
 }
 
 static void
-quic_cleanup_ho (u32 ctx_index)
+quic_cleanup_ho (u32 ctx_index, clib_thread_index_t thread_index)
 {
   quic_ctx_t *ctx;
-  clib_thread_index_t thread_index = transport_cl_thread ();
 
   ctx = quic_ctx_get (ctx_index, thread_index);
   /* we need to close quic connection if client detach before handshake is completed, migrated

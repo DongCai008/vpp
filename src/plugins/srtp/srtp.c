@@ -753,10 +753,10 @@ srtp_connection_get (u32 ctx_index, clib_thread_index_t thread_index)
 }
 
 transport_connection_t *
-srtp_ho_connection_get (u32 ctx_index)
+srtp_ho_connection_get (u32 ctx_index, clib_thread_index_t thread_index)
 {
   srtp_tc_t *ctx;
-  ctx = srtp_ctx_get_w_thread (ctx_index, transport_cl_thread ());
+  ctx = srtp_ctx_get_w_thread (ctx_index, thread_index);
   return &ctx->connection;
 }
 

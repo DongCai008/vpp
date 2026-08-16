@@ -152,6 +152,24 @@ typedef struct _transport_connection
 #define s_ho_handle pacer.bytes_per_sec
 } transport_connection_t;
 
+static_always_inline u64
+transport_connection_make_handle (u32 connection_index, clib_thread_index_t thread_index)
+{
+  return ((u64) thread_index << 32) | connection_index;
+}
+
+static_always_inline u32
+transport_connection_index_from_handle (u64 handle)
+{
+  return (u32) handle;
+}
+
+static_always_inline clib_thread_index_t
+transport_connection_thread_from_handle (u64 handle)
+{
+  return handle >> 32;
+}
+
 STATIC_ASSERT (STRUCT_OFFSET_OF (transport_connection_t, is_ip4) == TRANSPORT_CONN_ID_LEN,
 	       "update conn id len");
 STATIC_ASSERT (STRUCT_OFFSET_OF (transport_connection_t, s_index) == TRANSPORT_CONN_ID_AND_TYPE_LEN,

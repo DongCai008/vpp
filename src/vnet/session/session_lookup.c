@@ -915,12 +915,12 @@ session_lookup_half_open_handle (transport_connection_t * tc)
 }
 
 transport_connection_t *
-session_lookup_half_open_connection (u64 handle, u8 proto, u8 is_ip4)
+session_lookup_half_open_connection (u64 handle, u8 proto, u8 __clib_unused is_ip4)
 {
   if (handle != HALF_OPEN_LOOKUP_INVALID_VALUE)
     {
-      u32 sst = session_type_from_proto_and_ip (proto, is_ip4);
-      return transport_get_half_open (sst, handle & 0xFFFFFFFF);
+      return transport_get_half_open (proto, transport_connection_index_from_handle (handle),
+				      transport_connection_thread_from_handle (handle));
     }
   return 0;
 }
@@ -989,7 +989,8 @@ session_lookup_connection_wt4 (u32 fib_index, ip4_address_t *lcl,
    */
   rv = clib_bihash_search_inline_16_8 (&st->v4_half_open_hash, &kv4);
   if (rv == 0)
-    return transport_get_half_open (proto, kv4.value & 0xFFFFFFFF);
+    return transport_get_half_open (proto, transport_connection_index_from_handle (kv4.value),
+				    transport_connection_thread_from_handle (kv4.value));
 
   if (st->srtg_handle != SESSION_SRTG_HANDLE_INVALID)
     {
@@ -1069,7 +1070,8 @@ session_lookup_connection4 (u32 fib_index, ip4_address_t * lcl,
    */
   rv = clib_bihash_search_inline_16_8 (&st->v4_half_open_hash, &kv4);
   if (rv == 0)
-    return transport_get_half_open (proto, kv4.value & 0xFFFFFFFF);
+    return transport_get_half_open (proto, transport_connection_index_from_handle (kv4.value),
+				    transport_connection_thread_from_handle (kv4.value));
 
   if (st->srtg_handle != SESSION_SRTG_HANDLE_INVALID)
     {
@@ -1186,8 +1188,8 @@ session_lookup_connection4_result (u32 fib_index, ip4_address_t *lcl, ip4_addres
   rv = clib_bihash_search_inline_16_8 (&st->v4_half_open_hash, &kv4);
   if (rv == 0)
     {
-      result->connection_index = kv4.value & 0xFFFFFFFF;
-      result->thread_index = vlib_get_thread_index ();
+      result->connection_index = transport_connection_index_from_handle (kv4.value);
+      result->thread_index = transport_connection_thread_from_handle (kv4.value);
       result->transport_proto = proto;
       result->type = SESSION_LOOKUP_CONNECTION_TYPE_HALF_OPEN;
       return 0;
@@ -1334,7 +1336,8 @@ session_lookup_connection_wt6 (u32 fib_index, ip6_address_t *lcl,
   /* Try half-open connections */
   rv = clib_bihash_search_inline_48_8 (&st->v6_half_open_hash, &kv6);
   if (rv == 0)
-    return transport_get_half_open (proto, kv6.value & 0xFFFFFFFF);
+    return transport_get_half_open (proto, transport_connection_index_from_handle (kv6.value),
+				    transport_connection_thread_from_handle (kv6.value));
 
   if (st->srtg_handle != SESSION_SRTG_HANDLE_INVALID)
     {
@@ -1406,7 +1409,8 @@ session_lookup_connection6 (u32 fib_index, ip6_address_t * lcl,
   /* Try half-open connections */
   rv = clib_bihash_search_inline_48_8 (&st->v6_half_open_hash, &kv6);
   if (rv == 0)
-    return transport_get_half_open (proto, kv6.value & 0xFFFFFFFF);
+    return transport_get_half_open (proto, transport_connection_index_from_handle (kv6.value),
+				    transport_connection_thread_from_handle (kv6.value));
 
   if (st->srtg_handle != SESSION_SRTG_HANDLE_INVALID)
     {
@@ -1535,7 +1539,8 @@ session_lookup_6tuple (u32 fib_index, ip46_address_t *lcl, ip46_address_t *rmt,
        */
       rv = clib_bihash_search_inline_16_8 (&st->v4_half_open_hash, &kv4);
       if (rv == 0)
-	return transport_get_half_open (proto, kv4.value & 0xFFFFFFFF);
+	return transport_get_half_open (proto, transport_connection_index_from_handle (kv4.value),
+					transport_connection_thread_from_handle (kv4.value));
     }
   else
     {
@@ -1557,7 +1562,8 @@ session_lookup_6tuple (u32 fib_index, ip46_address_t *lcl, ip46_address_t *rmt,
       /* Try half-open connections */
       rv = clib_bihash_search_inline_48_8 (&st->v6_half_open_hash, &kv6);
       if (rv == 0)
-	return transport_get_half_open (proto, kv6.value & 0xFFFFFFFF);
+	return transport_get_half_open (proto, transport_connection_index_from_handle (kv6.value),
+					transport_connection_thread_from_handle (kv6.value));
     }
   return 0;
 }

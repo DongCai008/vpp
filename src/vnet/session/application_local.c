@@ -508,9 +508,9 @@ ct_listener_get (u32 ct_index)
 }
 
 static transport_connection_t *
-ct_session_half_open_get (u32 ct_index)
+ct_session_half_open_get (u32 ct_index, clib_thread_index_t thread_index)
 {
-  return (transport_connection_t *) ct_half_open_get (ct_index);
+  return (transport_connection_t *) ct_connection_get (ct_index, thread_index);
 }
 
 static void
@@ -530,11 +530,11 @@ ct_session_cleanup (u32 conn_index, clib_thread_index_t thread_index)
 }
 
 static void
-ct_cleanup_ho (u32 ho_index)
+ct_cleanup_ho (u32 ho_index, clib_thread_index_t thread_index)
 {
   ct_connection_t *ho;
 
-  ho = ct_half_open_get (ho_index);
+  ho = ct_connection_get (ho_index, thread_index);
   ct_connection_free (ho);
 }
 

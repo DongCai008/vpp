@@ -1776,6 +1776,7 @@ session_test_tuple_result (vlib_main_t *vm, unformat_input_t *input)
   session_endpoint_t listener_sep = SESSION_ENDPOINT_NULL;
   clib_thread_index_t current_thread = vlib_get_thread_index ();
   clib_thread_index_t foreign_thread = current_thread ? 0 : 1;
+  clib_thread_index_t half_open_thread = 7;
   ip4_address_t local = {
     .as_u32 = clib_host_to_net_u32 (0x0a000001),
   };
@@ -1819,7 +1820,7 @@ session_test_tuple_result (vlib_main_t *vm, unformat_input_t *input)
   established.key[1] = (u64) TRANSPORT_PROTO_TCP << 32 | (u64) remote_port << 16 | local_port;
   established.value = session_handle (foreign);
   half_open = established;
-  half_open.value = 22;
+  half_open.value = transport_connection_make_handle (22, half_open_thread);
   rv = clib_bihash_add_del_16_8 (&table->v4_session_hash, &established, 1);
   SESSION_TEST ((rv == 0), "foreign established tuple should publish");
   rv = clib_bihash_add_del_16_8 (&table->v4_half_open_hash, &half_open, 1);
@@ -1842,9 +1843,9 @@ session_test_tuple_result (vlib_main_t *vm, unformat_input_t *input)
 					  TRANSPORT_PROTO_TCP, &result);
   SESSION_TEST ((rv == 0 && result.type == SESSION_LOOKUP_CONNECTION_TYPE_HALF_OPEN &&
 		 result.session_handle == SESSION_INVALID_HANDLE && result.connection_index == 22 &&
-		 result.thread_index == current_thread &&
+		 result.thread_index == half_open_thread &&
 		 result.transport_proto == TRANSPORT_PROTO_TCP),
-		"half-open tuple should use the current-worker owner sentinel");
+		"half-open tuple should preserve its transport owner");
 
   rv = clib_bihash_add_del_16_8 (&table->v4_half_open_hash, &half_open, 0);
   SESSION_TEST ((rv == 0), "half-open tuple should unpublish");

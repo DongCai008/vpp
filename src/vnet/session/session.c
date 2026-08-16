@@ -373,13 +373,13 @@ session_cleanup_half_open (session_handle_t ho_handle)
       if (ho->session_state != SESSION_STATE_TRANSPORT_CLOSED)
 	{
 	  transport_connection_t *tc;
-	  tc = transport_get_half_open (session_get_transport_proto (ho),
-					ho->connection_index);
+	  tc = transport_get_half_open (session_get_transport_proto (ho), ho->connection_index,
+					ho->al_index);
 	  if (tc && !(tc->flags & TRANSPORT_CONNECTION_F_NO_LOOKUP))
 	    session_lookup_del_half_open (tc);
 	}
-      transport_cleanup_half_open (session_get_transport_proto (ho),
-				   ho->connection_index);
+      transport_cleanup_half_open (session_get_transport_proto (ho), ho->connection_index,
+				   ho->al_index);
     }
   session_free (ho);
 }
@@ -412,7 +412,8 @@ session_half_open_cleanup_notify_rpc (void *args)
 
   if (ho->flags & SESSION_F_TPT_INIT_CLOSE)
     {
-      tc = transport_get_half_open (session_get_transport_proto (ho), ho->connection_index);
+      tc = transport_get_half_open (session_get_transport_proto (ho), ho->connection_index,
+				    ho->al_index);
       cb_fn = transport_get_cleanup_cb_fn (tc);
     }
   session_half_open_cleanup_notify_custom (ho, cb_fn);
@@ -539,6 +540,7 @@ session_alloc_for_half_open (transport_connection_t *tc)
   s = ho_session_alloc ();
   s->session_type = session_type_from_proto_and_ip (tc->proto, tc->is_ip4);
   s->connection_index = tc->c_index;
+  s->al_index = tc->thread_index;
   tc->s_index = s->session_index;
   return s;
 }
@@ -1294,7 +1296,7 @@ session_open_cl (session_endpoint_cfg_t *rmt, session_handle_t *rsh)
       return rv;
     }
 
-  tc = transport_get_half_open (rmt->transport_proto, (u32) rv);
+  tc = transport_get_half_open (rmt->transport_proto, (u32) rv, transport_cl_thread ());
 
   /* For dgram type of service, allocate session and fifos now */
   app_wrk = app_worker_get (rmt->app_wrk_index);
@@ -1336,7 +1338,7 @@ session_open_vc (session_endpoint_cfg_t *rmt, session_handle_t *rsh)
       return rv;
     }
 
-  tc = transport_get_half_open (rmt->transport_proto, (u32) rv);
+  tc = transport_get_half_open (rmt->transport_proto, (u32) rv, transport_cl_thread ());
 
   app_wrk = app_worker_get (rmt->app_wrk_index);
 
@@ -1355,7 +1357,8 @@ session_open_vc (session_endpoint_cfg_t *rmt, session_handle_t *rsh)
   *rsh = session_handle (ho);
 
   if (!(tc->flags & TRANSPORT_CONNECTION_F_NO_LOOKUP))
-    session_lookup_add_half_open (tc, tc->c_index);
+    session_lookup_add_half_open (tc,
+				  transport_connection_make_handle (tc->c_index, tc->thread_index));
 
   return 0;
 }

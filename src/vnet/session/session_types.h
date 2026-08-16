@@ -271,7 +271,7 @@ typedef struct session_
   /** Index of the transport connection associated to the session */
   u32 connection_index;
 
-  /** App listener index in app's listener pool if a listener */
+  /** App listener index if a listener, transport owner thread if half-open */
   u32 al_index;
 
   union

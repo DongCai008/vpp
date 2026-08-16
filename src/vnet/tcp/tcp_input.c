@@ -1558,8 +1558,7 @@ tcp_lookup_is_valid (tcp_connection_t * tc, vlib_buffer_t * b,
   if (!is_valid)
     {
       handle = session_lookup_half_open_handle (&tc->connection);
-      tmp = session_lookup_half_open_connection (handle & 0xFFFFFFFF,
-						 tc->c_proto, tc->c_is_ip4);
+      tmp = session_lookup_half_open_connection (handle, tc->c_proto, tc->c_is_ip4);
 
       if (tmp)
 	{
