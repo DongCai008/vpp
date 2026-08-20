@@ -1169,6 +1169,8 @@ session_lookup_connection4_result (u32 fib_index, ip4_address_t *lcl, ip4_addres
   session_table_t *st;
   session_kv4_t kv4;
   session_handle_t handle;
+  session_t *s;
+  u32 action_index;
   int rv;
 
   if (PREDICT_FALSE (!result))
@@ -1193,6 +1195,26 @@ session_lookup_connection4_result (u32 fib_index, ip4_address_t *lcl, ip4_addres
       result->transport_proto = proto;
       result->type = SESSION_LOOKUP_CONNECTION_TYPE_HALF_OPEN;
       return 0;
+    }
+
+  if (st->srtg_handle != SESSION_SRTG_HANDLE_INVALID)
+    {
+      action_index = session_rules_table_lookup4 (st->srtg_handle, proto, lcl,
+						  rmt, lcl_port, rmt_port);
+      if (session_lookup_action_index_is_valid (action_index))
+	{
+	  if (action_index == SESSION_RULES_TABLE_ACTION_DROP)
+	    {
+	      result->type = SESSION_LOOKUP_CONNECTION_TYPE_FILTERED;
+	      return 0;
+	    }
+	  s = session_lookup_action_to_session (action_index, FIB_PROTOCOL_IP4,
+					    proto);
+	  if (s)
+	    return session_lookup_connection4_result_set_session_handle (
+	      session_handle (s), proto, SESSION_LOOKUP_CONNECTION_TYPE_LISTENER,
+	      result);
+	}
     }
 
   handle = session_lookup_connection4_result_listener_handle (st, lcl, lcl_port, proto);

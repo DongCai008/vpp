@@ -27,6 +27,7 @@ typedef enum session_lookup_connection_type_
   SESSION_LOOKUP_CONNECTION_TYPE_ESTABLISHED,
   SESSION_LOOKUP_CONNECTION_TYPE_HALF_OPEN,
   SESSION_LOOKUP_CONNECTION_TYPE_LISTENER,
+  SESSION_LOOKUP_CONNECTION_TYPE_FILTERED,
 } session_lookup_connection_type_t;
 
 /* Scalar tuple lookup result. Never exposes a transport connection pointer.
@@ -63,8 +64,7 @@ transport_connection_t *session_lookup_connection4 (u32 fib_index,
 						    ip4_address_t * rmt,
 						    u16 lcl_port,
 						    u16 rmt_port, u8 proto);
-/* Returns identities encoded in the session-table hashes. Rule actions are
- * excluded because resolving one requires following an app/listener pointer. */
+/* Returns a scalar session-table or rule-action result. */
 int session_lookup_connection4_result (u32 fib_index, ip4_address_t * lcl,
 				       ip4_address_t * rmt, u16 lcl_port,
 				       u16 rmt_port, u8 proto,
