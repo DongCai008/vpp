@@ -86,6 +86,7 @@ typedef struct _transport_proto_vft
   void (*flush_data) (transport_connection_t *tconn);
   int (*custom_tx) (void *session, transport_send_params_t *sp);
   int (*app_rx_evt) (transport_connection_t *tconn);
+  void (*pmtu_update) (transport_connection_t *tconn, u16 pmtu);
 
   /*
    * Connection retrieval

@@ -6,6 +6,7 @@
 #include <vnet/session/transport.h>
 #include <vnet/session/session.h>
 #include <vnet/ip/icmp4.h>
+#include <vnet/ip/icmp6.h>
 #include <vnet/fib/fib.h>
 #include <vnet/udp/udp.h>
 
@@ -377,6 +378,48 @@ enum _transport_icmp_unreach_error
 /* 4 bytes of ICMP header & 4 reserved */
 #define ICMP_HEADER_SIZE 8
 
+static void
+transport_pmtu_update_rpc (void *args)
+{
+  uword encoded = pointer_to_uword (args);
+  u32 session_index = encoded >> 24;
+  transport_proto_t proto = (encoded >> 16) & 0xff;
+  u16 pmtu = encoded;
+  transport_connection_t *tc;
+  session_t *s;
+
+  s = session_get_if_valid (session_index, vlib_get_thread_index ());
+  if (!s || session_get_transport_proto (s) != proto)
+    return;
+  tc = session_get_transport (s);
+  if (tp_vfts[proto].pmtu_update)
+    tp_vfts[proto].pmtu_update (tc, pmtu);
+}
+
+static void
+transport_pmtu_update (session_t *s, u16 pmtu)
+{
+  transport_connection_t *tc;
+  transport_proto_t proto;
+  uword encoded;
+
+  if (!s || !pmtu)
+    return;
+  proto = session_get_transport_proto (s);
+  if (!tp_vfts[proto].pmtu_update)
+    return;
+  tc = session_get_transport (s);
+  if (tc->thread_index == vlib_get_thread_index ())
+    {
+      tp_vfts[proto].pmtu_update (tc, pmtu);
+      return;
+    }
+  encoded = ((uword) s->session_index << 24) | ((uword) proto << 16) | pmtu;
+  session_send_rpc_evt_to_thread_force (tc->thread_index,
+					transport_pmtu_update_rpc,
+					uword_to_pointer (encoded, void *));
+}
+
 static uword
 transport_icmp_dest_unreachable (vlib_main_t *vm, vlib_node_runtime_t *node,
 				 vlib_frame_t *frame)
@@ -422,6 +465,12 @@ transport_icmp_dest_unreachable (vlib_main_t *vm, vlib_node_runtime_t *node,
 	   */
 	  switch (session_get_transport_proto (s0))
 	    {
+	    case TRANSPORT_PROTO_TCP:
+	      if (icmp0->code ==
+		  ICMP4_destination_unreachable_fragmentation_needed_and_dont_fragment_set)
+		transport_pmtu_update
+		  (s0, clib_net_to_host_u16 (*((u16 *) (icmp0 + 1) + 1)));
+	      break;
 	    case TRANSPORT_PROTO_UDP:
 	      udp_connection_handle_icmp (session_get_transport (s0),
 					  icmp0->type, icmp0->code);
@@ -442,12 +491,64 @@ transport_icmp_dest_unreachable (vlib_main_t *vm, vlib_node_runtime_t *node,
   return frame->n_vectors;
 }
 
+static uword
+transport_icmp6_packet_too_big (vlib_main_t *vm, vlib_node_runtime_t *node,
+				vlib_frame_t *frame)
+{
+  u32 n_left_from, *from;
+  vlib_buffer_t *bufs[VLIB_FRAME_SIZE], **b;
+
+  from = vlib_frame_vector_args (frame);
+  n_left_from = frame->n_vectors;
+  vlib_get_buffers (vm, from, bufs, n_left_from);
+  b = bufs;
+
+  while (n_left_from > 0)
+    {
+      ip6_header_t *outer, *inner;
+      icmp46_header_t *icmp;
+      u16 *ports;
+      session_t *s;
+      u32 pmtu;
+
+      outer = vlib_buffer_get_current (b[0]);
+      if (b[0]->current_length >=
+	  sizeof (*outer) + ICMP_HEADER_SIZE + sizeof (*inner) +
+	  2 * sizeof (*ports))
+	{
+	  icmp = ip6_next_header (outer);
+	  inner = (ip6_header_t *) ((u8 *) icmp + ICMP_HEADER_SIZE);
+	  if (inner->protocol == IP_PROTOCOL_TCP)
+	    {
+	      ports = (u16 *) ip6_next_header (inner);
+	      s = session_lookup_safe6 (vnet_buffer (b[0])->ip.fib_index,
+					&outer->dst_address, &outer->src_address,
+					ports[0], ports[1], TRANSPORT_PROTO_TCP);
+	      pmtu = clib_net_to_host_u32 (*((u32 *) (icmp + 1)));
+	      if (s && pmtu <= 0xffff)
+		transport_pmtu_update (s, pmtu);
+	    }
+	}
+      b += 1;
+      n_left_from -= 1;
+    }
+
+  vlib_buffer_free (vm, from, frame->n_vectors);
+  return frame->n_vectors;
+}
+
 VLIB_REGISTER_NODE (transport_icmp_dest_unreachable_node) = {
   .function = transport_icmp_dest_unreachable,
   .name = "transport-icmp-dest-unreachable",
   .vector_size = sizeof (u32),
   .error_counters = transport_icmp_unreach_error,
   .n_errors = ARRAY_LEN (transport_icmp_unreach_error),
+};
+
+VLIB_REGISTER_NODE (transport_icmp6_packet_too_big_node) = {
+  .function = transport_icmp6_packet_too_big,
+  .name = "transport-icmp6-packet-too-big",
+  .vector_size = sizeof (u32),
 };
 
 /**
@@ -1217,6 +1318,8 @@ transport_enable_disable (vlib_main_t * vm, u8 is_en)
   {
     ip4_icmp_register_type (vlib_get_main (), ICMP4_destination_unreachable,
 			    transport_icmp_dest_unreachable_node.index);
+    icmp6_register_type (vlib_get_main (), ICMP6_packet_too_big,
+			 transport_icmp6_packet_too_big_node.index);
   }
 }
 
