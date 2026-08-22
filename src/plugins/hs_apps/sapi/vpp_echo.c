@@ -993,6 +993,7 @@ print_usage_and_exit (void)
     "  max-sim-connects N  Do not allow more than N mq events inflight\n"
     "  rx-buf N[K|M|G]     Use N[Kb|Mb|GB] RX buffer\n"
     "  tx-buf N[K|M|G]     Use N[Kb|Mb|GB] TX test buffer\n"
+    "  fast-open-data TEXT Attach replayable TCP Fast Open early data\n"
     "  appns NAMESPACE     Use the namespace NAMESPACE\n"
     "  all-scope           all-scope option\n"
     "  local-scope         local-scope option\n"
@@ -1100,6 +1101,8 @@ echo_process_opts (int argc, char **argv)
 	em->test_return_packets = RETURN_PACKETS_ASSERT;
       else if (unformat (a, "test-bytes"))
 	em->test_return_packets = RETURN_PACKETS_LOG_WRONG;
+      else if (unformat (a, "fast-open-data %s", &em->fastopen_data))
+	;
       else if (unformat (a, "socket-name %s", &em->socket_name))
 	;
       else if (unformat (a, "use-app-socket-api"))

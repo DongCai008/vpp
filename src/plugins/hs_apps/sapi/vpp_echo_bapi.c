@@ -131,6 +131,26 @@ echo_msg_add_crypto_ext_config (echo_main_t *em, uword *offset)
   clib_memcpy_fast (c->data, &cfg, cfg.len);
 }
 
+static void
+echo_msg_add_fastopen_ext_config (echo_main_t *em, uword *offset)
+{
+  transport_endpt_ext_cfg_t cfg;
+  svm_fifo_chunk_t *c;
+  /* unformat %s leaves a trailing NUL in the CLI string vector. */
+  uword data_len = vec_len (em->fastopen_data) - 1;
+
+  c = echo_segment_alloc_chunk (ECHO_MQ_SEG_HANDLE, 0,
+				TRANSPORT_ENDPT_EXT_CFG_HEADER_SIZE + data_len, offset);
+  if (!c)
+    return;
+
+  clib_memset (&cfg, 0, sizeof (cfg));
+  cfg.type = TRANSPORT_ENDPT_EXT_CFG_TCP_FASTOPEN;
+  cfg.len = data_len;
+  clib_memcpy_fast (c->data, &cfg, TRANSPORT_ENDPT_EXT_CFG_HEADER_SIZE);
+  clib_memcpy_fast (c->data + TRANSPORT_ENDPT_EXT_CFG_HEADER_SIZE, em->fastopen_data, data_len);
+}
+
 void
 echo_send_listen (echo_main_t * em, ip46_address_t * ip)
 {
@@ -194,7 +214,9 @@ echo_send_connect (echo_main_t * em, void *args)
   mp->port = em->uri_elts.port;
   mp->proto = em->uri_elts.transport_proto;
   mp->parent_handle = a->parent_session_handle;
-  if (echo_transport_needs_crypto (mp->proto))
+  if (em->fastopen_data)
+    echo_msg_add_fastopen_ext_config (em, &mp->ext_config);
+  else if (echo_transport_needs_crypto (mp->proto))
     echo_msg_add_crypto_ext_config (em, &mp->ext_config);
   mp->flags = em->connect_flag;
   app_send_ctrl_evt_to_vpp (mq, app_evt);

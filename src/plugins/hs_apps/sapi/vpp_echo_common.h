@@ -295,6 +295,8 @@ typedef struct
   u8 *fail_descr;		/* vector containing fail description */
 
   u8 *connect_test_data;
+  /* Replayable payload attached to a TCP Fast Open connect request. */
+  u8 *fastopen_data;
   u8 test_return_packets;
   u64 bytes_to_send;		/* target per stream */
   u64 bytes_to_receive;		/* target per stream */
