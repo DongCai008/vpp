@@ -522,7 +522,8 @@ transport_icmp6_packet_too_big (vlib_main_t *vm, vlib_node_runtime_t *node,
       icmp46_header_t *icmp;
       u16 *ports;
       session_t *s;
-      u32 pmtu;
+      u32 pmtu, tcp_offset;
+      int protocol;
 
       outer = vlib_buffer_get_current (b[0]);
       if (b[0]->current_length >=
@@ -533,7 +534,16 @@ transport_icmp6_packet_too_big (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  inner = (ip6_header_t *) ((u8 *) icmp + ICMP_HEADER_SIZE);
 	  if (inner->protocol == IP_PROTOCOL_TCP)
 	    {
-	      ports = (u16 *) ip6_next_header (inner);
+	      protocol = IP_PROTOCOL_TCP;
+	      tcp_offset = sizeof (*inner);
+	    }
+	  else
+	    protocol = ip6_locate_header (b[0], inner, -1, &tcp_offset);
+	  if (protocol == IP_PROTOCOL_TCP &&
+	      (u8 *) inner + tcp_offset + 2 * sizeof (*ports) <=
+		(u8 *) vlib_buffer_get_current (b[0]) + b[0]->current_length)
+	    {
+	      ports = (u16 *) ((u8 *) inner + tcp_offset);
 	      s = session_lookup_safe6 (vnet_buffer (b[0])->ip.fib_index,
 					&outer->dst_address, &outer->src_address,
 					ports[0], ports[1], TRANSPORT_PROTO_TCP);
