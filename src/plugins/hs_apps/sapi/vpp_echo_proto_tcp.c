@@ -35,7 +35,7 @@ tcp_echo_connected_cb (session_connected_bundled_msg_t * mp,
 {
   static u32 client_index = 0;
   echo_main_t *em = &echo_main;
-  echo_session_t *session = pool_elt_at_index (em->sessions, session_index);
+  echo_session_t *session;
   if (is_failed)
     {
       ECHO_FAIL (ECHO_FAIL_TCP_BAPI_CONNECT,
@@ -43,6 +43,7 @@ tcp_echo_connected_cb (session_connected_bundled_msg_t * mp,
       return;			/* Dont handle bapi connect errors for now */
     }
 
+  session = pool_elt_at_index (em->sessions, session_index);
   ECHO_LOG (2, "Connected session 0x%lx -> URI",
 	    ((session_connected_msg_t *) mp)->handle);
   session->session_type = ECHO_SESSION_TYPE_STREAM;
