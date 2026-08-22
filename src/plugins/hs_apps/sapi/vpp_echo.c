@@ -107,11 +107,11 @@ print_global_json_stats (echo_main_t * em)
   f64 deltat = start_evt_missing || end_evt_missing ? 0 :
     em->timing.end_time - em->timing.start_time;
 
-  if (start_evt_missing)
+  if (!em->has_failed && start_evt_missing)
     ECHO_FAIL (ECHO_FAIL_MISSING_START_EVENT,
 	       "Expected event %v to happen, but it did not!", start_evt);
 
-  if (end_evt_missing)
+  if (!em->has_failed && end_evt_missing)
     ECHO_FAIL (ECHO_FAIL_MISSING_END_EVENT,
 	       "Expected event %v to happen, but it did not!", end_evt);
 
@@ -168,11 +168,11 @@ print_global_stats (echo_main_t * em)
   f64 deltat = start_evt_missing || end_evt_missing ? 0 :
     em->timing.end_time - em->timing.start_time;
 
-  if (start_evt_missing)
+  if (!em->has_failed && start_evt_missing)
     ECHO_FAIL (ECHO_FAIL_MISSING_START_EVENT,
 	       "Expected event %v to happen, but it did not!", start_evt);
 
-  if (end_evt_missing)
+  if (!em->has_failed && end_evt_missing)
     ECHO_FAIL (ECHO_FAIL_MISSING_END_EVENT,
 	       "Expected event %v to happen, but it did not!", end_evt);
 
@@ -1465,6 +1465,8 @@ main (int argc, char **argv)
   else
     clients_run (em);
   echo_notify_event (em, ECHO_EVT_EXIT);
+  if (em->has_failed)
+    goto exit_on_error;
   echo_free_sessions (em);
   if (echo_needs_crypto (em))
     {
