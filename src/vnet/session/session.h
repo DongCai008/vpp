@@ -478,10 +478,10 @@ session_get_if_valid (u64 si, clib_thread_index_t thread_index)
   if (thread_index >= vec_len (session_main.wrk))
     return 0;
 
-  if (pool_is_free_index (session_main.wrk[thread_index].sessions, si))
+  if (pool_is_free_index (session_main.wrk[thread_index].sessions, si) ||
+      !session_is_valid (si, thread_index))
     return 0;
 
-  ASSERT (session_is_valid (si, thread_index));
   return pool_elt_at_index (session_main.wrk[thread_index].sessions, si);
 }
 
