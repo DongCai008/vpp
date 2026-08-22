@@ -2,7 +2,7 @@ FROM fedora:40
 
 # Bootstrap tools needed before VPP's own dependency installer runs
 RUN dnf update -y && dnf install -y \
-    git make sudo which findutils diffutils procps-ng \
+    git make sudo which findutils diffutils procps-ng iproute-tc \
     clang dnf-plugins-core openssl openssl-devel rpm-build \
     && dnf clean all
 
