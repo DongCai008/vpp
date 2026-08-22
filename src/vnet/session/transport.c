@@ -442,6 +442,7 @@ transport_icmp_dest_unreachable (vlib_main_t *vm, vlib_node_runtime_t *node,
       icmp46_header_t *icmp0;
       ip4_header_t *ip0, *ip1;
       session_t *s0;
+      u32 outer_header_bytes, quoted_header_bytes;
 
       if (n_left_from > 1)
 	{
@@ -450,10 +451,21 @@ transport_icmp_dest_unreachable (vlib_main_t *vm, vlib_node_runtime_t *node,
 	}
 
       ip0 = vlib_buffer_get_current (b[0]);
-      icmp0 = ip4_next_header (ip0);
+      if (b[0]->current_length < sizeof (*ip0))
+	goto next;
+      outer_header_bytes = ip4_header_bytes (ip0);
+      if (outer_header_bytes < sizeof (*ip0) ||
+	  b[0]->current_length < outer_header_bytes + ICMP_HEADER_SIZE +
+				 sizeof (*ip1) + 2 * sizeof (*src_port))
+	goto next;
 
-      vlib_buffer_advance (b[0], ip4_header_bytes (ip0) + ICMP_HEADER_SIZE);
-      ip1 = vlib_buffer_get_current (b[0]);
+      icmp0 = (icmp46_header_t *) ((u8 *) ip0 + outer_header_bytes);
+      ip1 = (ip4_header_t *) ((u8 *) icmp0 + ICMP_HEADER_SIZE);
+      quoted_header_bytes = ip4_header_bytes (ip1);
+      if (quoted_header_bytes < sizeof (*ip1) ||
+	  b[0]->current_length < outer_header_bytes + ICMP_HEADER_SIZE +
+				 quoted_header_bytes + 2 * sizeof (*src_port))
+	goto next;
       src_port = (u16 *) ip4_next_header (ip1);
       dst_port = src_port + 1;
       s0 = session_lookup_safe4 (
@@ -482,6 +494,7 @@ transport_icmp_dest_unreachable (vlib_main_t *vm, vlib_node_runtime_t *node,
 	    }
 	}
 
+    next:
       b += 1;
       n_left_from -= 1;
     }
