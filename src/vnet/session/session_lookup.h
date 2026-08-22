@@ -44,6 +44,15 @@ typedef struct session_lookup_connection4_result_
   session_lookup_connection_type_t type;
 } session_lookup_connection4_result_t;
 
+typedef struct session_lookup_connection6_result_
+{
+  session_handle_t session_handle;
+  u32 connection_index;
+  clib_thread_index_t thread_index; /* owner worker */
+  u8 transport_proto;
+  session_lookup_connection_type_t type;
+} session_lookup_connection6_result_t;
+
 typedef struct session_lookup_main_
 {
   clib_spinlock_t st_alloc_lock;
@@ -73,6 +82,14 @@ int session_lookup_connection4_result (u32 fib_index, ip4_address_t * lcl,
  * connection_index without accessing a foreign worker's session pool. */
 int session_lookup_connection4_result_validate_owner (
   session_lookup_connection4_result_t * result);
+/* IPv6 equivalent of the scalar IPv4 lookup. It is safe to call from a
+ * non-owner worker; validate the returned session identity on its owner. */
+int session_lookup_connection6_result (u32 fib_index, ip6_address_t * lcl,
+				       ip6_address_t * rmt, u16 lcl_port,
+				       u16 rmt_port, u8 proto,
+				       session_lookup_connection6_result_t * result);
+int session_lookup_connection6_result_validate_owner (
+  session_lookup_connection6_result_t * result);
 transport_connection_t *session_lookup_connection_wt6 (
   u32 fib_index, ip6_address_t *lcl, ip6_address_t *rmt, u16 lcl_port,
   u16 rmt_port, u8 proto, clib_thread_index_t thread_index, u8 *is_filtered);

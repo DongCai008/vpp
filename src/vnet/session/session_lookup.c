@@ -1242,6 +1242,140 @@ session_lookup_connection4_result_validate_owner (session_lookup_connection4_res
   return 0;
 }
 
+static void
+session_lookup_connection6_result_init (session_lookup_connection6_result_t *result)
+{
+  *result = (session_lookup_connection6_result_t){
+    .session_handle = SESSION_INVALID_HANDLE,
+    .connection_index = ~0,
+    .thread_index = CLIB_INVALID_THREAD_INDEX,
+    .transport_proto = TRANSPORT_PROTO_NONE,
+    .type = SESSION_LOOKUP_CONNECTION_TYPE_NONE,
+  };
+}
+
+static int
+session_lookup_connection6_result_set_session_handle (session_handle_t handle, u8 proto,
+						      session_lookup_connection_type_t type,
+						      session_lookup_connection6_result_t *result)
+{
+  if (handle == SESSION_INVALID_HANDLE)
+    return -1;
+  result->session_handle = handle;
+  result->thread_index = session_thread_from_handle (handle);
+  result->transport_proto = proto;
+  result->type = type;
+  return 0;
+}
+
+static session_handle_t
+session_lookup_connection6_result_listener_handle (session_table_t *st, ip6_address_t *lcl,
+						   u16 lcl_port, u8 proto)
+{
+  session_kv6_t kv6;
+  int rv;
+
+  make_v6_listener_kv (&kv6, lcl, lcl_port, proto);
+  rv = clib_bihash_search_inline_48_8 (&st->v6_session_hash, &kv6);
+  if (rv == 0)
+    return kv6.value;
+
+  kv6.key[0] = kv6.key[1] = 0;
+  rv = clib_bihash_search_inline_48_8 (&st->v6_session_hash, &kv6);
+  if (rv == 0)
+    return kv6.value;
+
+  make_v6_proxy_kv (&kv6, lcl, proto);
+  rv = clib_bihash_search_inline_48_8 (&st->v6_session_hash, &kv6);
+  if (rv == 0)
+    return session_make_handle ((u32) kv6.value, 0);
+
+  return SESSION_INVALID_HANDLE;
+}
+
+/* See session_lookup_connection4_result(). This never dereferences a
+ * transport owned by another worker. */
+int
+session_lookup_connection6_result (u32 fib_index, ip6_address_t *lcl, ip6_address_t *rmt,
+				   u16 lcl_port, u16 rmt_port, u8 proto,
+				   session_lookup_connection6_result_t *result)
+{
+  session_table_t *st;
+  session_kv6_t kv6;
+  session_handle_t handle;
+  session_t *s;
+  u32 action_index;
+  int rv;
+
+  if (PREDICT_FALSE (!result))
+    return -1;
+  session_lookup_connection6_result_init (result);
+
+  st = session_table_get_for_fib_index (FIB_PROTOCOL_IP6, fib_index);
+  if (PREDICT_FALSE (!st))
+    return -1;
+
+  make_v6_ss_kv (&kv6, lcl, rmt, lcl_port, rmt_port, proto);
+  rv = clib_bihash_search_inline_48_8 (&st->v6_session_hash, &kv6);
+  if (rv == 0)
+    return session_lookup_connection6_result_set_session_handle (
+      kv6.value, proto, SESSION_LOOKUP_CONNECTION_TYPE_ESTABLISHED, result);
+
+  rv = clib_bihash_search_inline_48_8 (&st->v6_half_open_hash, &kv6);
+  if (rv == 0)
+    {
+      result->connection_index = transport_connection_index_from_handle (kv6.value);
+      result->thread_index = transport_connection_thread_from_handle (kv6.value);
+      result->transport_proto = proto;
+      result->type = SESSION_LOOKUP_CONNECTION_TYPE_HALF_OPEN;
+      return 0;
+    }
+
+  if (st->srtg_handle != SESSION_SRTG_HANDLE_INVALID)
+    {
+      action_index = session_rules_table_lookup6 (st->srtg_handle, proto, lcl,
+						  rmt, lcl_port, rmt_port);
+      if (session_lookup_action_index_is_valid (action_index))
+	{
+	  if (action_index == SESSION_RULES_TABLE_ACTION_DROP)
+	    {
+	      result->type = SESSION_LOOKUP_CONNECTION_TYPE_FILTERED;
+	      return 0;
+	    }
+	  s = session_lookup_action_to_session (action_index, FIB_PROTOCOL_IP6,
+							proto);
+	  if (s)
+	    return session_lookup_connection6_result_set_session_handle (
+	      session_handle (s), proto, SESSION_LOOKUP_CONNECTION_TYPE_LISTENER,
+	      result);
+	}
+    }
+
+  handle = session_lookup_connection6_result_listener_handle (st, lcl, lcl_port, proto);
+  if (handle != SESSION_INVALID_HANDLE)
+    return session_lookup_connection6_result_set_session_handle (
+      handle, proto, SESSION_LOOKUP_CONNECTION_TYPE_LISTENER, result);
+
+  return -1;
+}
+
+int
+session_lookup_connection6_result_validate_owner (session_lookup_connection6_result_t *result)
+{
+  session_t *s;
+
+  if (!result || result->type == SESSION_LOOKUP_CONNECTION_TYPE_HALF_OPEN ||
+      result->session_handle == SESSION_INVALID_HANDLE ||
+      result->thread_index != vlib_get_thread_index ())
+    return -1;
+  s =
+    session_get_if_valid (session_index_from_handle (result->session_handle), result->thread_index);
+  if (!s || session_handle (s) != result->session_handle)
+    return -1;
+  result->connection_index = s->connection_index;
+  return 0;
+}
+
 /**
  * Lookup session with ip4 and transport layer information
  *
