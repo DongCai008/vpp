@@ -394,6 +394,7 @@ detach:
     close (sockets[1]);
   detach_args = (vnet_app_detach_args_t){ .app_index = app_index, .api_client_index = api_index };
   vnet_application_detach (&detach_args);
+  attach_args.name = 0;
 done:
   vec_free (attach_args.name);
   return rv;

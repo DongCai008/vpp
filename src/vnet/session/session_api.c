@@ -2852,28 +2852,37 @@ done:
   vec_free (fds);
 }
 
-void
-sapi_socket_close_w_handle (u32 api_handle)
+static void
+sapi_socket_close (app_namespace_t *app_ns, clib_socket_t *cs)
 {
-  app_namespace_t *app_ns = app_namespace_get (api_handle >> 16);
-  u16 sock_index = api_handle & 0xffff;
   app_ns_api_handle_t *handle;
-  clib_socket_t *cs;
   clib_file_t *cf;
-
-  cs = appns_sapi_get_socket (app_ns, sock_index);
-  if (!cs)
-    return;
 
   handle = (app_ns_api_handle_t *) &cs->private_data;
   cf = clib_file_get (&file_main, handle->aah_file_index);
-  clib_file_del (&file_main, cf);
+  if (cf)
+    clib_file_del (&file_main, cf);
 
   sapi_observability_attachment_destroy (
     sapi_observability_attachment_find (handle->aah_app_wrk_index, 0));
 
   clib_socket_close (cs);
   appns_sapi_free_socket (app_ns, cs);
+}
+
+void
+sapi_socket_close_w_handle (u32 api_handle)
+{
+  app_namespace_t *app_ns;
+  clib_socket_t *cs;
+
+  app_ns = app_namespace_get_if_valid (api_handle >> 16);
+  if (!app_ns)
+    return;
+  cs = appns_sapi_get_socket (app_ns, api_handle & 0xffff);
+  if (!cs)
+    return;
+  sapi_socket_close (app_ns, cs);
 }
 
 static void
@@ -3105,7 +3114,7 @@ sapi_socket_detach (app_namespace_t *app_ns, clib_socket_t *cs)
       /* A malformed frame can arrive before ATTACH binds this connection to
        * an application worker.  It still owns a registered file and must be
        * released, otherwise rejecting a frame leaves a live endpoint behind. */
-      sapi_socket_close_w_handle (api_client_handle);
+      sapi_socket_close (app_ns, cs);
       return;
     }
 
@@ -3134,6 +3143,9 @@ sapi_sock_read_ready (clib_file_t *cf)
   int fds[SESSION_N_FD_TYPE];
   u32 n_fds, i;
   u8 is_v2;
+
+  if (PREDICT_FALSE (!cf->active))
+    return 0;
 
   is_v2 = !!(handle->aah_app_ns_index & (1U << 31));
   app_ns = app_namespace_get (handle->aah_app_ns_index & ~(1U << 31));
@@ -3167,6 +3179,21 @@ sapi_sock_read_ready (clib_file_t *cf)
 
   if (is_v2)
     {
+      /* Before ATTACH this endpoint has no worker ownership.  Only the
+       * versioned attach request can establish that ownership; every other
+       * v2 discriminator must retire this connection without entering the
+       * worker or observability-control dispatch paths. */
+      if (handle->aah_app_wrk_index == APP_INVALID_INDEX)
+	{
+	  if (msg.type == APP_SAPI_MSG_TYPE_ATTACH_V2 &&
+	      msg.attach_v2.abi == SESSION_OBSERVABILITY_ABI_VERSION)
+	    session_api_attach_handler (app_ns, cs, &msg.attach_v2.base, 1);
+	  else
+	    sapi_socket_close (app_ns, cs);
+	  vlib_worker_thread_barrier_release (vm);
+	  return 0;
+	}
+
       switch (msg.type)
 	{
 	case APP_SAPI_MSG_TYPE_ATTACH_V2:
@@ -3223,6 +3250,10 @@ static clib_error_t *
 sapi_sock_write_ready (clib_file_t *cf)
 {
   app_ns_api_handle_t *handle = (app_ns_api_handle_t *) &cf->private_data;
+
+  if (PREDICT_FALSE (!cf->active))
+    return 0;
+
   clib_warning ("called for app ns %u", handle->aah_app_ns_index);
   return 0;
 }
@@ -3233,6 +3264,9 @@ sapi_sock_error (clib_file_t *cf)
   app_ns_api_handle_t *handle = (app_ns_api_handle_t *) &cf->private_data;
   app_namespace_t *app_ns;
   clib_socket_t *cs;
+
+  if (PREDICT_FALSE (!cf->active))
+    return 0;
 
   app_ns = app_namespace_get (handle->aah_app_ns_index & ~(1U << 31));
   cs = appns_sapi_get_socket (app_ns, handle->aah_sock_index);

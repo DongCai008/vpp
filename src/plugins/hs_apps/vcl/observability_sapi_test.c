@@ -225,6 +225,45 @@ observability_sapi_lifecycle (const char *socket_path)
 }
 
 static int
+observability_sapi_reject_v2_recycled (const char *legacy_path)
+{
+  static const app_sapi_msg_type_e unsupported[] = {
+    APP_SAPI_MSG_TYPE_ATTACH_V2_REPLY,	 APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_V2_REPLY,
+    APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2, APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2_REPLY,
+    APP_SAPI_MSG_TYPE_OBS_DETACH_V2,	 APP_SAPI_MSG_TYPE_OBS_DETACH_V2_REPLY,
+    APP_SAPI_MSG_TYPE_OBS_DONE_V2,	 APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY,
+  };
+  app_sapi_msg_t frame = { 0 };
+  char v2_path[sizeof (((struct sockaddr_un *) 0)->sun_path)];
+  uword i;
+  u32 attempt;
+
+  if (observability_sapi_v2_endpoint_path (v2_path, sizeof (v2_path), legacy_path) ||
+      observability_sapi_reject_endpoints (legacy_path))
+    return -1;
+
+  for (attempt = 0; attempt < 2; attempt++)
+    {
+      frame.type = APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_V2;
+      frame.worker_add_del_v2.abi = SESSION_OBSERVABILITY_ABI_VERSION + 1;
+      if (observability_sapi_send_rejected_frame (v2_path, &frame, sizeof (frame), -1))
+	return -1;
+
+      for (i = 0; i < ARRAY_LEN (unsupported); i++)
+	{
+	  clib_memset (&frame, 0, sizeof (frame));
+	  frame.type = unsupported[i];
+	  if (observability_sapi_send_rejected_frame (v2_path, &frame, sizeof (frame), -1))
+	    return -1;
+	}
+    }
+
+  printf ("V2_RECYCLED_REJECTION_OK invalid-worker-and-all-discriminators\n");
+  fflush (stdout);
+  return observability_sapi_lifecycle (v2_path);
+}
+
+static int
 observability_sapi_app_destroy (const char *socket_path)
 {
   vppcom_cfg_t cfg;
@@ -303,11 +342,14 @@ main (int argc, char **argv)
     return observability_sapi_reject_v2_padded_legacy (argv[2]) ? 1 : 0;
   if (argc == 3 && !strcmp (argv[1], "--v2-invalid-abi-reject"))
     return observability_sapi_reject_v2_invalid_abi (argv[2]) ? 1 : 0;
+  if (argc == 3 && !strcmp (argv[1], "--v2-recycled-reject"))
+    return observability_sapi_reject_v2_recycled (argv[2]) ? 1 : 0;
   if (argc != 3)
     {
       fprintf (stderr,
 	       "usage: %s [--lifecycle|--app-destroy|--identity-reject|--peer-death] <v2-socket>\n"
-	       "       %s [--endpoint-reject|--v2-padded-legacy-reject|--v2-invalid-abi-reject] "
+	       "       %s [--endpoint-reject|--v2-padded-legacy-reject|--v2-invalid-abi-reject|"
+	       "--v2-recycled-reject] "
 	       "<legacy-socket>\n",
 	       argv[0], argv[0]);
       return 2;
