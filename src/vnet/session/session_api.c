@@ -3172,10 +3172,14 @@ sapi_sock_read_ready (clib_file_t *cf)
 	case APP_SAPI_MSG_TYPE_ATTACH_V2:
 	  if (msg.attach_v2.abi == SESSION_OBSERVABILITY_ABI_VERSION)
 	    session_api_attach_handler (app_ns, cs, &msg.attach_v2.base, 1);
+	  else
+	    sapi_socket_detach (app_ns, cs);
 	  break;
 	case APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_V2:
 	  if (msg.worker_add_del_v2.abi == SESSION_OBSERVABILITY_ABI_VERSION)
 	    sapi_add_del_worker_handler (app_ns, cs, &msg.worker_add_del_v2.base, 1);
+	  else
+	    sapi_socket_detach (app_ns, cs);
 	  break;
 	case APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2:
 	case APP_SAPI_MSG_TYPE_OBS_DETACH_V2:
@@ -3186,6 +3190,7 @@ sapi_sock_read_ready (clib_file_t *cf)
 	default:
 	  clib_warning ("app wrk %u unknown v2 message type: %u", handle->aah_app_wrk_index,
 			msg.type);
+	  sapi_socket_detach (app_ns, cs);
 	  break;
 	}
       vlib_worker_thread_barrier_release (vm);

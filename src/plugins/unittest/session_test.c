@@ -122,7 +122,14 @@ session_test_socket_frame_receive (vlib_main_t *vm, unformat_input_t *input)
   SESSION_TEST (bytes == sizeof (rx) - 1 && !(flags & (MSG_TRUNC | MSG_CTRUNC)),
 		"short frame is distinguishable from a fixed frame");
   SESSION_TEST (!n_fds, "short frame carries no descriptors");
-  for (type = APP_SAPI_MSG_TYPE_ATTACH; type <= APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY; type++)
+  for (type = APP_SAPI_MSG_TYPE_ATTACH; type < APP_SAPI_MSG_TYPE_ATTACH_V2; type++)
+    {
+      clib_memset (&frame, 0, sizeof (frame));
+      frame.type = type;
+      SESSION_TEST (app_sapi_msg_v2_validate (&frame),
+		    "legacy discriminator %u is rejected by v2 validation", type);
+    }
+  for (type = APP_SAPI_MSG_TYPE_ATTACH_V2; type <= APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY; type++)
     {
       clib_memset (&frame, 0, sizeof (frame));
       frame.type = type;

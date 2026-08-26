@@ -994,20 +994,6 @@ app_sapi_msg_v2_active_bytes (app_sapi_msg_type_e type)
 {
   switch (type)
     {
-    case APP_SAPI_MSG_TYPE_ATTACH:
-      return sizeof (app_sapi_attach_msg_t);
-    case APP_SAPI_MSG_TYPE_ATTACH_REPLY:
-      return sizeof (app_sapi_attach_reply_msg_t);
-    case APP_SAPI_MSG_TYPE_ADD_DEL_WORKER:
-      return sizeof (app_sapi_worker_add_del_msg_t);
-    case APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_REPLY:
-      return sizeof (app_sapi_worker_add_del_reply_msg_t);
-    case APP_SAPI_MSG_TYPE_SEND_FDS:
-      return 0;
-    case APP_SAPI_MSG_TYPE_ADD_DEL_CERT_KEY:
-      return sizeof (app_sapi_cert_key_add_del_msg_t);
-    case APP_SAPI_MSG_TYPE_ADD_DEL_CERT_KEY_REPLY:
-      return sizeof (app_sapi_cert_key_add_del_reply_msg_t);
     case APP_SAPI_MSG_TYPE_ATTACH_V2:
       return sizeof (app_sapi_attach_v2_msg_t);
     case APP_SAPI_MSG_TYPE_ATTACH_V2_REPLY:

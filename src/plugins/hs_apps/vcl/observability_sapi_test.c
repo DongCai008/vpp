@@ -8,6 +8,7 @@
  */
 
 #include <fcntl.h>
+#include <poll.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
@@ -37,7 +38,19 @@ observability_sapi_connect (const char *path)
 }
 
 static int
-observability_sapi_send_frame (const char *path, const void *frame, size_t frame_bytes, int fd)
+observability_sapi_expect_close (int socket_fd)
+{
+  struct pollfd pfd = { .fd = socket_fd, .events = POLLIN };
+  char byte;
+
+  if (poll (&pfd, 1, 1000) != 1 || !(pfd.revents & (POLLIN | POLLERR | POLLHUP)))
+    return -1;
+  return recv (socket_fd, &byte, sizeof (byte), 0) == 0 ? 0 : -1;
+}
+
+static int
+observability_sapi_send_rejected_frame (const char *path, const void *frame, size_t frame_bytes,
+					int fd)
 {
   struct iovec iov = { .iov_base = (void *) frame, .iov_len = frame_bytes };
   struct msghdr msg = { .msg_iov = &iov, .msg_iovlen = 1 };
@@ -59,10 +72,44 @@ observability_sapi_send_frame (const char *path, const void *frame, size_t frame
       cmsg->cmsg_len = CMSG_LEN (sizeof (fd));
       memcpy (CMSG_DATA (cmsg), &fd, sizeof (fd));
     }
-  if (sendmsg (socket_fd, &msg, 0) == (ssize_t) frame_bytes)
+  if (sendmsg (socket_fd, &msg, 0) == (ssize_t) frame_bytes &&
+      !observability_sapi_expect_close (socket_fd))
     rv = 0;
   close (socket_fd);
   return rv;
+}
+
+static int
+observability_sapi_v2_endpoint_path (char *v2_path, size_t v2_path_size, const char *legacy_path)
+{
+  return snprintf (v2_path, v2_path_size, "%s.v2", legacy_path) >= (int) v2_path_size ? -1 : 0;
+}
+
+static int
+observability_sapi_reject_v2_padded_legacy (const char *legacy_path)
+{
+  app_sapi_msg_t frame = { .type = APP_SAPI_MSG_TYPE_ATTACH };
+  char v2_path[sizeof (((struct sockaddr_un *) 0)->sun_path)];
+
+  if (observability_sapi_v2_endpoint_path (v2_path, sizeof (v2_path), legacy_path) ||
+      observability_sapi_send_rejected_frame (v2_path, &frame, sizeof (frame), -1))
+    return -1;
+  printf ("V2_PADDED_LEGACY_REJECT_CLOSED\n");
+  return 0;
+}
+
+static int
+observability_sapi_reject_v2_invalid_abi (const char *legacy_path)
+{
+  app_sapi_msg_t frame = { .type = APP_SAPI_MSG_TYPE_ATTACH_V2 };
+  char v2_path[sizeof (((struct sockaddr_un *) 0)->sun_path)];
+
+  frame.attach_v2.abi = SESSION_OBSERVABILITY_ABI_VERSION + 1;
+  if (observability_sapi_v2_endpoint_path (v2_path, sizeof (v2_path), legacy_path) ||
+      observability_sapi_send_rejected_frame (v2_path, &frame, sizeof (frame), -1))
+    return -1;
+  printf ("V2_INVALID_ABI_REJECT_CLOSED\n");
+  return 0;
 }
 
 static int
@@ -75,14 +122,16 @@ observability_sapi_reject_endpoints (const char *legacy_path)
   int devnull = -1;
   int rv = -1;
 
-  if (snprintf (v2_path, sizeof (v2_path), "%s.v2", legacy_path) >= (int) sizeof (v2_path))
+  if (observability_sapi_v2_endpoint_path (v2_path, sizeof (v2_path), legacy_path))
     return -1;
   memcpy (oversized, &v2, sizeof (v2));
   devnull = open ("/dev/null", O_RDONLY);
-  if (devnull < 0 || observability_sapi_send_frame (legacy_path, &v2, sizeof (v2), -1) ||
-      observability_sapi_send_frame (v2_path, &legacy, sizeof (legacy), -1) ||
-      observability_sapi_send_frame (v2_path, oversized, sizeof (oversized), -1) ||
-      observability_sapi_send_frame (v2_path, &v2, sizeof (v2), devnull))
+  if (devnull < 0 || observability_sapi_send_rejected_frame (legacy_path, &v2, sizeof (v2), -1) ||
+      observability_sapi_send_rejected_frame (v2_path, &legacy, sizeof (legacy), -1) ||
+      observability_sapi_send_rejected_frame (v2_path, oversized, sizeof (oversized), -1) ||
+      observability_sapi_send_rejected_frame (v2_path, &v2, sizeof (v2), devnull) ||
+      observability_sapi_reject_v2_padded_legacy (legacy_path) ||
+      observability_sapi_reject_v2_invalid_abi (legacy_path))
     goto done;
   printf ("ENDPOINT_REJECTION_OK legacy-v2-truncation-fd\n");
   rv = 0;
@@ -250,11 +299,16 @@ main (int argc, char **argv)
 
   if (argc == 3 && !strcmp (argv[1], "--endpoint-reject"))
     return observability_sapi_reject_endpoints (argv[2]) ? 1 : 0;
+  if (argc == 3 && !strcmp (argv[1], "--v2-padded-legacy-reject"))
+    return observability_sapi_reject_v2_padded_legacy (argv[2]) ? 1 : 0;
+  if (argc == 3 && !strcmp (argv[1], "--v2-invalid-abi-reject"))
+    return observability_sapi_reject_v2_invalid_abi (argv[2]) ? 1 : 0;
   if (argc != 3)
     {
       fprintf (stderr,
 	       "usage: %s [--lifecycle|--app-destroy|--identity-reject|--peer-death] <v2-socket>\n"
-	       "       %s --endpoint-reject <legacy-socket>\n",
+	       "       %s [--endpoint-reject|--v2-padded-legacy-reject|--v2-invalid-abi-reject] "
+	       "<legacy-socket>\n",
 	       argv[0], argv[0]);
       return 2;
     }
