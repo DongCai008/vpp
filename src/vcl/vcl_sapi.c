@@ -440,7 +440,8 @@ vcl_sapi_observability_terminal_cancel (u64 request_id)
   app_sapi_msg_t request = { 0 }, response = { 0 };
   clib_socket_t *cs;
   clib_error_t *err;
-  int fds[1];
+  struct pollfd pfd;
+  int fds[1], poll_rv;
   u32 n_fds;
 
   if (!vcl_api_uses_app_socket_v2 () || !request_id || !wrk->observability_segment ||
@@ -457,6 +458,14 @@ vcl_sapi_observability_terminal_cancel (u64 request_id)
     {
       clib_error_report (err);
       return VPPCOM_ECONNRESET;
+    }
+  pfd = (struct pollfd){ .fd = cs->fd, .events = POLLIN };
+  poll_rv = poll (&pfd, 1, VCL_SAPI_OBSERVABILITY_TIMEOUT_MS);
+  if (poll_rv != 1 || !(pfd.revents & POLLIN))
+    {
+      vcl_api_close_app_socket (wrk);
+      vcl_sapi_peer_dead (wrk);
+      return poll_rv ? VPPCOM_ECONNRESET : VPPCOM_ETIMEDOUT;
     }
   if (vcl_api_recv_v2_frame (cs, &response, fds, ARRAY_LEN (fds), &n_fds) || n_fds ||
       response.type != APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2_REPLY)

@@ -96,16 +96,49 @@ static const u8 session_test_observability_terminal_receipt[] = "p17b1p-terminal
 static volatile u32 session_test_observability_vft_invocations;
 static volatile u32 session_test_observability_terminal_invocations;
 
-#define SESSION_TEST_TERMINAL_DEFERRED	0x5031374231501001ULL
-#define SESSION_TEST_TERMINAL_CANCELLED 0x5031374231501002ULL
-#define SESSION_TEST_TERMINAL_FROZEN	0x5031374231501003ULL
-#define SESSION_TEST_TERMINAL_FENCED	0x5031374231501004ULL
+#define SESSION_TEST_TERMINAL_DEFERRED	  0x5031374231501001ULL
+#define SESSION_TEST_TERMINAL_CANCELLED	  0x5031374231501002ULL
+#define SESSION_TEST_TERMINAL_FROZEN	  0x5031374231501003ULL
+#define SESSION_TEST_TERMINAL_FENCED	  0x5031374231501004ULL
+#define SESSION_TEST_TERMINAL_MIGRATED	  0x5031374231501005ULL
+#define SESSION_TEST_TERMINAL_ARM_FAILURE 0x5031374231501006ULL
+#define SESSION_TEST_TERMINAL_OWNER_DEAD  0x5031374231501007ULL
 
 typedef struct
 {
   session_observability_terminal_sink_t sink;
   u64 request_id;
 } session_test_observability_terminal_completion_t;
+
+static session_test_observability_terminal_completion_t
+  session_test_observability_terminal_retained;
+static volatile u32 session_test_observability_terminal_completions;
+static volatile u32 session_test_observability_terminal_late_completions;
+
+typedef struct
+{
+  session_observability_reply_t reply;
+  u32 calls;
+} session_test_observability_terminal_wait_t;
+
+static void
+session_test_observability_terminal_wait (void *context, const session_observability_reply_t *reply)
+{
+  session_test_observability_terminal_wait_t *wait = context;
+
+  wait->reply = *reply;
+  wait->calls++;
+}
+
+static int
+session_test_observability_terminal_retain (
+  const session_test_observability_terminal_completion_t *completion)
+{
+  if (session_test_observability_terminal_retained.sink.opaque)
+    return -1;
+  session_test_observability_terminal_retained = *completion;
+  return 0;
+}
 
 static void
 session_test_observability_terminal_complete (void *arg)
@@ -121,9 +154,58 @@ session_test_observability_terminal_complete (void *arg)
 
   clib_memcpy_fast (reply.receipt, session_test_observability_terminal_receipt,
 		    reply.receipt_length);
-  (void) completion->sink.complete (&completion->sink, &reply);
+  if (!completion->sink.complete (&completion->sink, &reply))
+    clib_atomic_fetch_add_rel (&session_test_observability_terminal_completions, 1);
   /* A transport duplicate is intentionally ignored by the one-shot VPP sink. */
-  (void) completion->sink.complete (&completion->sink, &reply);
+  if (completion->sink.complete (&completion->sink, &reply))
+    clib_atomic_fetch_add_rel (&session_test_observability_terminal_late_completions, 1);
+}
+
+static int
+session_test_observability_terminal_complete_retained (u64 request_id)
+{
+  session_test_observability_terminal_completion_t *completion =
+    &session_test_observability_terminal_retained;
+  session_observability_reply_t reply = {
+    .request_id = request_id,
+    .status = 1,
+    .detail = SESSION_OBSERVABILITY_RESULT_OK,
+    .receipt_length = sizeof (session_test_observability_terminal_receipt) - 1,
+    .reply_flags = 1,
+  };
+  int rv;
+
+  if (!completion->sink.opaque || completion->request_id != request_id)
+    return -1;
+  clib_memcpy_fast (reply.receipt, session_test_observability_terminal_receipt,
+		    reply.receipt_length);
+  rv = completion->sink.complete (&completion->sink, &reply);
+  if (rv)
+    clib_atomic_fetch_add_rel (&session_test_observability_terminal_late_completions, 1);
+  else
+    clib_atomic_fetch_add_rel (&session_test_observability_terminal_completions, 1);
+  return rv;
+}
+
+static void
+session_test_observability_terminal_drop_retained (void)
+{
+  session_test_observability_terminal_retained =
+    (session_test_observability_terminal_completion_t){ 0 };
+}
+
+static int
+session_test_observability_terminal_slot_released (app_worker_t *app_wrk, u32 slot)
+{
+  session_observability_segment_t *segment = app_wrk->observability_segment;
+  session_observability_cell_t *cell = &segment->cell[slot];
+  session_observability_sidecar_t *sidecar = &segment->sidecar[slot];
+
+  return !clib_atomic_load_acq_n (&cell->references) &&
+	 !clib_atomic_load_acq_n (&cell->cell_references) &&
+	 !clib_atomic_load_acq_n (&cell->admission_pin) &&
+	 !clib_atomic_load_acq_n (&cell->reservation_pin) &&
+	 !clib_atomic_load_acq_n (&sidecar->references);
 }
 
 static int
@@ -167,8 +249,17 @@ session_test_observability_terminal_vft (u32 conn_index, clib_thread_index_t thr
     .request_id = request->request_id,
   };
   if (request->request_id == SESSION_TEST_TERMINAL_CANCELLED ||
-      request->request_id == SESSION_TEST_TERMINAL_FENCED)
-    return 0;
+      request->request_id == SESSION_TEST_TERMINAL_FENCED ||
+      request->request_id == SESSION_TEST_TERMINAL_MIGRATED ||
+      request->request_id == SESSION_TEST_TERMINAL_OWNER_DEAD)
+    return session_test_observability_terminal_retain (&completion);
+  if (request->request_id == SESSION_TEST_TERMINAL_ARM_FAILURE)
+    {
+      /* The copied sink may complete before a failing VFT return.  The
+       * caller must retire its private receipt and pins exactly once. */
+      session_test_observability_terminal_complete (&completion);
+      return -1;
+    }
   if (request->request_id == SESSION_TEST_TERMINAL_FROZEN)
     {
       session_test_observability_terminal_complete (&completion);
@@ -192,6 +283,10 @@ session_test_observability_vft_install (void)
   tp_vfts[TRANSPORT_PROTO_CT].observability_terminal_arm = session_test_observability_terminal_vft;
   clib_atomic_store_rel_n (&session_test_observability_vft_invocations, 0);
   clib_atomic_store_rel_n (&session_test_observability_terminal_invocations, 0);
+  clib_atomic_store_rel_n (&session_test_observability_terminal_completions, 0);
+  clib_atomic_store_rel_n (&session_test_observability_terminal_late_completions, 0);
+  session_test_observability_terminal_retained =
+    (session_test_observability_terminal_completion_t){ 0 };
   return 0;
 }
 
@@ -387,6 +482,7 @@ session_test_observability_terminal_lifecycle (vlib_main_t *vm, application_t *a
   clib_socket_t *socket = 0;
   session_t *s = 0;
   session_handle_t first_handle;
+  u32 terminal_invocations;
   int fds[2] = { -1, -1 };
   int rv = -1;
 
@@ -460,6 +556,10 @@ session_test_observability_terminal_lifecycle (vlib_main_t *vm, application_t *a
       response.type != APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2_REPLY ||
       response.observability_terminal_cancel_v2_reply.retval)
     goto done;
+  if (!session_test_observability_terminal_slot_released (app_wrk, 0) ||
+      !session_test_observability_terminal_complete_retained (SESSION_TEST_TERMINAL_CANCELLED))
+    goto done;
+  session_test_observability_terminal_drop_retained ();
   request.type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2;
   request.observability_terminal_await_v2 = (app_sapi_observability_terminal_wait_v2_msg_t){
     .request_id = SESSION_TEST_TERMINAL_CANCELLED,
@@ -510,8 +610,15 @@ session_test_observability_terminal_lifecycle (vlib_main_t *vm, application_t *a
   if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
 						 &response))
     goto done;
+  terminal_invocations = clib_atomic_load_acq_n (&session_test_observability_terminal_invocations);
   session_free (s);
   s = 0;
+  if (!session_test_observability_terminal_slot_released (app_wrk, 0) ||
+      !session_test_observability_terminal_complete_retained (SESSION_TEST_TERMINAL_FENCED) ||
+      clib_atomic_load_acq_n (&session_test_observability_terminal_invocations) !=
+	terminal_invocations)
+    goto done;
+  session_test_observability_terminal_drop_retained ();
   request.type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2;
   request.observability_terminal_await_v2.request_id = SESSION_TEST_TERMINAL_FENCED;
   request.observability_terminal_await_v2.abi = SESSION_OBSERVABILITY_ABI_VERSION;
@@ -524,11 +631,116 @@ session_test_observability_terminal_lifecycle (vlib_main_t *vm, application_t *a
   s->app_wrk_index = app_wrk->wrk_index;
   if (session_handle (s) != first_handle)
     goto done;
+
+  /* A migration fence must resolve the original copied sink, release its
+   * pins, and reject a late producer completion after pool-slot reuse. */
+  request = (app_sapi_msg_t){ .type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2 };
+  request.observability_terminal_arm_v2 = (app_sapi_observability_request_v2_msg_t){
+    .session_handle = first_handle,
+    .request_id = SESSION_TEST_TERMINAL_MIGRATED,
+    .attachment_slot = 0,
+    .sampling_point = SESSION_OBSERVABILITY_SAMPLING_TERMINAL,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response))
+    goto done;
+  terminal_invocations = clib_atomic_load_acq_n (&session_test_observability_terminal_invocations);
+  session_observability_fence_session (s, SESSION_OBSERVABILITY_RESULT_ASSOCIATION_MIGRATED);
+  if (!session_test_observability_terminal_slot_released (app_wrk, 0) ||
+      !session_test_observability_terminal_complete_retained (SESSION_TEST_TERMINAL_MIGRATED) ||
+      clib_atomic_load_acq_n (&session_test_observability_terminal_invocations) !=
+	terminal_invocations)
+    goto done;
+  session_test_observability_terminal_drop_retained ();
+  request = (app_sapi_msg_t){ .type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2 };
+  request.observability_terminal_await_v2 = (app_sapi_observability_terminal_wait_v2_msg_t){
+    .request_id = SESSION_TEST_TERMINAL_MIGRATED,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response) ||
+      response.observability_terminal_await_v2_reply.detail !=
+	SESSION_OBSERVABILITY_RESULT_ASSOCIATION_MIGRATED)
+    goto done;
+  session_free (s);
+  s = session_alloc (0);
+  s->app_wrk_index = app_wrk->wrk_index;
+  if (session_handle (s) != first_handle)
+    goto done;
+
+  /* A producer that freezes then returns failure never publishes an awaitable
+   * record and must still release the attachment pins. */
+  request = (app_sapi_msg_t){ .type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2 };
+  request.observability_terminal_arm_v2 = (app_sapi_observability_request_v2_msg_t){
+    .session_handle = first_handle,
+    .request_id = SESSION_TEST_TERMINAL_ARM_FAILURE,
+    .attachment_slot = 0,
+    .sampling_point = SESSION_OBSERVABILITY_SAMPLING_TERMINAL,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response) ||
+      response.observability_terminal_arm_v2_reply.status != 2 ||
+      response.observability_terminal_arm_v2_reply.detail !=
+	SESSION_OBSERVABILITY_RESULT_DISPATCH_REJECTED ||
+      !session_test_observability_terminal_slot_released (app_wrk, 0))
+    goto done;
   rv = 0;
 
 done:
   if (s)
     session_free (s);
+  if (socket)
+    appns_sapi_free_socket (app_ns, socket);
+  if (fds[0] >= 0)
+    close (fds[0]);
+  if (fds[1] >= 0)
+    close (fds[1]);
+  return rv;
+}
+
+/* The transport retains only a copied opaque sink.  Install the await
+ * callback before VCL/owner teardown so the test can prove that teardown
+ * resolves the original operation once and a late producer cannot target a
+ * replacement attachment. */
+static int
+session_test_observability_terminal_owner_death (vlib_main_t *vm, application_t *app,
+						 app_worker_t *app_wrk, session_t *s,
+						 session_test_observability_terminal_wait_t *wait)
+{
+  app_namespace_t *app_ns = app_namespace_get (app->ns_index);
+  app_ns_api_handle_t *handle;
+  app_sapi_msg_t request = { 0 }, response = { 0 };
+  clib_socket_t *socket = 0;
+  int fds[2] = { -1, -1 };
+  int rv = -1;
+
+  if (!app_ns || !s || !wait || socketpair (AF_UNIX, SOCK_SEQPACKET, 0, fds) ||
+      fcntl (fds[1], F_SETFL, fcntl (fds[1], F_GETFL) | O_NONBLOCK))
+    goto done;
+  socket = appns_sapi_alloc_socket (app_ns);
+  clib_socket_init_fd (socket, fds[0]);
+  handle = (app_ns_api_handle_t *) &socket->private_data;
+  handle->aah_app_wrk_index = app_wrk->wrk_index;
+  request.type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2;
+  request.observability_terminal_arm_v2 = (app_sapi_observability_request_v2_msg_t){
+    .session_handle = session_handle (s),
+    .request_id = SESSION_TEST_TERMINAL_OWNER_DEAD,
+    .attachment_slot = 0,
+    .sampling_point = SESSION_OBSERVABILITY_SAMPLING_TERMINAL,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response) ||
+      response.observability_terminal_arm_v2_reply.status != 1 ||
+      session_observability_terminal_await (app_wrk->observability_owner,
+					    SESSION_TEST_TERMINAL_OWNER_DEAD,
+					    session_test_observability_terminal_wait, wait))
+    goto done;
+  rv = 0;
+
+done:
   if (socket)
     appns_sapi_free_socket (app_ns, socket);
   if (fds[0] >= 0)
@@ -551,6 +763,7 @@ session_test_observability_lifecycle_once (vlib_main_t *vm)
   vl_api_app_observability_request_v2_t request = { 0 };
   app_sapi_msg_t control = { 0 }, response;
   session_observability_descriptor_t first_descriptor, second_descriptor;
+  session_test_observability_terminal_wait_t terminal_owner_wait = { 0 };
   vl_api_app_observability_request_v2_reply_t *reply;
   vl_api_memclnt_delete_reply_t *delete_reply;
   clib_socket_t control_socket = { 0 };
@@ -690,8 +903,21 @@ session_test_observability_lifecycle_once (vlib_main_t *vm)
   second_descriptor = app_wrk->observability_descriptor;
   SESSION_TEST (second_descriptor.attachment_instance != first_descriptor.attachment_instance,
 		"reconnect cannot reuse a retired attachment identity");
+
+  s = session_alloc (0);
+  s->app_wrk_index = app_wrk->wrk_index;
+  SESSION_TEST (
+    !session_test_observability_terminal_owner_death (vm, app, app_wrk, s, &terminal_owner_wait),
+    "terminal owner-death test retains only the copied opaque sink");
   session_observability_test_peer_dead (app_wrk->wrk_index);
-  SESSION_TEST (!app_wrk->observability_owner, "peer death retires the VPP attachment");
+  SESSION_TEST (
+    !app_wrk->observability_owner && terminal_owner_wait.calls == 1 &&
+      terminal_owner_wait.reply.detail == SESSION_OBSERVABILITY_RESULT_OWNER_DEAD &&
+      !session_test_observability_terminal_complete_retained (SESSION_TEST_TERMINAL_OWNER_DEAD),
+    "owner/VCL death resolves one sink and rejects its late completion");
+  session_test_observability_terminal_drop_retained ();
+  session_free (s);
+  s = 0;
   if (session_observability_test_attachment_create (app_wrk->wrk_index) ||
       app_wrk->observability_descriptor.attachment_instance ==
 	second_descriptor.attachment_instance)
