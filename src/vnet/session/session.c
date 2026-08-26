@@ -542,7 +542,10 @@ session_observability_terminal_complete (const session_observability_terminal_si
     return -1;
   clib_spinlock_lock (&session_observability_terminals_lock);
   terminal = session_observability_terminal_find (sink->opaque, &index);
-  if (!terminal)
+  /* A transport retains only this copied opaque sink.  Once a fence has
+   * retired the record, no late producer completion may revive it, even if
+   * a concurrent removal has not yet made the registry slot unreachable. */
+  if (!terminal || !terminal->registered || terminal->retired)
     {
       clib_spinlock_unlock (&session_observability_terminals_lock);
       return -1;
