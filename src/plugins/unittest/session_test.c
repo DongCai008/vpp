@@ -398,8 +398,10 @@ detach:
     close (sockets[1]);
   if (app_index != APP_INVALID_INDEX)
     {
-      detach_args =
-	(vnet_app_detach_args_t){ .app_index = app_index, .api_client_index = api_index };
+      /* This test uses an internal binary API registration. When SAPI is
+       * enabled, passing that raw index through worker teardown would treat it
+       * as an application-socket handle and could retire a namespace listener. */
+      detach_args = (vnet_app_detach_args_t){ .app_index = app_index, .api_client_index = ~0 };
       vnet_application_detach (&detach_args);
       attach_args.name = 0;
     }
