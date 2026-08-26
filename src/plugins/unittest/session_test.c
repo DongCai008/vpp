@@ -11,6 +11,9 @@
 #include <vnet/session/session.api_types.h>
 #include <vnet/session/transport.h>
 #include <vnet/tcp/tcp_inlines.h>
+#define vl_typedefs
+#include <vlibmemory/vl_memory_api_h.h>
+#undef vl_typedefs
 #include <vppinfra/socket.h>
 #include <sys/epoll.h>
 #include <sys/eventfd.h>
@@ -77,6 +80,7 @@ extern int session_observability_test_socket_control (clib_socket_t *cs, app_sap
 						      u32 app_wrk_index);
 extern void session_observability_test_bapi_request (vl_api_app_observability_request_v2_t *mp);
 extern void session_observability_test_peer_dead (u32 app_wrk_index);
+extern void vl_api_memclnt_delete_t_handler (vl_api_memclnt_delete_t *mp);
 
 static void
 session_test_cli_input (vlib_main_t *vm, char *cmd)
@@ -217,7 +221,7 @@ session_test_crypto_async_cb (app_crypto_async_req_t *req)
 }
 
 static int
-session_test_observability_lifecycle (vlib_main_t *vm, unformat_input_t *input)
+session_test_observability_lifecycle_once (vlib_main_t *vm)
 {
   u64 options[APP_OPTIONS_N_OPTIONS] = { 0 };
   vnet_app_attach_args_t attach_args = {
@@ -234,26 +238,25 @@ session_test_observability_lifecycle (vlib_main_t *vm, unformat_input_t *input)
   app_worker_t *app_wrk;
   application_t *app;
   session_t *s = 0;
-  svm_queue_t *api_queue;
+  svm_queue_t *api_queue = 0;
   svm_msg_q_t *remote_queue;
   svm_msg_q_msg_t msg;
   session_handle_t first_handle;
   u64 first_token;
-  u32 api_index, app_index;
+  u32 api_index = ~0, app_index = APP_INVALID_INDEX;
   u32 tries = 0;
   u8 barrier_held = 0;
   int sockets[2] = { -1, -1 };
   int rv = -1;
 
-  (void) input;
   if (vec_len (session_main.wrk) < 2)
     return 1;
   api_queue = svm_queue_alloc_and_init (1, sizeof (uword), getpid ());
   if (!api_queue)
-    return 1;
+    goto done;
   api_index = vl_api_memclnt_create_internal ("observability_lifecycle_test", api_queue);
   if (api_index == ~0 || !vl_api_client_index_to_registration (api_index))
-    return 1;
+    goto done;
   options[APP_OPTIONS_FLAGS] =
     APP_OPTIONS_FLAGS_USE_GLOBAL_SCOPE | APP_OPTIONS_FLAGS_USE_LOCAL_SCOPE;
   options[APP_OPTIONS_EVT_QUEUE_SIZE] = 256;
@@ -392,12 +395,55 @@ detach:
     close (sockets[0]);
   if (sockets[1] >= 0)
     close (sockets[1]);
-  detach_args = (vnet_app_detach_args_t){ .app_index = app_index, .api_client_index = api_index };
-  vnet_application_detach (&detach_args);
-  attach_args.name = 0;
+  if (app_index != APP_INVALID_INDEX)
+    {
+      detach_args =
+	(vnet_app_detach_args_t){ .app_index = app_index, .api_client_index = api_index };
+      vnet_application_detach (&detach_args);
+      attach_args.name = 0;
+    }
 done:
+  if (api_index != ~0 && vl_api_client_index_to_registration (api_index))
+    {
+      vl_api_memclnt_delete_t *delete = vl_msg_api_alloc (sizeof (*delete));
+
+      *delete = (vl_api_memclnt_delete_t){ .index = api_index, .do_cleanup = 1 };
+      vl_api_memclnt_delete_t_handler (delete);
+      api_queue = 0;
+      if (!SESSION_TEST_I (!vl_api_client_index_to_registration (api_index),
+			   "lifecycle API registration and queue are retired"))
+	rv = -1;
+    }
+  if (api_queue)
+    svm_queue_free (api_queue);
   vec_free (attach_args.name);
   return rv;
+}
+
+static int
+session_test_observability_lifecycle (vlib_main_t *vm, unformat_input_t *input)
+{
+  u32 i, n_runs = 1;
+
+  while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    {
+      if (unformat (input, "repeat %u", &n_runs))
+	;
+      else
+	{
+	  vlib_cli_output (vm, "parse error: '%U'", format_unformat_error, input);
+	  return -1;
+	}
+    }
+
+  if (!n_runs)
+    return -1;
+
+  for (i = 0; i < n_runs; i++)
+    if (session_test_observability_lifecycle_once (vm))
+      return 1;
+
+  return 0;
 }
 
 static void

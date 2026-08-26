@@ -2857,6 +2857,7 @@ sapi_socket_close (app_namespace_t *app_ns, clib_socket_t *cs)
 {
   app_ns_api_handle_t *handle;
   clib_file_t *cf;
+  clib_error_t *err;
 
   handle = (app_ns_api_handle_t *) &cs->private_data;
   cf = clib_file_get (&file_main, handle->aah_file_index);
@@ -2866,7 +2867,14 @@ sapi_socket_close (app_namespace_t *app_ns, clib_socket_t *cs)
   sapi_observability_attachment_destroy (
     sapi_observability_attachment_find (handle->aah_app_wrk_index, 0));
 
-  clib_socket_close (cs);
+  /* SAPI owns descriptors registered with dont_close. Retire the descriptor
+   * before returning this socket slot to the namespace pool. */
+  if (cs->fd >= 0)
+    {
+      err = clib_socket_close (cs);
+      clib_error_free (err);
+      cs->fd = -1;
+    }
   appns_sapi_free_socket (app_ns, cs);
 }
 
@@ -3310,6 +3318,7 @@ sapi_sock_accept_ready (clib_file_t *scf)
   cf.write_function = sapi_sock_write_ready;
   cf.error_function = sapi_sock_error;
   cf.file_descriptor = ccs->fd;
+  cf.dont_close = 1;
   /* File points to app namespace and socket */
   handle.aah_sock_index = appns_sapi_socket_index (app_ns, ccs);
   cf.private_data = handle.as_u64;
@@ -3397,6 +3406,7 @@ appns_sapi_add_ns_socket (app_namespace_t *app_ns)
 
       cf.read_function = sapi_sock_accept_ready;
       cf.file_descriptor = cs->fd;
+      cf.dont_close = 1;
       handle = (app_ns_api_handle_t *) &cf.private_data;
       handle->aah_app_ns_index = app_namespace_index (app_ns) | (is_v2 ? (1U << 31) : 0);
       handle->aah_sock_index = appns_sapi_socket_index (app_ns, cs);
