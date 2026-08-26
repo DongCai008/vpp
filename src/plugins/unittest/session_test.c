@@ -915,7 +915,7 @@ session_test_observability_lifecycle_once (vlib_main_t *vm)
 		  terminal_owner_wait.reply.detail == SESSION_OBSERVABILITY_RESULT_OWNER_DEAD,
 		"owner/VCL death resolves the original sink exactly once");
   SESSION_TEST (
-    !session_test_observability_terminal_complete_retained (SESSION_TEST_TERMINAL_OWNER_DEAD),
+    session_test_observability_terminal_complete_retained (SESSION_TEST_TERMINAL_OWNER_DEAD),
     "owner/VCL death rejects the copied sink's late completion");
   session_test_observability_terminal_drop_retained ();
   session_free (s);
