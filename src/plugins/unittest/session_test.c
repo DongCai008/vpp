@@ -88,7 +88,34 @@ extern void session_observability_test_peer_dead (u32 app_wrk_index);
 extern void vl_api_memclnt_delete_t_handler (vl_api_memclnt_delete_t *mp);
 
 static const u8 session_test_observability_receipt[] = "p17b1o-owner-vft";
+static const u8 session_test_observability_terminal_receipt[] = "p17b1p-terminal-vft";
 static volatile u32 session_test_observability_vft_invocations;
+static volatile u32 session_test_observability_terminal_invocations;
+
+typedef struct
+{
+  session_observability_terminal_sink_t sink;
+  u64 request_id;
+} session_test_observability_terminal_completion_t;
+
+static void
+session_test_observability_terminal_complete (void *arg)
+{
+  session_test_observability_terminal_completion_t *completion = arg;
+  session_observability_reply_t reply = {
+    .request_id = completion->request_id,
+    .status = 1,
+    .detail = SESSION_OBSERVABILITY_RESULT_OK,
+    .receipt_length = sizeof (session_test_observability_terminal_receipt) - 1,
+    .reply_flags = 1,
+  };
+
+  clib_memcpy_fast (reply.receipt, session_test_observability_terminal_receipt,
+		    reply.receipt_length);
+  (void) completion->sink.complete (&completion->sink, &reply);
+  /* A transport duplicate is intentionally ignored by the one-shot VPP sink. */
+  (void) completion->sink.complete (&completion->sink, &reply);
+}
 
 static int
 session_test_observability_vft (u32 conn_index, clib_thread_index_t thread_index,
@@ -115,13 +142,39 @@ session_test_observability_vft (u32 conn_index, clib_thread_index_t thread_index
 }
 
 static int
+session_test_observability_terminal_vft (u32 conn_index, clib_thread_index_t thread_index,
+					 const session_observability_request_t *request,
+					 const session_observability_terminal_sink_t *sink)
+{
+  session_test_observability_terminal_completion_t completion;
+
+  (void) conn_index;
+  (void) thread_index;
+  if (!request || !sink || !sink->opaque || !sink->complete)
+    return -1;
+  clib_atomic_fetch_add_rel (&session_test_observability_terminal_invocations, 1);
+  completion = (session_test_observability_terminal_completion_t){
+    .sink = *sink,
+    .request_id = request->request_id,
+  };
+  /* This is deferred to the main loop, after the owner VFT has returned and
+   * the arm acknowledgement can be emitted. */
+  vlib_rpc_call_main_thread (session_test_observability_terminal_complete, (u8 *) &completion,
+			     sizeof (completion));
+  return 0;
+}
+
+static int
 session_test_observability_vft_install (void)
 {
   if (TRANSPORT_PROTO_TCP >= vec_len (tp_vfts) || TRANSPORT_PROTO_CT >= vec_len (tp_vfts))
     return -1;
   tp_vfts[TRANSPORT_PROTO_TCP].observability_request = session_test_observability_vft;
   tp_vfts[TRANSPORT_PROTO_CT].observability_request = session_test_observability_vft;
+  tp_vfts[TRANSPORT_PROTO_TCP].observability_terminal_arm = session_test_observability_terminal_vft;
+  tp_vfts[TRANSPORT_PROTO_CT].observability_terminal_arm = session_test_observability_terminal_vft;
   clib_atomic_store_rel_n (&session_test_observability_vft_invocations, 0);
+  clib_atomic_store_rel_n (&session_test_observability_terminal_invocations, 0);
   return 0;
 }
 

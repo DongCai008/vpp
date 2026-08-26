@@ -119,6 +119,13 @@ typedef struct _transport_proto_vft
 				const session_observability_request_t *request,
 				session_observability_reply_t *reply);
 
+  /* The terminal path is admitted synchronously, then owns exactly one
+   * value-only completion sink.  A transport must not inspect VPP private
+   * association state or retain anything other than this value. */
+  int (*observability_terminal_arm) (u32 conn_index, clib_thread_index_t thread_index,
+				     const session_observability_request_t *request,
+				     const session_observability_terminal_sink_t *sink);
+
   /*
    * Properties
    */

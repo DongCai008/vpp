@@ -844,6 +844,12 @@ int vcl_sapi_del_cert_key_pair (u32 ckpair_index);
 int vcl_sapi_observability_request (vcl_session_t *session, u64 request_id,
 				    vppcom_observability_sampling_point_t sampling_point, u32 flags,
 				    vppcom_session_observability_reply_t *reply);
+int vcl_sapi_observability_terminal_arm (vcl_session_t *session, u64 request_id,
+					 vppcom_observability_sampling_point_t sampling_point,
+					 u32 flags);
+int vcl_sapi_observability_terminal_await (u64 request_id,
+					   vppcom_session_observability_reply_t *reply);
+int vcl_sapi_observability_terminal_cancel (u64 request_id);
 
 static inline int
 vcl_api_attach (void)

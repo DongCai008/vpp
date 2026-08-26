@@ -2706,6 +2706,7 @@ typedef struct
   u32 app_ns_index;
   u32 socket_index;
   u32 app_wrk_index;
+  app_sapi_msg_type_e response_type;
   session_observability_descriptor_t descriptor;
   session_observability_reply_t reply;
 } sapi_observability_completion_t;
@@ -2735,17 +2736,28 @@ sapi_observability_completion_send (void *arg)
       completion->reply.receipt_length > SESSION_OBSERVABILITY_RECEIPT_MAX)
     return;
 
-  response.type = APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY;
-  response.observability_request_v2_reply = (app_sapi_observability_request_v2_reply_msg_t){
-    .retval = 0,
-    .status = completion->reply.status,
-    .detail = completion->reply.detail,
-    .receipt_length = completion->reply.receipt_length,
-    .reply_flags = completion->reply.reply_flags,
-    .request_id = completion->reply.request_id,
-  };
-  clib_memcpy_fast (response.observability_request_v2_reply.receipt, completion->reply.receipt,
-		    completion->reply.receipt_length);
+  response.type = completion->response_type;
+  if (response.type == APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2_REPLY)
+    response.observability_terminal_arm_v2_reply =
+      (app_sapi_observability_terminal_arm_v2_reply_msg_t){
+	.retval = 0,
+	.status = completion->reply.status,
+	.detail = completion->reply.detail,
+	.request_id = completion->reply.request_id,
+      };
+  else
+    {
+      response.observability_request_v2_reply = (app_sapi_observability_request_v2_reply_msg_t){
+	.retval = 0,
+	.status = completion->reply.status,
+	.detail = completion->reply.detail,
+	.receipt_length = completion->reply.receipt_length,
+	.reply_flags = completion->reply.reply_flags,
+	.request_id = completion->reply.request_id,
+      };
+      clib_memcpy_fast (response.observability_request_v2_reply.receipt, completion->reply.receipt,
+			completion->reply.receipt_length);
+    }
   (void) clib_socket_sendmsg (cs, &response, sizeof (response), 0, 0);
 }
 
@@ -2766,12 +2778,14 @@ static void
 sapi_observability_completion_direct (app_namespace_t *app_ns, clib_socket_t *cs,
 				      app_worker_t *app_wrk,
 				      sapi_observability_attachment_t *attachment, u64 request_id,
-				      session_observability_result_t result)
+				      session_observability_result_t result,
+				      app_sapi_msg_type_e response_type)
 {
   sapi_observability_completion_t completion = {
     .app_ns_index = app_namespace_index (app_ns),
     .socket_index = appns_sapi_socket_index (app_ns, cs),
     .app_wrk_index = app_wrk->wrk_index,
+    .response_type = response_type,
     .descriptor = attachment->descriptor,
     .reply = {
       .request_id = request_id,
@@ -2786,9 +2800,10 @@ sapi_observability_completion_direct (app_namespace_t *app_ns, clib_socket_t *cs
 
 static int
 sapi_observability_request_handler (app_namespace_t *app_ns, clib_socket_t *cs, app_sapi_msg_t *msg,
-				    u32 app_wrk_index)
+				    u32 app_wrk_index, u8 is_terminal)
 {
-  app_sapi_observability_request_v2_msg_t *request = &msg->observability_request_v2;
+  app_sapi_observability_request_v2_msg_t *request =
+    is_terminal ? &msg->observability_terminal_arm_v2 : &msg->observability_request_v2;
   sapi_observability_attachment_t *attachment;
   session_observability_admission_t admission = { 0 };
   session_observability_dispatch_t dispatch = { 0 };
@@ -2814,7 +2829,9 @@ sapi_observability_request_handler (app_namespace_t *app_ns, clib_socket_t *cs, 
   if (request->abi != SESSION_OBSERVABILITY_ABI_VERSION || request->request_flags ||
       !request->request_id ||
       request->sampling_point < SESSION_OBSERVABILITY_SAMPLING_POST_HANDSHAKE ||
-      request->sampling_point > SESSION_OBSERVABILITY_SAMPLING_TERMINAL)
+      request->sampling_point > SESSION_OBSERVABILITY_SAMPLING_TERMINAL ||
+      (is_terminal && request->sampling_point != SESSION_OBSERVABILITY_SAMPLING_TERMINAL) ||
+      (!is_terminal && request->sampling_point == SESSION_OBSERVABILITY_SAMPLING_TERMINAL))
     {
       result = SESSION_OBSERVABILITY_RESULT_DISPATCH_REJECTED;
       goto direct;
@@ -2953,6 +2970,8 @@ sapi_observability_request_handler (app_namespace_t *app_ns, clib_socket_t *cs, 
     .socket_index = appns_sapi_socket_index (app_ns, cs),
     .app_wrk_index = app_wrk_index,
     .descriptor = attachment->descriptor,
+    .response_type = is_terminal ? APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2_REPLY :
+				   APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY,
   };
   if (session_observability_dispatch_prepare_with_completion (
 	admission.owner, &admission.event, &dispatch, sapi_observability_completion_notify,
@@ -2988,8 +3007,78 @@ release:
   session_observability_producer_release (&admission);
 direct:
   sapi_observability_completion_direct (app_ns, cs, app_wrk, attachment, request->request_id,
-					result);
+					result,
+					is_terminal ? APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2_REPLY :
+						      APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY);
   return 0;
+}
+
+static int
+sapi_observability_terminal_await_handler (app_namespace_t *app_ns, clib_socket_t *cs,
+					   app_sapi_msg_t *msg, u32 app_wrk_index)
+{
+  app_sapi_observability_terminal_wait_v2_msg_t *request = &msg->observability_terminal_await_v2;
+  sapi_observability_attachment_t *attachment;
+  sapi_observability_completion_t *completion;
+  app_worker_t *app_wrk;
+
+  app_wrk = app_worker_get_if_valid (app_wrk_index);
+  attachment = app_wrk ? sapi_observability_attachment_find (app_wrk_index, 0) : 0;
+  if (!app_wrk || !attachment || app_wrk->observability_owner != &attachment->owner ||
+      clib_atomic_load_acq_n (&attachment->segment->header.lifecycle) !=
+	SESSION_OBSERVABILITY_HEADER_MAP_VALID)
+    return -1;
+  if (request->abi != SESSION_OBSERVABILITY_ABI_VERSION || !request->request_id ||
+      request->reserved)
+    goto unavailable;
+  completion = clib_mem_alloc (sizeof (*completion));
+  if (!completion)
+    goto unavailable;
+  *completion = (sapi_observability_completion_t){
+    .app_ns_index = app_namespace_index (app_ns),
+    .socket_index = appns_sapi_socket_index (app_ns, cs),
+    .app_wrk_index = app_wrk_index,
+    .descriptor = attachment->descriptor,
+    .response_type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2_REPLY,
+  };
+  if (!session_observability_terminal_await (&attachment->owner, request->request_id,
+					     sapi_observability_completion_notify, completion))
+    return 0;
+  clib_mem_free (completion);
+
+unavailable:
+  sapi_observability_completion_direct (app_ns, cs, app_wrk, attachment, request->request_id,
+					SESSION_OBSERVABILITY_RESULT_ASSOCIATION_TOKEN_STALE,
+					APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2_REPLY);
+  return 0;
+}
+
+static int
+sapi_observability_terminal_cancel_handler (clib_socket_t *cs, app_sapi_msg_t *msg,
+					    u32 app_wrk_index)
+{
+  app_sapi_observability_terminal_wait_v2_msg_t *request = &msg->observability_terminal_cancel_v2;
+  app_sapi_msg_t response = { 0 };
+  sapi_observability_attachment_t *attachment;
+  app_worker_t *app_wrk;
+  int rv = -1;
+
+  app_wrk = app_worker_get_if_valid (app_wrk_index);
+  attachment = app_wrk ? sapi_observability_attachment_find (app_wrk_index, 0) : 0;
+  if (app_wrk && attachment && app_wrk->observability_owner == &attachment->owner &&
+      request->abi == SESSION_OBSERVABILITY_ABI_VERSION && request->request_id &&
+      !request->reserved)
+    rv = session_observability_terminal_cancel (&attachment->owner, request->request_id,
+						SESSION_OBSERVABILITY_RESULT_CANCELLED);
+  response.type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2_REPLY;
+  response.observability_terminal_cancel_v2_reply =
+    (app_sapi_observability_terminal_cancel_v2_reply_msg_t){
+      .retval = rv,
+      .detail = rv ? SESSION_OBSERVABILITY_RESULT_ASSOCIATION_TOKEN_STALE :
+		     SESSION_OBSERVABILITY_RESULT_CANCELLED,
+      .request_id = request->request_id,
+    };
+  return clib_socket_sendmsg (cs, &response, sizeof (response), 0, 0) ? -1 : 0;
 }
 
 int
@@ -3554,7 +3643,20 @@ sapi_sock_read_ready (clib_file_t *cf)
 	    sapi_socket_detach (app_ns, cs);
 	  break;
 	case APP_SAPI_MSG_TYPE_OBS_REQUEST_V2:
-	  if (sapi_observability_request_handler (app_ns, cs, &msg, handle->aah_app_wrk_index))
+	  if (sapi_observability_request_handler (app_ns, cs, &msg, handle->aah_app_wrk_index, 0))
+	    sapi_socket_detach (app_ns, cs);
+	  break;
+	case APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2:
+	  if (sapi_observability_request_handler (app_ns, cs, &msg, handle->aah_app_wrk_index, 1))
+	    sapi_socket_detach (app_ns, cs);
+	  break;
+	case APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2:
+	  if (sapi_observability_terminal_await_handler (app_ns, cs, &msg,
+							 handle->aah_app_wrk_index))
+	    sapi_socket_detach (app_ns, cs);
+	  break;
+	case APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2:
+	  if (sapi_observability_terminal_cancel_handler (cs, &msg, handle->aah_app_wrk_index))
 	    sapi_socket_detach (app_ns, cs);
 	  break;
 	default:

@@ -841,6 +841,12 @@ typedef enum app_sapi_msg_type
   APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY,
   APP_SAPI_MSG_TYPE_OBS_REQUEST_V2,
   APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY,
+  APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2,
+  APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2_REPLY,
+  APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2,
+  APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2_REPLY,
+  APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2,
+  APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2_REPLY,
 } __clib_packed app_sapi_msg_type_e;
 
 typedef struct app_sapi_attach_msg_
@@ -967,6 +973,28 @@ typedef struct
   u8 receipt[SESSION_OBSERVABILITY_RECEIPT_MAX];
 } __clib_packed app_sapi_observability_request_v2_reply_msg_t;
 
+typedef struct
+{
+  i32 retval;
+  u32 status;
+  u32 detail;
+  u64 request_id;
+} __clib_packed app_sapi_observability_terminal_arm_v2_reply_msg_t;
+
+typedef struct
+{
+  u64 request_id;
+  u16 abi;
+  u16 reserved;
+} __clib_packed app_sapi_observability_terminal_wait_v2_msg_t;
+
+typedef struct
+{
+  i32 retval;
+  u32 detail;
+  u64 request_id;
+} __clib_packed app_sapi_observability_terminal_cancel_v2_reply_msg_t;
+
 typedef struct app_sapi_legacy_msg_
 {
   app_sapi_msg_type_e type;
@@ -1000,6 +1028,12 @@ typedef struct app_sapi_msg_
     app_sapi_observability_control_v2_reply_msg_t observability_control_v2_reply;
     app_sapi_observability_request_v2_msg_t observability_request_v2;
     app_sapi_observability_request_v2_reply_msg_t observability_request_v2_reply;
+    app_sapi_observability_request_v2_msg_t observability_terminal_arm_v2;
+    app_sapi_observability_terminal_arm_v2_reply_msg_t observability_terminal_arm_v2_reply;
+    app_sapi_observability_terminal_wait_v2_msg_t observability_terminal_await_v2;
+    app_sapi_observability_request_v2_reply_msg_t observability_terminal_await_v2_reply;
+    app_sapi_observability_terminal_wait_v2_msg_t observability_terminal_cancel_v2;
+    app_sapi_observability_terminal_cancel_v2_reply_msg_t observability_terminal_cancel_v2_reply;
   };
 } __clib_packed app_sapi_msg_t;
 
@@ -1018,6 +1052,12 @@ STATIC_ASSERT (sizeof (app_sapi_observability_request_v2_msg_t) == 28,
 	       "socket v2 observability request ABI changed");
 STATIC_ASSERT (sizeof (app_sapi_observability_request_v2_reply_msg_t) == 156,
 	       "socket v2 observability reply ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_observability_terminal_arm_v2_reply_msg_t) == 20,
+	       "socket v2 terminal arm ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_observability_terminal_wait_v2_msg_t) == 12,
+	       "socket v2 terminal wait ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_observability_terminal_cancel_v2_reply_msg_t) == 16,
+	       "socket v2 terminal cancel ABI changed");
 STATIC_ASSERT (sizeof (app_sapi_legacy_msg_t) == 209, "legacy socket ABI changed");
 STATIC_ASSERT (sizeof (app_sapi_msg_t) == 213, "socket v2 fixed frame ABI changed");
 
@@ -1046,6 +1086,17 @@ app_sapi_msg_v2_active_bytes (app_sapi_msg_type_e type)
       return sizeof (app_sapi_observability_request_v2_msg_t);
     case APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY:
       return sizeof (app_sapi_observability_request_v2_reply_msg_t);
+    case APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2:
+      return sizeof (app_sapi_observability_request_v2_msg_t);
+    case APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2_REPLY:
+      return sizeof (app_sapi_observability_terminal_arm_v2_reply_msg_t);
+    case APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2:
+    case APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2:
+      return sizeof (app_sapi_observability_terminal_wait_v2_msg_t);
+    case APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2_REPLY:
+      return sizeof (app_sapi_observability_request_v2_reply_msg_t);
+    case APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2_REPLY:
+      return sizeof (app_sapi_observability_terminal_cancel_v2_reply_msg_t);
     default:
       return -1;
     }

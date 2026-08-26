@@ -307,6 +307,12 @@ extern int vppcom_session_observability_request (
   uint32_t session_handle, uint64_t request_id,
   vppcom_observability_sampling_point_t sampling_point, uint32_t flags,
   vppcom_session_observability_reply_t *reply);
+extern int vppcom_session_observability_terminal_arm (
+  uint32_t session_handle, uint64_t request_id,
+  vppcom_observability_sampling_point_t sampling_point, uint32_t flags);
+extern int vppcom_session_observability_terminal_await (
+  uint64_t request_id, vppcom_session_observability_reply_t *reply);
+extern int vppcom_session_observability_terminal_cancel (uint64_t request_id);
 extern int vppcom_session_recvfrom (uint32_t session_handle, void *buffer,
 				    uint32_t buflen, int flags,
 				    vppcom_endpt_t * ep);

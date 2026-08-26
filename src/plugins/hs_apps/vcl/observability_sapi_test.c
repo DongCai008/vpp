@@ -231,11 +231,22 @@ static int
 observability_sapi_reject_v2_recycled (const char *legacy_path)
 {
   static const app_sapi_msg_type_e unsupported[] = {
-    APP_SAPI_MSG_TYPE_ATTACH_V2_REPLY,	 APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_V2_REPLY,
-    APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2, APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2_REPLY,
-    APP_SAPI_MSG_TYPE_OBS_DETACH_V2,	 APP_SAPI_MSG_TYPE_OBS_DETACH_V2_REPLY,
-    APP_SAPI_MSG_TYPE_OBS_DONE_V2,	 APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY,
-    APP_SAPI_MSG_TYPE_OBS_REQUEST_V2,	 APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY,
+    APP_SAPI_MSG_TYPE_ATTACH_V2_REPLY,
+    APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_V2_REPLY,
+    APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2,
+    APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2_REPLY,
+    APP_SAPI_MSG_TYPE_OBS_DETACH_V2,
+    APP_SAPI_MSG_TYPE_OBS_DETACH_V2_REPLY,
+    APP_SAPI_MSG_TYPE_OBS_DONE_V2,
+    APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY,
+    APP_SAPI_MSG_TYPE_OBS_REQUEST_V2,
+    APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY,
+    APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2,
+    APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2_REPLY,
+    APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2,
+    APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2_REPLY,
+    APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2,
+    APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2_REPLY,
   };
   app_sapi_msg_t frame = { 0 };
   char v2_path[sizeof (((struct sockaddr_un *) 0)->sun_path)];
@@ -368,6 +379,7 @@ static int
 observability_sapi_success (const char *socket_path)
 {
   static const u8 expected_receipt[] = "p17b1o-owner-vft";
+  static const u8 expected_terminal_receipt[] = "p17b1p-terminal-vft";
   u8 loopback[] = { 127, 0, 0, 1 };
   vppcom_session_observability_reply_t reply = { 0 };
   vppcom_endpt_t endpoint = {
@@ -441,12 +453,25 @@ observability_sapi_success (const char *socket_path)
       memcmp (reply.receipt, expected_receipt, sizeof (expected_receipt) - 1))
     goto fail;
 
-  /* The completed public operation consumed the sole socket completion. */
   stage = 5;
+  rv = vppcom_session_observability_terminal_arm (client, 0x5031374231500001ULL,
+						  VPPCOM_OBSERVABILITY_TERMINAL, 0);
+  if (rv)
+    goto fail;
+  stage = 6;
+  rv = vppcom_session_observability_terminal_await (0x5031374231500001ULL, &reply);
+  if (rv || reply.request_id != 0x5031374231500001ULL || reply.status != 1 ||
+      reply.detail != SESSION_OBSERVABILITY_RESULT_OK || reply.reply_flags != 1 ||
+      reply.receipt_length != sizeof (expected_terminal_receipt) - 1 ||
+      memcmp (reply.receipt, expected_terminal_receipt, sizeof (expected_terminal_receipt) - 1))
+    goto fail;
+
+  /* The completed public operation consumed the sole socket completion. */
+  stage = 7;
   pfd = (struct pollfd){ .fd = wrk->app_api_sock.fd, .events = POLLIN };
   if (poll (&pfd, 1, 0))
     goto fail;
-  stage = 6;
+  stage = 8;
   if (vppcom_session_close (client) || vcl_sapi_detach (wrk))
     goto fail;
   client = INVALID_SESSION_ID;
@@ -456,7 +481,7 @@ observability_sapi_success (const char *socket_path)
       WEXITSTATUS (child_status))
     goto fail;
   server = -1;
-  printf ("REQUEST_SUCCESS_OK public-vcl-owner-vft-single-receipt\n");
+  printf ("REQUEST_SUCCESS_OK public-vcl-owner-vft-single-receipt-terminal-arm-await\n");
   fflush (stdout);
   _exit (0);
 

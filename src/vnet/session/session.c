@@ -285,6 +285,51 @@ typedef struct
   void *completion_context;
 } session_observability_rpc_t;
 
+typedef struct
+{
+  u64 opaque;
+  session_observability_owner_t *owner;
+  session_observability_directory_t *directory;
+  session_observability_cell_t *cell;
+  session_observability_sidecar_t *sidecar;
+  session_observability_event_t event;
+  session_observability_completion_fn_t completion;
+  void *completion_context;
+  session_observability_reply_t reply;
+  u8 arm_pending;
+  u8 pins_held;
+  u8 completed;
+} session_observability_terminal_t;
+
+static session_observability_terminal_t **session_observability_terminals;
+static clib_spinlock_t session_observability_terminals_lock;
+static volatile u64 session_observability_terminal_next;
+
+static session_observability_terminal_t *
+session_observability_terminal_find (u64 opaque, uword *index)
+{
+  session_observability_terminal_t *terminal;
+  uword i;
+
+  vec_foreach_index (i, session_observability_terminals)
+    {
+      terminal = session_observability_terminals[i];
+      if (terminal->opaque == opaque)
+	{
+	  if (index)
+	    *index = i;
+	  return terminal;
+	}
+    }
+  return 0;
+}
+
+static void
+session_observability_terminal_remove (uword index)
+{
+  vec_del1 (session_observability_terminals, index);
+}
+
 static void
 session_observability_dispatch_complete (session_observability_rpc_t *rpc,
 					 session_observability_cell_t *cell)
@@ -340,6 +385,187 @@ session_observability_release_pins (session_observability_owner_t *owner,
       clib_atomic_store_rel_n (&directory->lifecycle, SESSION_OBSERVABILITY_DIRECTORY_FREE);
     }
   session_observability_owner_release (owner);
+}
+
+static void
+session_observability_terminal_finish (session_observability_terminal_t *terminal,
+				       const session_observability_reply_t *reply)
+{
+  session_observability_completion_fn_t completion;
+  void *completion_context;
+
+  if (terminal->pins_held)
+    {
+      session_observability_cell_complete_reply (terminal->cell, reply);
+      session_observability_release_pins (terminal->owner, terminal->directory, terminal->cell,
+					  terminal->sidecar);
+      terminal->pins_held = 0;
+    }
+  terminal->reply = *reply;
+  terminal->completed = 1;
+  completion = terminal->completion;
+  completion_context = terminal->completion_context;
+  terminal->completion = 0;
+  terminal->completion_context = 0;
+  if (completion)
+    completion (completion_context, reply);
+}
+
+static session_observability_reply_t
+session_observability_terminal_result (session_observability_terminal_t *terminal,
+				       session_observability_result_t result)
+{
+  return (session_observability_reply_t){
+    .request_id = terminal->event.request_id,
+    .status = result == SESSION_OBSERVABILITY_RESULT_OK ? 1 : 2,
+    .detail = result,
+  };
+}
+
+int
+session_observability_terminal_complete (const session_observability_terminal_sink_t *sink,
+					 const session_observability_reply_t *reply)
+{
+  session_observability_terminal_t *terminal;
+  session_observability_reply_t frozen;
+  uword index;
+  u8 had_waiter;
+
+  if (!sink || !sink->opaque || !reply || reply->receipt_length > SESSION_OBSERVABILITY_RECEIPT_MAX)
+    return -1;
+  clib_spinlock_lock (&session_observability_terminals_lock);
+  terminal = session_observability_terminal_find (sink->opaque, &index);
+  if (!terminal || terminal->completed)
+    {
+      clib_spinlock_unlock (&session_observability_terminals_lock);
+      return -1;
+    }
+  frozen = *reply;
+  frozen.request_id = terminal->event.request_id;
+  terminal->reply = frozen;
+  terminal->completed = 1;
+  if (terminal->arm_pending)
+    {
+      clib_spinlock_unlock (&session_observability_terminals_lock);
+      return 0;
+    }
+  had_waiter = terminal->completion != 0;
+  if (had_waiter)
+    session_observability_terminal_remove (index);
+  clib_spinlock_unlock (&session_observability_terminals_lock);
+
+  session_observability_terminal_finish (terminal, &frozen);
+  if (!had_waiter)
+    {
+      /* A completed record without a waiter remains bounded by the attachment
+       * slot and is consumed by the later await operation. */
+      return 0;
+    }
+  clib_mem_free (terminal);
+  return 0;
+}
+
+int
+session_observability_terminal_await (session_observability_owner_t *owner, u64 request_id,
+				      session_observability_completion_fn_t completion,
+				      void *completion_context)
+{
+  session_observability_terminal_t *terminal;
+  session_observability_reply_t reply;
+  uword i;
+
+  if (!owner || !request_id || !completion)
+    return -1;
+  clib_spinlock_lock (&session_observability_terminals_lock);
+  vec_foreach_index (i, session_observability_terminals)
+    {
+      terminal = session_observability_terminals[i];
+      if (terminal->owner != owner || terminal->event.request_id != request_id)
+	continue;
+      if (terminal->completion)
+	{
+	  clib_spinlock_unlock (&session_observability_terminals_lock);
+	  return -1;
+	}
+      if (!terminal->completed || terminal->arm_pending)
+	{
+	  terminal->completion = completion;
+	  terminal->completion_context = completion_context;
+	  clib_spinlock_unlock (&session_observability_terminals_lock);
+	  return 0;
+	}
+      reply = terminal->reply;
+      session_observability_terminal_remove (i);
+      clib_spinlock_unlock (&session_observability_terminals_lock);
+      completion (completion_context, &reply);
+      clib_mem_free (terminal);
+      return 0;
+    }
+  clib_spinlock_unlock (&session_observability_terminals_lock);
+  return -1;
+}
+
+int
+session_observability_terminal_cancel (session_observability_owner_t *owner, u64 request_id,
+				       session_observability_result_t result)
+{
+  session_observability_terminal_t *terminal;
+  session_observability_reply_t reply;
+  uword i;
+
+  if (!owner || !request_id)
+    return -1;
+  clib_spinlock_lock (&session_observability_terminals_lock);
+  vec_foreach_index (i, session_observability_terminals)
+    {
+      terminal = session_observability_terminals[i];
+      if (terminal->owner == owner && terminal->event.request_id == request_id)
+	{
+	  if (terminal->completed)
+	    {
+	      clib_spinlock_unlock (&session_observability_terminals_lock);
+	      return 0;
+	    }
+	  session_observability_terminal_remove (i);
+	  clib_spinlock_unlock (&session_observability_terminals_lock);
+	  reply = session_observability_terminal_result (terminal, result);
+	  session_observability_terminal_finish (terminal, &reply);
+	  clib_mem_free (terminal);
+	  return 0;
+	}
+    }
+  clib_spinlock_unlock (&session_observability_terminals_lock);
+  return -1;
+}
+
+static void
+session_observability_terminal_fence (session_observability_owner_t *owner, session_handle_t handle,
+				      session_observability_result_t result)
+{
+  session_observability_terminal_t **terminals = 0;
+  session_observability_terminal_t *terminal;
+  session_observability_reply_t reply;
+  uword i;
+
+  clib_spinlock_lock (&session_observability_terminals_lock);
+  for (i = vec_len (session_observability_terminals); i > 0; i--)
+    {
+      terminal = session_observability_terminals[i - 1];
+      if ((owner && terminal->owner != owner) ||
+	  (handle != SESSION_INVALID_HANDLE && terminal->event.session_handle != handle))
+	continue;
+      vec_add1 (terminals, terminal);
+      session_observability_terminal_remove (i - 1);
+    }
+  clib_spinlock_unlock (&session_observability_terminals_lock);
+  vec_foreach_index (i, terminals)
+    {
+      terminal = terminals[i];
+      reply = session_observability_terminal_result (terminal, result);
+      session_observability_terminal_finish (terminal, &reply);
+      clib_mem_free (terminal);
+    }
+  vec_free (terminals);
 }
 
 static int
@@ -398,6 +624,7 @@ session_observability_fence_owner (session_observability_owner_t *owner,
 
   if (!owner || !(segment = owner->segment))
     return;
+  session_observability_terminal_fence (owner, SESSION_INVALID_HANDLE, result);
   clib_atomic_store_rel_n (&owner->fenced, 1);
   clib_atomic_store_rel_n (&segment->header.lifecycle, SESSION_OBSERVABILITY_HEADER_DETACHING);
   for (i = 0; i < SESSION_OBSERVABILITY_SLOT_COUNT; i++)
@@ -436,9 +663,9 @@ session_observability_fence_owner (session_observability_owner_t *owner,
 void
 session_observability_fence_session (session_t *s, session_observability_result_t result)
 {
-  (void) result;
   if (!s)
     return;
+  session_observability_terminal_fence (0, session_handle (s), result);
   s->observability_token_version = 0;
   s->observability_association_token = 0;
 }
@@ -459,6 +686,8 @@ session_observability_dispatch_rpc (void *arg)
   session_t *s;
   app_worker_t *app_wrk;
   transport_proto_vft_t *vft;
+  session_observability_terminal_t *terminal = 0;
+  session_observability_terminal_sink_t sink;
   u32 expected;
   int rv = -1;
 
@@ -532,6 +761,71 @@ session_observability_dispatch_rpc (void *arg)
     .owner_thread = rpc->event.owner_thread,
     .application_association = rpc->event.vcl_application_association,
   };
+  if (cell->sampling_point == SESSION_OBSERVABILITY_SAMPLING_TERMINAL &&
+      vft->observability_terminal_arm)
+    {
+      terminal = clib_mem_alloc (sizeof (*terminal));
+      if (!terminal)
+	goto done;
+      clib_memset (terminal, 0, sizeof (*terminal));
+      terminal->opaque = clib_atomic_fetch_add_rel (&session_observability_terminal_next, 1) + 1;
+      if (!terminal->opaque)
+	{
+	  clib_mem_free (terminal);
+	  terminal = 0;
+	  goto done;
+	}
+      terminal->owner = rpc->owner;
+      terminal->directory = directory;
+      terminal->cell = cell;
+      terminal->sidecar = sidecar;
+      terminal->event = rpc->event;
+      terminal->arm_pending = 1;
+      terminal->pins_held = 1;
+      sink = (session_observability_terminal_sink_t){
+	.opaque = terminal->opaque,
+	.complete = session_observability_terminal_complete,
+      };
+      clib_spinlock_lock (&session_observability_terminals_lock);
+      vec_add1 (session_observability_terminals, terminal);
+      clib_spinlock_unlock (&session_observability_terminals_lock);
+      rv = vft->observability_terminal_arm (s->connection_index, s->thread_index, &request, &sink);
+      terminal->arm_pending = 0;
+      if (!rv)
+	{
+	  reply = (session_observability_reply_t){
+	    .request_id = request.request_id,
+	    .status = 1,
+	    .detail = SESSION_OBSERVABILITY_RESULT_OK,
+	  };
+	  if (rpc->completion)
+	    rpc->completion (rpc->completion_context, &reply);
+	  if (terminal->completed)
+	    {
+	      session_observability_reply_t frozen = terminal->reply;
+	      session_observability_terminal_finish (terminal, &frozen);
+	    }
+	  rpc->completion = 0;
+	  rpc->completion_context = 0;
+	  terminal = 0;
+	  goto terminal_done;
+	}
+      clib_spinlock_lock (&session_observability_terminals_lock);
+      {
+	uword terminal_index;
+	if (session_observability_terminal_find (terminal->opaque, &terminal_index) == terminal)
+	  session_observability_terminal_remove (terminal_index);
+      }
+      clib_spinlock_unlock (&session_observability_terminals_lock);
+      clib_mem_free (terminal);
+      terminal = 0;
+      goto done;
+    }
+  if (cell->sampling_point == SESSION_OBSERVABILITY_SAMPLING_TERMINAL)
+    {
+      session_observability_cell_complete (cell, SESSION_OBSERVABILITY_RESULT_DISPATCH_REJECTED);
+      goto done;
+    }
   if (vft->observability_request)
     rv = vft->observability_request (s->connection_index, s->thread_index, &request, &reply);
   if (!rv)
@@ -552,6 +846,10 @@ done:
 					&rpc->owner->segment->directory[rpc->event.attachment_slot],
 					&rpc->owner->segment->cell[rpc->event.attachment_slot],
 					&rpc->owner->segment->sidecar[rpc->event.attachment_slot]);
+  clib_mem_free (rpc);
+  return;
+
+terminal_done:
   clib_mem_free (rpc);
 }
 
@@ -2397,6 +2695,7 @@ session_manager_main_enable (vlib_main_t *vm, session_rt_engine_type_t rt_engine
   /* Allocate cache line aligned worker contexts */
   vec_validate_aligned (smm->wrk, num_threads - 1, CLIB_CACHE_LINE_BYTES);
   clib_spinlock_init (&session_main.pool_realloc_lock);
+  clib_spinlock_init (&session_observability_terminals_lock);
 
   for (i = 0; i < num_threads; i++)
     {
