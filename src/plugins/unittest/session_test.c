@@ -910,11 +910,13 @@ session_test_observability_lifecycle_once (vlib_main_t *vm)
     !session_test_observability_terminal_owner_death (vm, app, app_wrk, s, &terminal_owner_wait),
     "terminal owner-death test retains only the copied opaque sink");
   session_observability_test_peer_dead (app_wrk->wrk_index);
+  SESSION_TEST (!app_wrk->observability_owner, "owner/VCL death retires the original attachment");
+  SESSION_TEST (terminal_owner_wait.calls == 1 &&
+		  terminal_owner_wait.reply.detail == SESSION_OBSERVABILITY_RESULT_OWNER_DEAD,
+		"owner/VCL death resolves the original sink exactly once");
   SESSION_TEST (
-    !app_wrk->observability_owner && terminal_owner_wait.calls == 1 &&
-      terminal_owner_wait.reply.detail == SESSION_OBSERVABILITY_RESULT_OWNER_DEAD &&
-      !session_test_observability_terminal_complete_retained (SESSION_TEST_TERMINAL_OWNER_DEAD),
-    "owner/VCL death resolves one sink and rejects its late completion");
+    !session_test_observability_terminal_complete_retained (SESSION_TEST_TERMINAL_OWNER_DEAD),
+    "owner/VCL death rejects the copied sink's late completion");
   session_test_observability_terminal_drop_retained ();
   session_free (s);
   s = 0;
