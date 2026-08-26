@@ -65,16 +65,14 @@ api_session_rule_add_del (vat_main_t *vam)
 	;
       else if (unformat (i, "tag %_%v%_", &tag))
 	;
-      else if (unformat (i, "%U/%d %d %U/%d %d", unformat_ip4_address,
-			 &lcl_ip4, &lcl_plen, &lcl_port, unformat_ip4_address,
-			 &rmt_ip4, &rmt_plen, &rmt_port))
+      else if (unformat (i, "%U/%d %d %U/%d %d", unformat_ip4_address, &lcl_ip4, &lcl_plen,
+			 &lcl_port, unformat_ip4_address, &rmt_ip4, &rmt_plen, &rmt_port))
 	{
 	  is_ip4 = 1;
 	  conn_set = 1;
 	}
-      else if (unformat (i, "%U/%d %d %U/%d %d", unformat_ip6_address,
-			 &lcl_ip6, &lcl_plen, &lcl_port, unformat_ip6_address,
-			 &rmt_ip6, &rmt_plen, &rmt_port))
+      else if (unformat (i, "%U/%d %d %U/%d %d", unformat_ip6_address, &lcl_ip6, &lcl_plen,
+			 &lcl_port, unformat_ip6_address, &rmt_ip6, &rmt_plen, &rmt_port))
 	{
 	  is_ip4 = 0;
 	  conn_set = 1;
@@ -119,8 +117,7 @@ api_session_rule_add_del (vat_main_t *vam)
   ip_prefix_encode (&rmt, &mp->rmt);
   mp->lcl_port = clib_host_to_net_u16 ((u16) lcl_port);
   mp->rmt_port = clib_host_to_net_u16 ((u16) rmt_port);
-  mp->transport_proto =
-    proto ? TRANSPORT_PROTO_API_UDP : TRANSPORT_PROTO_API_TCP;
+  mp->transport_proto = proto ? TRANSPORT_PROTO_API_UDP : TRANSPORT_PROTO_API_TCP;
   mp->action_index = clib_host_to_net_u32 (action);
   mp->appns_index = clib_host_to_net_u32 (appns_index);
   mp->scope = scope;
@@ -142,8 +139,7 @@ vl_api_app_attach_reply_t_handler (vl_api_app_attach_reply_t *mp)
 }
 
 static void
-vl_api_app_add_cert_key_pair_reply_t_handler (
-  vl_api_app_add_cert_key_pair_reply_t *mp)
+vl_api_app_add_cert_key_pair_reply_t_handler (vl_api_app_add_cert_key_pair_reply_t *mp)
 {
 }
 
@@ -207,29 +203,24 @@ vl_api_session_rules_details_t_handler (vl_api_session_rules_details_t *mp)
 
   if (lcl.fp_proto == FIB_PROTOCOL_IP4)
     {
-      print (vam->ofp,
-	     "appns %u tp %u scope %d %U/%d %d %U/%d %d action: %d tag: %s",
-	     clib_net_to_host_u32 (mp->appns_index), mp->transport_proto,
-	     mp->scope, format_ip4_address, &lcl.fp_addr.ip4, lcl.fp_len,
-	     clib_net_to_host_u16 (mp->lcl_port), format_ip4_address,
-	     &rmt.fp_addr.ip4, rmt.fp_len, clib_net_to_host_u16 (mp->rmt_port),
+      print (vam->ofp, "appns %u tp %u scope %d %U/%d %d %U/%d %d action: %d tag: %s",
+	     clib_net_to_host_u32 (mp->appns_index), mp->transport_proto, mp->scope,
+	     format_ip4_address, &lcl.fp_addr.ip4, lcl.fp_len, clib_net_to_host_u16 (mp->lcl_port),
+	     format_ip4_address, &rmt.fp_addr.ip4, rmt.fp_len, clib_net_to_host_u16 (mp->rmt_port),
 	     clib_net_to_host_u32 (mp->action_index), mp->tag);
     }
   else
     {
-      print (vam->ofp,
-	     "appns %u tp %u scope %d %U/%d %d %U/%d %d action: %d tag: %s",
-	     clib_net_to_host_u32 (mp->appns_index), mp->transport_proto,
-	     mp->scope, format_ip6_address, &lcl.fp_addr.ip6, lcl.fp_len,
-	     clib_net_to_host_u16 (mp->lcl_port), format_ip6_address,
-	     &rmt.fp_addr.ip6, rmt.fp_len, clib_net_to_host_u16 (mp->rmt_port),
+      print (vam->ofp, "appns %u tp %u scope %d %U/%d %d %U/%d %d action: %d tag: %s",
+	     clib_net_to_host_u32 (mp->appns_index), mp->transport_proto, mp->scope,
+	     format_ip6_address, &lcl.fp_addr.ip6, lcl.fp_len, clib_net_to_host_u16 (mp->lcl_port),
+	     format_ip6_address, &rmt.fp_addr.ip6, rmt.fp_len, clib_net_to_host_u16 (mp->rmt_port),
 	     clib_net_to_host_u32 (mp->action_index), mp->tag);
     }
 }
 
 static void
-vl_api_app_namespace_add_del_reply_t_handler (
-  vl_api_app_namespace_add_del_reply_t *mp)
+vl_api_app_namespace_add_del_reply_t_handler (vl_api_app_namespace_add_del_reply_t *mp)
 {
   vat_main_t *vam = &vat_main;
   i32 retval = ntohl (mp->retval);
@@ -247,14 +238,12 @@ vl_api_app_namespace_add_del_reply_t_handler (
 }
 
 static void
-vl_api_app_namespace_add_del_v2_reply_t_handler (
-  vl_api_app_namespace_add_del_v2_reply_t *vat)
+vl_api_app_namespace_add_del_v2_reply_t_handler (vl_api_app_namespace_add_del_v2_reply_t *vat)
 {
 }
 
 static void
-vl_api_app_worker_add_del_reply_t_handler (
-  vl_api_app_worker_add_del_reply_t *vat)
+vl_api_app_worker_add_del_reply_t_handler (vl_api_app_worker_add_del_reply_t *vat)
 {
 }
 
@@ -282,8 +271,24 @@ api_app_worker_add_del (vat_main_t *vat)
   return -1;
 }
 
-static int
-api_app_namespace_add_del (vat_main_t *vam)
+/* Keep the generated VAT registration complete for the attachment-only BAPI
+ * families.  The endpoint is intentionally not a generic VAT telemetry API. */
+#define foreach_observability_v2_vat_api                                                           \
+  _ (app_attach_v2)                                                                                \
+  _ (app_worker_add_del_v2)                                                                        \
+  _ (app_observability_attach_ack_v2)                                                              \
+  _ (app_observability_detach_v2)                                                                  \
+  _ (app_observability_done_v2)                                                                    \
+  _ (app_observability_request_v2)
+
+#define _(name)                                                                                    \
+  static void vl_api_##name##_reply_t_handler (vl_api_##name##_reply_t *mp) {}                     \
+  static int api_##name (vat_main_t *vat) { return -1; }
+foreach_observability_v2_vat_api
+#undef _
+
+  static int
+  api_app_namespace_add_del (vat_main_t *vam)
 {
   vl_api_app_namespace_add_del_t *mp;
   unformat_input_t *i = vam->input;
@@ -331,8 +336,7 @@ api_app_namespace_add_del (vat_main_t *vam)
 }
 
 static void
-vl_api_app_namespace_add_del_v4_reply_t_handler (
-  vl_api_app_namespace_add_del_v4_reply_t *mp)
+vl_api_app_namespace_add_del_v4_reply_t_handler (vl_api_app_namespace_add_del_v4_reply_t *mp)
 {
 }
 
@@ -343,8 +347,7 @@ api_app_namespace_add_del_v4 (vat_main_t *vat)
 }
 
 static void
-vl_api_app_namespace_add_del_v3_reply_t_handler (
-  vl_api_app_namespace_add_del_v3_reply_t *mp)
+vl_api_app_namespace_add_del_v3_reply_t_handler (vl_api_app_namespace_add_del_v3_reply_t *mp)
 {
 }
 
@@ -406,8 +409,7 @@ api_session_sdl_v3_dump (vat_main_t *vam)
 }
 
 static void
-vl_api_session_rules_v2_details_t_handler (
-  vl_api_session_rules_v2_details_t *mp)
+vl_api_session_rules_v2_details_t_handler (vl_api_session_rules_v2_details_t *mp)
 {
 }
 

@@ -233,6 +233,7 @@ typedef struct vppcom_cfg_t_
   double session_timeout;
   char *event_log_path;
   char *vpp_app_socket_api;	/**< app socket api socket file name */
+  char *vpp_app_socket_api_v2;	/**< observability v2 socket api socket file name */
   char *vpp_bapi_socket_name;	/**< bapi socket transport socket name */
   char *app_name;
   uint32_t tls_engine;

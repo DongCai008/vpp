@@ -13,7 +13,7 @@
 static app_worker_t *app_workers;
 
 app_worker_t *
-app_worker_alloc (application_t * app)
+app_worker_alloc (application_t *app)
 {
   app_worker_t *app_wrk;
 
@@ -45,7 +45,7 @@ app_worker_get_if_valid (u32 wrk_index)
 }
 
 void
-app_worker_free (app_worker_t * app_wrk)
+app_worker_free (app_worker_t *app_wrk)
 {
   application_t *app = application_get (app_wrk->app_index);
   session_handle_t handle, *handles = 0, *sh;
@@ -55,6 +55,16 @@ app_worker_free (app_worker_t * app_wrk)
   session_t *ls;
   u32 sm_index;
   int i;
+
+  /* Close admission before this worker index can be recycled.  Outstanding
+   * owner RPCs retain the attachment and will release their pins while
+   * observing the fence. */
+  if (app_wrk->observability_owner)
+    {
+      session_observability_fence_owner (app_wrk->observability_owner,
+					 SESSION_OBSERVABILITY_RESULT_OWNER_DEAD);
+      session_observability_owner_release (app_wrk->observability_owner);
+    }
 
   /*
    * Cleanup vpp wrk events
@@ -71,11 +81,11 @@ app_worker_free (app_worker_t * app_wrk)
    */
 
   hash_foreach (handle, sm_index, app_wrk->listeners_table, ({
-    ls = listen_session_get_from_handle (handle);
-    vec_add1 (handles, app_listen_session_handle (ls));
-    vec_add1 (sm_indices, sm_index);
-    sm = segment_manager_get (sm_index);
-  }));
+		  ls = listen_session_get_from_handle (handle);
+		  vec_add1 (handles, app_listen_session_handle (ls));
+		  vec_add1 (sm_indices, sm_index);
+		  sm = segment_manager_get (sm_index);
+		}));
 
   for (i = 0; i < vec_len (handles); i++)
     {
@@ -159,13 +169,12 @@ app_worker_alloc_listener_segment_manager (app_worker_t *app_wrk)
 }
 
 static int
-app_worker_alloc_session_fifos (segment_manager_t * sm, session_t * s)
+app_worker_alloc_session_fifos (segment_manager_t *sm, session_t *s)
 {
   svm_fifo_t *rx_fifo = 0, *tx_fifo = 0;
   int rv;
 
-  if ((rv = segment_manager_alloc_session_fifos (sm, s->thread_index,
-						 &rx_fifo, &tx_fifo)))
+  if ((rv = segment_manager_alloc_session_fifos (sm, s->thread_index, &rx_fifo, &tx_fifo)))
     return rv;
 
   rx_fifo->vpp_sh = s->handle;
@@ -197,8 +206,7 @@ app_worker_alloc_wrk_cl_session (app_worker_t *app_wrk, session_t *ls)
   s->session_type = ls->session_type;
   s->connection_index = ls->connection_index;
 
-  segment_manager_alloc_session_fifos (sm, s->thread_index, &rx_fifo,
-				       &tx_fifo);
+  segment_manager_alloc_session_fifos (sm, s->thread_index, &rx_fifo, &tx_fifo);
 
   rx_fifo->vpp_sh = s->handle;
   tx_fifo->vpp_sh = s->handle;
@@ -326,8 +334,7 @@ int
 app_worker_init_listener (app_worker_t *app_wrk, session_t *ls, segment_manager_t *sm)
 {
   /* Keep track of the segment manager for the listener or this worker */
-  hash_set (app_wrk->listeners_table, listen_session_get_handle (ls),
-	    segment_manager_index (sm));
+  hash_set (app_wrk->listeners_table, listen_session_get_handle (ls), segment_manager_index (sm));
 
   if (ls->flags & SESSION_F_IS_CLESS)
     return app_worker_alloc_wrk_cl_session (app_wrk, ls);
@@ -384,7 +391,7 @@ app_worker_start_listen (app_worker_t *app_wrk, app_listener_t **app_listener,
 }
 
 static void
-app_worker_add_detached_sm (app_worker_t * app_wrk, u32 sm_index)
+app_worker_add_detached_sm (app_worker_t *app_wrk, u32 sm_index)
 {
   u32 i;
 
@@ -400,7 +407,7 @@ app_worker_add_detached_sm (app_worker_t * app_wrk, u32 sm_index)
 }
 
 void
-app_worker_del_detached_sm (app_worker_t * app_wrk, u32 sm_index)
+app_worker_del_detached_sm (app_worker_t *app_wrk, u32 sm_index)
 {
   u32 i;
 
@@ -417,7 +424,7 @@ app_worker_del_detached_sm (app_worker_t * app_wrk, u32 sm_index)
 }
 
 static void
-app_worker_stop_listen_session (app_worker_t * app_wrk, session_t * ls)
+app_worker_stop_listen_session (app_worker_t *app_wrk, session_t *ls)
 {
   session_handle_t handle;
   segment_manager_t *sm;
@@ -464,7 +471,7 @@ app_worker_stop_listen_session (app_worker_t * app_wrk, session_t * ls)
 }
 
 int
-app_worker_stop_listen (app_worker_t * app_wrk, app_listener_t * al)
+app_worker_stop_listen (app_worker_t *app_wrk, app_listener_t *al)
 {
   session_t *ls;
 
@@ -491,7 +498,7 @@ app_worker_stop_listen (app_worker_t * app_wrk, app_listener_t * al)
 }
 
 int
-app_worker_init_accepted (session_t * s)
+app_worker_init_accepted (session_t *s)
 {
   app_worker_t *app_wrk;
   segment_manager_t *sm;
@@ -524,8 +531,7 @@ app_worker_alloc_session_fifos_ct (segment_manager_t *sm, session_t *s)
   svm_fifo_t *rx_fifo = 0, *tx_fifo = 0;
   int rv;
 
-  if ((rv = segment_manager_alloc_session_fifos_ct (s, sm, s->thread_index,
-						    &rx_fifo, &tx_fifo)))
+  if ((rv = segment_manager_alloc_session_fifos_ct (s, sm, s->thread_index, &rx_fifo, &tx_fifo)))
     return rv;
 
   rx_fifo->vpp_sh = s->handle;
@@ -565,8 +571,8 @@ app_worker_init_accepted_ct (session_t *s)
 }
 
 int
-app_worker_listened_notify (app_worker_t *app_wrk, session_handle_t alsh,
-			    u32 opaque, session_error_t err)
+app_worker_listened_notify (app_worker_t *app_wrk, session_handle_t alsh, u32 opaque,
+			    session_error_t err)
 {
   session_event_t evt = { .event_type = SESSION_CTRL_EVT_BOUND,
 			  .as_u64[0] = alsh,
@@ -578,8 +584,8 @@ app_worker_listened_notify (app_worker_t *app_wrk, session_handle_t alsh,
 }
 
 int
-app_worker_unlisten_reply (app_worker_t *app_wrk, session_handle_t sh,
-			   u32 opaque, session_error_t err)
+app_worker_unlisten_reply (app_worker_t *app_wrk, session_handle_t sh, u32 opaque,
+			   session_error_t err)
 {
   session_event_t evt = { .event_type = SESSION_CTRL_EVT_UNLISTEN_REPLY,
 			  .as_u64[0] = sh,
@@ -590,14 +596,14 @@ app_worker_unlisten_reply (app_worker_t *app_wrk, session_handle_t sh,
 }
 
 int
-app_worker_accept_notify (app_worker_t * app_wrk, session_t * s)
+app_worker_accept_notify (app_worker_t *app_wrk, session_t *s)
 {
   app_worker_add_event (app_wrk, s, SESSION_CTRL_EVT_ACCEPTED);
   return 0;
 }
 
 int
-app_worker_init_connected (app_worker_t * app_wrk, session_t * s)
+app_worker_init_connected (app_worker_t *app_wrk, session_t *s)
 {
   application_t *app = application_get (app_wrk->app_index);
   segment_manager_t *sm;
@@ -617,14 +623,12 @@ app_worker_init_connected (app_worker_t * app_wrk, session_t * s)
 }
 
 int
-app_worker_connect_notify (app_worker_t * app_wrk, session_t * s,
-			   session_error_t err, u32 opaque)
+app_worker_connect_notify (app_worker_t *app_wrk, session_t *s, session_error_t err, u32 opaque)
 {
   session_event_t evt = { .event_type = SESSION_CTRL_EVT_CONNECTED,
 			  .as_u64[0] = s ? s->session_index : ~0,
 			  .as_u64[1] = (u64) opaque << 32 | (u32) err };
-  clib_thread_index_t thread_index =
-    s ? s->thread_index : vlib_get_thread_index ();
+  clib_thread_index_t thread_index = s ? s->thread_index : vlib_get_thread_index ();
 
   app_worker_add_event_custom (app_wrk, thread_index, &evt);
   return 0;
@@ -656,29 +660,28 @@ app_worker_cleanup_ho_notify (app_worker_t *app_wrk, session_t *s,
 }
 
 int
-app_worker_close_notify (app_worker_t * app_wrk, session_t * s)
+app_worker_close_notify (app_worker_t *app_wrk, session_t *s)
 {
   app_worker_add_event (app_wrk, s, SESSION_CTRL_EVT_DISCONNECTED);
   return 0;
 }
 
 int
-app_worker_transport_closed_notify (app_worker_t * app_wrk, session_t * s)
+app_worker_transport_closed_notify (app_worker_t *app_wrk, session_t *s)
 {
   app_worker_add_event (app_wrk, s, SESSION_CTRL_EVT_TRANSPORT_CLOSED);
   return 0;
 }
 
 int
-app_worker_reset_notify (app_worker_t * app_wrk, session_t * s)
+app_worker_reset_notify (app_worker_t *app_wrk, session_t *s)
 {
   app_worker_add_event (app_wrk, s, SESSION_CTRL_EVT_RESET);
   return 0;
 }
 
 int
-app_worker_cleanup_notify (app_worker_t * app_wrk, session_t * s,
-			   session_cleanup_ntf_t ntf)
+app_worker_cleanup_notify (app_worker_t *app_wrk, session_t *s, session_cleanup_ntf_t ntf)
 {
   session_event_t evt = { .event_type = SESSION_CTRL_EVT_CLEANUP,
 			  .as_u64[0] = (u64) ntf << 32 | s->session_index,
@@ -692,8 +695,7 @@ app_worker_cleanup_notify (app_worker_t * app_wrk, session_t * s,
 }
 
 int
-app_worker_cleanup_notify_custom (app_worker_t *app_wrk, session_t *s,
-				  session_cleanup_ntf_t ntf,
+app_worker_cleanup_notify_custom (app_worker_t *app_wrk, session_t *s, session_cleanup_ntf_t ntf,
 				  void (*cleanup_cb) (session_t *s))
 {
   session_event_t evt = { .event_type = SESSION_CTRL_EVT_CLEANUP,
@@ -713,8 +715,7 @@ app_worker_rx_notify (app_worker_t *app_wrk, session_t *s)
 }
 
 int
-app_worker_migrate_notify (app_worker_t * app_wrk, session_t * s,
-			   session_handle_t new_sh)
+app_worker_migrate_notify (app_worker_t *app_wrk, session_t *s, session_handle_t new_sh)
 {
   session_event_t evt = { .event_type = SESSION_CTRL_EVT_MIGRATED,
 			  .as_u64[0] = s->session_index,
@@ -725,7 +726,7 @@ app_worker_migrate_notify (app_worker_t * app_wrk, session_t * s,
 }
 
 int
-app_worker_own_session (app_worker_t * app_wrk, session_t * s)
+app_worker_own_session (app_worker_t *app_wrk, session_t *s)
 {
   segment_manager_t *sm;
   svm_fifo_t *rxf, *txf;
@@ -785,8 +786,7 @@ app_worker_connect_stream (app_worker_t *app_wrk, session_endpoint_cfg_t *sep,
 }
 
 int
-app_worker_session_fifo_tuning (app_worker_t * app_wrk, session_t * s,
-				svm_fifo_t * f,
+app_worker_session_fifo_tuning (app_worker_t *app_wrk, session_t *s, svm_fifo_t *f,
 				session_ft_action_t act, u32 len)
 {
   application_t *app = application_get (app_wrk->app_index);
@@ -794,15 +794,14 @@ app_worker_session_fifo_tuning (app_worker_t * app_wrk, session_t * s,
 }
 
 segment_manager_t *
-app_worker_get_connect_segment_manager (app_worker_t * app)
+app_worker_get_connect_segment_manager (app_worker_t *app)
 {
-  ASSERT (app->connects_seg_manager != (u32) ~ 0);
+  ASSERT (app->connects_seg_manager != (u32) ~0);
   return segment_manager_get (app->connects_seg_manager);
 }
 
 segment_manager_t *
-app_worker_get_listen_segment_manager (app_worker_t * app,
-				       session_t * listener)
+app_worker_get_listen_segment_manager (app_worker_t *app, session_t *listener)
 {
   uword *smp;
   smp = hash_get (app->listeners_table, listen_session_get_handle (listener));
@@ -811,44 +810,39 @@ app_worker_get_listen_segment_manager (app_worker_t * app,
 }
 
 session_t *
-app_worker_first_listener (app_worker_t * app_wrk, u8 fib_proto,
-			   u8 transport_proto)
+app_worker_first_listener (app_worker_t *app_wrk, u8 fib_proto, u8 transport_proto)
 {
   session_t *listener;
   u64 handle;
   u32 sm_index;
   u8 sst;
 
-  sst = session_type_from_proto_and_ip (transport_proto,
-					fib_proto == FIB_PROTOCOL_IP4);
+  sst = session_type_from_proto_and_ip (transport_proto, fib_proto == FIB_PROTOCOL_IP4);
 
-   hash_foreach (handle, sm_index, app_wrk->listeners_table, ({
-     listener = listen_session_get_from_handle (handle);
-     if (listener->session_type == sst
-	 && !(listener->flags & SESSION_F_PROXY))
-       return listener;
-   }));
+  hash_foreach (handle, sm_index, app_wrk->listeners_table, ({
+		  listener = listen_session_get_from_handle (handle);
+		  if (listener->session_type == sst && !(listener->flags & SESSION_F_PROXY))
+		    return listener;
+		}));
 
   return 0;
 }
 
 session_t *
-app_worker_proxy_listener (app_worker_t * app_wrk, u8 fib_proto,
-			   u8 transport_proto)
+app_worker_proxy_listener (app_worker_t *app_wrk, u8 fib_proto, u8 transport_proto)
 {
   session_t *listener;
   u64 handle;
   u32 sm_index;
   u8 sst;
 
-  sst = session_type_from_proto_and_ip (transport_proto,
-					fib_proto == FIB_PROTOCOL_IP4);
+  sst = session_type_from_proto_and_ip (transport_proto, fib_proto == FIB_PROTOCOL_IP4);
 
-   hash_foreach (handle, sm_index, app_wrk->listeners_table, ({
-     listener = listen_session_get_from_handle (handle);
-     if (listener->session_type == sst && (listener->flags & SESSION_F_PROXY))
-       return listener;
-   }));
+  hash_foreach (handle, sm_index, app_wrk->listeners_table, ({
+		  listener = listen_session_get_from_handle (handle);
+		  if (listener->session_type == sst && (listener->flags & SESSION_F_PROXY))
+		    return listener;
+		}));
 
   return 0;
 }
@@ -883,12 +877,10 @@ app_wrk_send_fd (app_worker_t *app_wrk, int fd)
       vl_api_registration_t *reg;
       clib_error_t *error;
 
-      reg =
-	vl_mem_api_client_index_to_registration (app_wrk->api_client_index);
+      reg = vl_mem_api_client_index_to_registration (app_wrk->api_client_index);
       if (!reg)
 	{
-	  clib_warning ("no api registration for client: %u",
-			app_wrk->api_client_index);
+	  clib_warning ("no api registration for client: %u", app_wrk->api_client_index);
 	  return -1;
 	}
 
@@ -932,8 +924,7 @@ app_wrk_send_fd (app_worker_t *app_wrk, int fd)
 }
 
 void
-app_worker_add_event (app_worker_t *app_wrk, session_t *s,
-		      session_evt_type_t evt_type)
+app_worker_add_event (app_worker_t *app_wrk, session_t *s, session_evt_type_t evt_type)
 {
   session_event_t *evt;
 
@@ -952,8 +943,7 @@ app_worker_add_event (app_worker_t *app_wrk, session_t *s,
 }
 
 void
-app_worker_add_event_custom (app_worker_t *app_wrk,
-			     clib_thread_index_t thread_index,
+app_worker_add_event_custom (app_worker_t *app_wrk, clib_thread_index_t thread_index,
 			     session_event_t *evt)
 {
   clib_fifo_add1 (app_wrk->wrk_evts[thread_index], *evt);
@@ -1001,15 +991,13 @@ app_wrk_send_ctrl_evt (app_worker_t *app_wrk, u8 evt_type, void *msg, u32 msg_le
 }
 
 u8
-app_worker_mq_wrk_is_congested (app_worker_t *app_wrk,
-				clib_thread_index_t thread_index)
+app_worker_mq_wrk_is_congested (app_worker_t *app_wrk, clib_thread_index_t thread_index)
 {
   return app_wrk->wrk_mq_congested[thread_index] > 0;
 }
 
 void
-app_worker_set_mq_wrk_congested (app_worker_t *app_wrk,
-				 clib_thread_index_t thread_index)
+app_worker_set_mq_wrk_congested (app_worker_t *app_wrk, clib_thread_index_t thread_index)
 {
   ASSERT (thread_index == vlib_get_thread_index ());
   if (!app_wrk->wrk_mq_congested[thread_index])
@@ -1020,8 +1008,7 @@ app_worker_set_mq_wrk_congested (app_worker_t *app_wrk,
 }
 
 void
-app_worker_unset_wrk_mq_congested (app_worker_t *app_wrk,
-				   clib_thread_index_t thread_index)
+app_worker_unset_wrk_mq_congested (app_worker_t *app_wrk, clib_thread_index_t thread_index)
 {
   clib_atomic_fetch_sub_relax (&app_wrk->mq_congested, 1);
   ASSERT (thread_index == vlib_get_thread_index ());
@@ -1029,7 +1016,7 @@ app_worker_unset_wrk_mq_congested (app_worker_t *app_wrk,
 }
 
 u8 *
-format_app_worker_listener (u8 * s, va_list * args)
+format_app_worker_listener (u8 *s, va_list *args)
 {
   app_worker_t *app_wrk = va_arg (*args, app_worker_t *);
   session_handle_t handle = va_arg (*args, u64);
@@ -1042,11 +1029,10 @@ format_app_worker_listener (u8 * s, va_list * args)
   if (!app_wrk)
     {
       if (verbose)
-	s = format (s, "%-" SESSION_CLI_ID_LEN "s%-25s%-10s%-10s",
-		    "Connection", "App", "Wrk", "SegMngr");
+	s = format (s, "%-" SESSION_CLI_ID_LEN "s%-25s%-10s%-10s", "Connection", "App", "Wrk",
+		    "SegMngr");
       else
-	s = format (s, "%-" SESSION_CLI_ID_LEN "s%-25s%-10s", "Connection",
-		    "App", "Wrk");
+	s = format (s, "%-" SESSION_CLI_ID_LEN "s%-25s%-10s", "Connection", "App", "Wrk");
 
       return s;
     }
@@ -1059,13 +1045,11 @@ format_app_worker_listener (u8 * s, va_list * args)
     {
       u8 *buf;
       buf = format (0, "%u(%u)", app_wrk->wrk_map_index, app_wrk->wrk_index);
-      s = format (s, "%-" SESSION_CLI_ID_LEN "v%-25v%-10v%-10u", str, app_name,
-		  buf, sm_index);
+      s = format (s, "%-" SESSION_CLI_ID_LEN "v%-25v%-10v%-10u", str, app_name, buf, sm_index);
       vec_free (buf);
     }
   else
-    s = format (s, "%-" SESSION_CLI_ID_LEN "v%-25v%-10u", str, app_name,
-		app_wrk->wrk_map_index);
+    s = format (s, "%-" SESSION_CLI_ID_LEN "v%-25v%-10u", str, app_name, app_wrk->wrk_map_index);
 
   vec_free (str);
 
@@ -1073,7 +1057,7 @@ format_app_worker_listener (u8 * s, va_list * args)
 }
 
 u8 *
-format_app_worker (u8 * s, va_list * args)
+format_app_worker (u8 *s, va_list *args)
 {
   app_worker_t *app_wrk = va_arg (*args, app_worker_t *);
   u32 verbose = va_arg (*args, u32);
@@ -1090,20 +1074,19 @@ format_app_worker (u8 * s, va_list * args)
   if (verbose > 1)
     {
       sm = segment_manager_get (app_wrk->connects_seg_manager);
-      s = format (s, "%Usegment managers:\n%U%U", format_white_space, indent,
-		  format_white_space, indent, format_segment_manager, sm,
-		  1 /* verbose */);
+      s = format (s, "%Usegment managers:\n%U%U", format_white_space, indent, format_white_space,
+		  indent, format_segment_manager, sm, 1 /* verbose */);
       hash_foreach (handle, sm_index, app_wrk->listeners_table, ({
 		      sm = segment_manager_get (sm_index);
-		      s = format (s, "%U%U\n", format_white_space, indent,
-				  format_segment_manager, sm, 1 /* verbose */);
+		      s = format (s, "%U%U\n", format_white_space, indent, format_segment_manager,
+				  sm, 1 /* verbose */);
 		    }));
     }
   return s;
 }
 
 void
-app_worker_format_connects (app_worker_t * app_wrk, int verbose)
+app_worker_format_connects (app_worker_t *app_wrk, int verbose)
 {
   segment_manager_t *sm;
 
@@ -1114,7 +1097,7 @@ app_worker_format_connects (app_worker_t * app_wrk, int verbose)
       return;
     }
 
-  if (app_wrk->connects_seg_manager == (u32) ~ 0)
+  if (app_wrk->connects_seg_manager == (u32) ~0)
     return;
 
   sm = segment_manager_get (app_wrk->connects_seg_manager);

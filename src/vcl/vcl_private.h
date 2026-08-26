@@ -20,7 +20,7 @@
 #define VPPCOM_DEBUG_INIT 0
 #endif
 
-#define VPPCOM_DEBUG vcm->debug
+#define VPPCOM_DEBUG	  vcm->debug
 #define VCL_EP_SAPIFD_EVT ((u32) ~0)
 #define VCL_EP_PIPEFD_EVT ((u32) (~0 - 1))
 
@@ -72,8 +72,8 @@ typedef struct
   u32 prev_sh;
   u32 vep_sh;
   vppcom_epoll_event_t ev;
-#define VEP_DEFAULT_ET_MASK  (EPOLLIN|EPOLLOUT)
-#define VEP_UNSUPPORTED_EVENTS (EPOLLONESHOT|EPOLLEXCLUSIVE)
+#define VEP_DEFAULT_ET_MASK    (EPOLLIN | EPOLLOUT)
+#define VEP_UNSUPPORTED_EVENTS (EPOLLONESHOT | EPOLLEXCLUSIVE)
   u32 et_mask;
   u32 lt_next;
   u32 lt_prev;
@@ -81,8 +81,7 @@ typedef struct
 
 /* Select uses the vcl_si_set as if a clib_bitmap. Make sure they are the
  * same size */
-STATIC_ASSERT (sizeof (clib_bitmap_t) == sizeof (vcl_si_set),
-	       "vppcom bitmap size mismatch");
+STATIC_ASSERT (sizeof (clib_bitmap_t) == sizeof (vcl_si_set), "vppcom bitmap size mismatch");
 
 typedef struct
 {
@@ -90,8 +89,8 @@ typedef struct
   ip46_address_t ip46;
 } vppcom_ip46_t;
 
-#define VCL_ACCEPTED_F_CLOSED 	(1 << 0)
-#define VCL_ACCEPTED_F_RESET 	(1 << 1)
+#define VCL_ACCEPTED_F_CLOSED (1 << 0)
+#define VCL_ACCEPTED_F_RESET  (1 << 1)
 
 typedef struct vcl_session_msg
 {
@@ -157,8 +156,8 @@ typedef struct vcl_session_
 #define _(type, name) type name;
   foreach_app_session_field
 #undef _
-  vcl_session_flags_t flags;	/**< see @ref vcl_session_flags_t */
-  u32 rx_bytes_pending;		/**< bytes rx-ed as segs but not yet freed */
+    vcl_session_flags_t flags; /**< see @ref vcl_session_flags_t */
+  u32 rx_bytes_pending;	       /**< bytes rx-ed as segs but not yet freed */
 
   svm_fifo_t *ct_rx_fifo;
   svm_fifo_t *ct_tx_fifo;
@@ -166,15 +165,15 @@ typedef struct vcl_session_
 
   session_handle_t vpp_handle;
   session_handle_t parent_handle;
-  u32 listener_index;		/**< index of parent listener (if any) */
-  int n_accepted_sessions;	/**< sessions accepted by this listener */
-  vppcom_epoll_t vep;		/**< epoll context */
-  u32 attributes;		/**< see @ref vppcom_session_attr_t */
+  u32 listener_index;	   /**< index of parent listener (if any) */
+  int n_accepted_sessions; /**< sessions accepted by this listener */
+  vppcom_epoll_t vep;	   /**< epoll context */
+  u32 attributes;	   /**< see @ref vppcom_session_attr_t */
   u32 vrf;
   u16 gso_size;
 
-  u32 sndbuf_size;		// VPP-TBD: Hack until support setsockopt(SO_SNDBUF)
-  u32 rcvbuf_size;		// VPP-TBD: Hack until support setsockopt(SO_RCVBUF)
+  u32 sndbuf_size; // VPP-TBD: Hack until support setsockopt(SO_SNDBUF)
+  u32 rcvbuf_size; // VPP-TBD: Hack until support setsockopt(SO_RCVBUF)
 
   transport_endpt_ext_cfg_t *ext_config;
   u8 dscp;
@@ -212,8 +211,9 @@ typedef struct vcl_cfg_t_
   f64 app_timeout;
   f64 session_timeout;
   char *event_log_path;
-  u8 *vpp_app_socket_api;   /**< app socket api socket file name */
-  u8 *vpp_bapi_socket_name; /**< bapi socket transport socket name */
+  u8 *vpp_app_socket_api;    /**< legacy app socket api socket file name */
+  u8 *vpp_app_socket_api_v2; /**< observability v2 app socket api socket name */
+  u8 *vpp_bapi_socket_name;  /**< bapi socket transport socket name */
   u32 tls_engine;
   u8 mt_wrk_supported;
   u8 huge_page;
@@ -228,8 +228,8 @@ typedef struct vcl_cut_through_registration_
   svm_msg_q_t *mq;
   svm_msg_q_t *peer_mq;
   u32 sid;
-  u32 epoll_evt_conn_index;	/*< mq evt connection index part of
-				   the mqs evtfd epoll (if used) */
+  u32 epoll_evt_conn_index; /*< mq evt connection index part of
+			       the mqs evtfd epoll (if used) */
 } vcl_cut_through_registration_t;
 
 typedef struct vcl_mq_evt_conn_
@@ -307,6 +307,10 @@ typedef struct vcl_worker_
   u32 forked_child;
 
   clib_socket_t app_api_sock;
+  int observability_fd;
+  session_observability_segment_t *observability_segment;
+  session_observability_descriptor_t observability_descriptor;
+  u32 observability_association;
   socket_client_main_t bapi_sock_ctx;
   api_main_t bapi_api_ctx;
   memory_client_main_t bapi_mem_ctx;
@@ -331,8 +335,7 @@ typedef struct vcl_worker_
 
 STATIC_ASSERT (sizeof (session_disconnected_msg_t) <= 16,
 	       "disconnected must fit in session_event_t");
-STATIC_ASSERT (sizeof (session_reset_msg_t) <= 16,
-	       "disconnected must fit in session_event_t");
+STATIC_ASSERT (sizeof (session_reset_msg_t) <= 16, "disconnected must fit in session_event_t");
 
 typedef void (vcl_rpc_fn_t) (void *args);
 
@@ -379,8 +382,7 @@ typedef struct vppcom_main_t_
    */
   int (*vcl_epoll_create1) (int flags);
   int (*vcl_epoll_ctl) (int epfd, int op, int fd, struct epoll_event *event);
-  int (*vcl_epoll_wait) (int epfd, struct epoll_event *events, int maxevents,
-			 int timeout);
+  int (*vcl_epoll_wait) (int epfd, struct epoll_event *events, int maxevents, int timeout);
 
   clib_spinlock_t reattach_lock;
   /** Counter to determine order of execution of `vcl_api_retry_attach`
@@ -405,15 +407,15 @@ typedef struct vppcom_main_t_
 extern vppcom_main_t *vcm;
 extern vppcom_main_t _vppcom_main;
 
-#define VCL_INVALID_SESSION_INDEX ((u32)~0)
-#define VCL_INVALID_SESSION_HANDLE ((u64)~0)
-#define VCL_INVALID_SEGMENT_INDEX ((u32)~0)
-#define VCL_INVALID_SEGMENT_HANDLE ((u64)~0)
+#define VCL_INVALID_SESSION_INDEX  ((u32) ~0)
+#define VCL_INVALID_SESSION_HANDLE ((u64) ~0)
+#define VCL_INVALID_SEGMENT_INDEX  ((u32) ~0)
+#define VCL_INVALID_SEGMENT_HANDLE ((u64) ~0)
 
 void vcl_session_detach_fifos (vcl_session_t *s);
 
 static inline vcl_session_t *
-vcl_session_alloc (vcl_worker_t * wrk)
+vcl_session_alloc (vcl_worker_t *wrk)
 {
   vcl_session_t *s;
   pool_get (wrk->sessions, s);
@@ -424,7 +426,7 @@ vcl_session_alloc (vcl_worker_t * wrk)
 }
 
 static inline void
-vcl_session_free (vcl_worker_t * wrk, vcl_session_t * s)
+vcl_session_free (vcl_worker_t *wrk, vcl_session_t *s)
 {
   /* Debug level set to 1 to avoid debug messages while ldp is cleaning up */
   VDBG (1, "session %u [0x%llx] removed", s->session_index, s->vpp_handle);
@@ -436,7 +438,7 @@ vcl_session_free (vcl_worker_t * wrk, vcl_session_t * s)
 }
 
 static inline vcl_session_t *
-vcl_session_get (vcl_worker_t * wrk, u32 session_index)
+vcl_session_get (vcl_worker_t *wrk, u32 session_index)
 {
   if (pool_is_free_index (wrk->sessions, session_index))
     return 0;
@@ -458,20 +460,20 @@ vcl_session_handle_from_index (u32 session_index)
 }
 
 static inline vcl_session_handle_t
-vcl_session_handle (vcl_session_t * s)
+vcl_session_handle (vcl_session_t *s)
 {
   return vcl_session_handle_from_index (s->session_index);
 }
 
 static inline void
-vcl_session_handle_parse (u32 handle, u32 * wrk_index, u32 * session_index)
+vcl_session_handle_parse (u32 handle, u32 *wrk_index, u32 *session_index)
 {
   *wrk_index = handle >> 24;
   *session_index = handle & 0xFFFFFF;
 }
 
 static inline vcl_session_t *
-vcl_session_get_w_handle (vcl_worker_t * wrk, u32 session_handle)
+vcl_session_get_w_handle (vcl_worker_t *wrk, u32 session_handle)
 {
   u32 session_index, wrk_index;
   vcl_session_handle_parse (session_handle, &wrk_index, &session_index);
@@ -480,7 +482,7 @@ vcl_session_get_w_handle (vcl_worker_t * wrk, u32 session_handle)
 }
 
 static inline vcl_session_t *
-vcl_session_get_w_vpp_handle (vcl_worker_t * wrk, u64 vpp_handle)
+vcl_session_get_w_vpp_handle (vcl_worker_t *wrk, u64 vpp_handle)
 {
   uword *p;
   if ((p = hash_get (wrk->session_index_by_vpp_handles, vpp_handle)))
@@ -489,7 +491,7 @@ vcl_session_get_w_vpp_handle (vcl_worker_t * wrk, u64 vpp_handle)
 }
 
 static inline u32
-vcl_session_index_from_vpp_handle (vcl_worker_t * wrk, u64 vpp_handle)
+vcl_session_index_from_vpp_handle (vcl_worker_t *wrk, u64 vpp_handle)
 {
   uword *p;
   if ((p = hash_get (wrk->session_index_by_vpp_handles, vpp_handle)))
@@ -498,39 +500,37 @@ vcl_session_index_from_vpp_handle (vcl_worker_t * wrk, u64 vpp_handle)
 }
 
 static inline void
-vcl_session_table_add_vpp_handle (vcl_worker_t * wrk, u64 handle, u32 value)
+vcl_session_table_add_vpp_handle (vcl_worker_t *wrk, u64 handle, u32 value)
 {
   hash_set (wrk->session_index_by_vpp_handles, handle, value);
 }
 
 static inline void
-vcl_session_table_del_vpp_handle (vcl_worker_t * wrk, u64 vpp_handle)
+vcl_session_table_del_vpp_handle (vcl_worker_t *wrk, u64 vpp_handle)
 {
   hash_unset (wrk->session_index_by_vpp_handles, vpp_handle);
 }
 
 static inline uword *
-vcl_session_table_lookup_vpp_handle (vcl_worker_t * wrk, u64 handle)
+vcl_session_table_lookup_vpp_handle (vcl_worker_t *wrk, u64 handle)
 {
   return hash_get (wrk->session_index_by_vpp_handles, handle);
 }
 
 static inline void
-vcl_session_table_add_listener (vcl_worker_t * wrk, u64 listener_handle,
-				u32 value)
+vcl_session_table_add_listener (vcl_worker_t *wrk, u64 listener_handle, u32 value)
 {
   hash_set (wrk->session_index_by_vpp_handles, listener_handle, value);
 }
 
 static inline void
-vcl_session_table_del_listener (vcl_worker_t * wrk, u64 listener_handle)
+vcl_session_table_del_listener (vcl_worker_t *wrk, u64 listener_handle)
 {
   hash_unset (wrk->session_index_by_vpp_handles, listener_handle);
 }
 
 static inline int
-vcl_session_is_connectable_listener (vcl_worker_t * wrk,
-				     vcl_session_t * session)
+vcl_session_is_connectable_listener (vcl_worker_t *wrk, vcl_session_t *session)
 {
   /* Tell if we session_handle is a QUIC session.
    * We can be in the following cases :
@@ -549,7 +549,7 @@ vcl_session_is_connectable_listener (vcl_worker_t * wrk,
 }
 
 static inline vcl_session_t *
-vcl_session_table_lookup_listener (vcl_worker_t * wrk, u64 handle)
+vcl_session_table_lookup_listener (vcl_worker_t *wrk, u64 handle)
 {
   uword *p;
   vcl_session_t *s;
@@ -557,8 +557,10 @@ vcl_session_table_lookup_listener (vcl_worker_t * wrk, u64 handle)
   p = hash_get (wrk->session_index_by_vpp_handles, handle);
   if (!p)
     {
-      VDBG (0, "could not find listen session: unknown vpp listener handle"
-	    " %llx", handle);
+      VDBG (0,
+	    "could not find listen session: unknown vpp listener handle"
+	    " %llx",
+	    handle);
       return 0;
     }
   s = vcl_session_get (wrk, p[0]);
@@ -574,13 +576,12 @@ vcl_session_table_lookup_listener (vcl_worker_t * wrk, u64 handle)
       return 0;
     }
 
-  ASSERT (s->session_state == VCL_STATE_LISTEN ||
-	  vcl_session_is_connectable_listener (wrk, s));
+  ASSERT (s->session_state == VCL_STATE_LISTEN || vcl_session_is_connectable_listener (wrk, s));
   return s;
 }
 
 static inline u8
-vcl_session_is_cl (vcl_session_t * s)
+vcl_session_is_cl (vcl_session_t *s)
 {
   if (s->session_type == VPPCOM_PROTO_UDP)
     return !(s->flags & VCL_SESSION_F_CONNECTED);
@@ -590,54 +591,50 @@ vcl_session_is_cl (vcl_session_t * s)
 static inline u8
 vcl_session_has_crypto (vcl_session_t *s)
 {
-  return (s->session_type == VPPCOM_PROTO_TLS ||
-	  s->session_type == VPPCOM_PROTO_QUIC ||
+  return (s->session_type == VPPCOM_PROTO_TLS || s->session_type == VPPCOM_PROTO_QUIC ||
 	  s->session_type == VPPCOM_PROTO_DTLS);
 }
 
 static inline u8
-vcl_session_is_ready (vcl_session_t * s)
+vcl_session_is_ready (vcl_session_t *s)
 {
-  return (s->session_state == VCL_STATE_READY
-	  || s->session_state == VCL_STATE_VPP_CLOSING);
+  return (s->session_state == VCL_STATE_READY || s->session_state == VCL_STATE_VPP_CLOSING);
 }
 
 static inline u8
-vcl_session_is_open (vcl_session_t * s)
+vcl_session_is_open (vcl_session_t *s)
 {
-  return ((vcl_session_is_ready (s))
-	  || (s->session_state == VCL_STATE_LISTEN && vcl_session_is_cl (s)));
+  return ((vcl_session_is_ready (s)) ||
+	  (s->session_state == VCL_STATE_LISTEN && vcl_session_is_cl (s)));
 }
 
 static inline u8
-vcl_session_is_closing (vcl_session_t * s)
+vcl_session_is_closing (vcl_session_t *s)
 {
-  return (s->session_state == VCL_STATE_VPP_CLOSING
-	  || s->session_state == VCL_STATE_DISCONNECT);
+  return (s->session_state == VCL_STATE_VPP_CLOSING || s->session_state == VCL_STATE_DISCONNECT);
 }
 
 static inline u8
-vcl_session_is_closed (vcl_session_t * s)
+vcl_session_is_closed (vcl_session_t *s)
 {
   return (!s || (s->session_state == VCL_STATE_CLOSED));
 }
 
 static inline int
-vcl_session_closing_error (vcl_session_t * s)
+vcl_session_closing_error (vcl_session_t *s)
 {
   /* Return 0 on closing sockets */
   return s->session_state == VCL_STATE_DISCONNECT ? VPPCOM_ECONNRESET : 0;
 }
 
 static inline int
-vcl_session_closed_error (vcl_session_t * s)
+vcl_session_closed_error (vcl_session_t *s)
 {
-  return s->session_state == VCL_STATE_DISCONNECT
-    ? VPPCOM_ECONNRESET : VPPCOM_ENOTCONN;
+  return s->session_state == VCL_STATE_DISCONNECT ? VPPCOM_ECONNRESET : VPPCOM_ENOTCONN;
 }
 
 static inline void
-vcl_ip_copy_from_ep (ip46_address_t * ip, vppcom_endpt_t * ep)
+vcl_ip_copy_from_ep (ip46_address_t *ip, vppcom_endpt_t *ep)
 {
   if (ep->is_ip4)
     clib_memcpy_fast (&ip->ip4, ep->ip, sizeof (ip4_address_t));
@@ -646,7 +643,7 @@ vcl_ip_copy_from_ep (ip46_address_t * ip, vppcom_endpt_t * ep)
 }
 
 static inline void
-vcl_ip_copy_to_ep (ip46_address_t * ip, vppcom_endpt_t * ep, u8 is_ip4)
+vcl_ip_copy_to_ep (ip46_address_t *ip, vppcom_endpt_t *ep, u8 is_ip4)
 {
   ep->is_ip4 = is_ip4;
   if (is_ip4)
@@ -658,24 +655,23 @@ vcl_ip_copy_to_ep (ip46_address_t * ip, vppcom_endpt_t * ep, u8 is_ip4)
 static inline int
 vcl_proto_is_dgram (uint8_t proto)
 {
-  return proto == VPPCOM_PROTO_UDP || proto == VPPCOM_PROTO_DTLS ||
-	 proto == VPPCOM_PROTO_SRTP;
+  return proto == VPPCOM_PROTO_UDP || proto == VPPCOM_PROTO_DTLS || proto == VPPCOM_PROTO_SRTP;
 }
 
 static inline u8
-vcl_session_has_attr (vcl_session_t * s, u8 attr)
+vcl_session_has_attr (vcl_session_t *s, u8 attr)
 {
   return (s->attributes & (1 << attr)) ? 1 : 0;
 }
 
 static inline void
-vcl_session_set_attr (vcl_session_t * s, u8 attr)
+vcl_session_set_attr (vcl_session_t *s, u8 attr)
 {
   s->attributes |= 1 << attr;
 }
 
 static inline void
-vcl_session_clear_attr (vcl_session_t * s, u8 attr)
+vcl_session_clear_attr (vcl_session_t *s, u8 attr)
 {
   s->attributes &= ~(1 << attr);
 }
@@ -737,30 +733,29 @@ vcl_session_del_want_deq_ntf (vcl_session_t *s, svm_fifo_deq_ntf_t evt)
 /*
  * Helpers
  */
-vcl_mq_evt_conn_t *vcl_mq_evt_conn_alloc (vcl_worker_t * wrk);
-u32 vcl_mq_evt_conn_index (vcl_worker_t * wrk, vcl_mq_evt_conn_t * mqc);
-vcl_mq_evt_conn_t *vcl_mq_evt_conn_get (vcl_worker_t * wrk, u32 mq_conn_idx);
-int vcl_mq_epoll_add_evfd (vcl_worker_t * wrk, svm_msg_q_t * mq);
-int vcl_mq_epoll_del_evfd (vcl_worker_t * wrk, u32 mqc_index);
+vcl_mq_evt_conn_t *vcl_mq_evt_conn_alloc (vcl_worker_t *wrk);
+u32 vcl_mq_evt_conn_index (vcl_worker_t *wrk, vcl_mq_evt_conn_t *mqc);
+vcl_mq_evt_conn_t *vcl_mq_evt_conn_get (vcl_worker_t *wrk, u32 mq_conn_idx);
+int vcl_mq_epoll_add_evfd (vcl_worker_t *wrk, svm_msg_q_t *mq);
+int vcl_mq_epoll_del_evfd (vcl_worker_t *wrk, u32 mqc_index);
 
 vcl_worker_t *vcl_worker_alloc_and_init (void);
-void vcl_worker_cleanup (vcl_worker_t * wrk, u8 notify_vpp);
+void vcl_worker_cleanup (vcl_worker_t *wrk, u8 notify_vpp);
 int vcl_worker_register_with_vpp (void);
-svm_msg_q_t *vcl_worker_ctrl_mq (vcl_worker_t * wrk);
+svm_msg_q_t *vcl_worker_ctrl_mq (vcl_worker_t *wrk);
 
 void vcl_flush_mq_events (void);
-int vcl_session_cleanup (vcl_worker_t * wrk, vcl_session_t * session,
-			 vcl_session_handle_t sh, u8 do_disconnect);
+int vcl_session_cleanup (vcl_worker_t *wrk, vcl_session_t *session, vcl_session_handle_t sh,
+			 u8 do_disconnect);
 
 void vcl_segment_table_add (u64 segment_handle, u32 svm_segment_index);
 u32 vcl_segment_table_lookup (u64 segment_handle);
 void vcl_segment_table_del (u64 segment_handle);
 
-int vcl_session_read_ready (vcl_session_t * session);
+int vcl_session_read_ready (vcl_session_t *session);
 int vcl_session_read_ready2 (vcl_session_t *s);
-int vcl_session_write_ready (vcl_session_t * session);
-int vcl_session_alloc_ext_cfg (vcl_session_t *s,
-			       transport_endpt_ext_cfg_type_t type, u32 len);
+int vcl_session_write_ready (vcl_session_t *session);
+int vcl_session_alloc_ext_cfg (vcl_session_t *s, transport_endpt_ext_cfg_type_t type, u32 len);
 
 static inline vcl_worker_t *
 vcl_worker_get (u32 wrk_index)
@@ -794,31 +789,24 @@ vcl_vpp_worker_segment_handle (u32 wrk_index)
   return (VCL_INVALID_SEGMENT_HANDLE - wrk_index - 1);
 }
 
-void vcl_send_session_worker_update (vcl_worker_t * wrk, vcl_session_t * s,
-				     u32 wrk_index);
+void vcl_send_session_worker_update (vcl_worker_t *wrk, vcl_session_t *s, u32 wrk_index);
 int vcl_send_worker_rpc (u32 dst_wrk_index, void *data, u32 data_len);
 
-int vcl_segment_attach (u64 segment_handle, char *name,
-			ssvm_segment_type_t type, int fd);
+int vcl_segment_attach (u64 segment_handle, char *name, ssvm_segment_type_t type, int fd);
 void vcl_segment_detach (u64 segment_handle);
 void vcl_segment_detach_segments (u32 *seg_indices);
 void vcl_send_session_listen (vcl_worker_t *wrk, vcl_session_t *s);
-void vcl_send_session_unlisten (vcl_worker_t * wrk, vcl_session_t * s);
+void vcl_send_session_unlisten (vcl_worker_t *wrk, vcl_session_t *s);
 
-int vcl_segment_attach_session (uword segment_handle, uword rxf_offset,
-				uword txf_offset, uword mq_offset,
-				u32 mq_index, u8 is_ct, vcl_session_t *s);
-int vcl_segment_attach_mq (uword segment_handle, uword mq_offset, u32 mq_index,
-			   svm_msg_q_t **mq);
+int vcl_segment_attach_session (uword segment_handle, uword rxf_offset, uword txf_offset,
+				uword mq_offset, u32 mq_index, u8 is_ct, vcl_session_t *s);
+int vcl_segment_attach_mq (uword segment_handle, uword mq_offset, u32 mq_index, svm_msg_q_t **mq);
 int vcl_segment_discover_mqs (uword segment_handle, int *fds, u32 n_fds);
-svm_fifo_chunk_t *vcl_segment_alloc_chunk (uword segment_handle,
-					   u32 slice_index, u32 size,
+svm_fifo_chunk_t *vcl_segment_alloc_chunk (uword segment_handle, u32 slice_index, u32 size,
 					   uword *offset);
-int vcl_session_share_fifos (vcl_session_t *s, svm_fifo_t *rxf,
-			     svm_fifo_t *txf);
+int vcl_session_share_fifos (vcl_session_t *s, svm_fifo_t *rxf, svm_fifo_t *txf);
 void vcl_worker_detach_sessions (vcl_worker_t *wrk);
-void vcl_worker_set_wait_mq_fns (vcl_worker_wait_mq_fn pre_wait,
-				 vcl_worker_wait_mq_fn post_wait);
+void vcl_worker_set_wait_mq_fns (vcl_worker_wait_mq_fn pre_wait, vcl_worker_wait_mq_fn post_wait);
 
 void vcl_worker_detached_start_signal_mq (vcl_worker_t *wrk);
 void vcl_worker_detached_signal_mq (vcl_worker_t *wrk);
@@ -832,9 +820,9 @@ void vcl_init_epoll_fns (void);
 #if defined(VCL_BAPI_ENABLED)
 int vcl_bapi_attach (void);
 int vcl_bapi_app_worker_add (void);
-void vcl_bapi_app_worker_del (vcl_worker_t * wrk);
+void vcl_bapi_app_worker_del (vcl_worker_t *wrk);
 void vcl_bapi_disconnect_from_vpp (void);
-int vcl_bapi_recv_fds (vcl_worker_t * wrk, int *fds, int n_fds);
+int vcl_bapi_recv_fds (vcl_worker_t *wrk, int *fds, int n_fds);
 int vcl_bapi_add_cert_key_pair (vppcom_cert_key_pair_t *ckpair);
 int vcl_bapi_del_cert_key_pair (u32 ckpair_index);
 u32 vcl_bapi_max_nsid_len (void);
@@ -846,16 +834,17 @@ int vcl_bapi_worker_set (void);
  */
 int vcl_sapi_attach (void);
 int vcl_sapi_app_worker_add (void);
-void vcl_sapi_app_worker_del (vcl_worker_t * wrk);
-void vcl_sapi_detach (vcl_worker_t * wrk);
-int vcl_sapi_recv_fds (vcl_worker_t * wrk, int *fds, int n_fds);
+void vcl_sapi_app_worker_del (vcl_worker_t *wrk);
+int vcl_sapi_detach (vcl_worker_t *wrk);
+void vcl_sapi_peer_dead (vcl_worker_t *wrk);
+int vcl_sapi_recv_fds (vcl_worker_t *wrk, int *fds, int n_fds);
 int vcl_sapi_add_cert_key_pair (vppcom_cert_key_pair_t *ckpair);
 int vcl_sapi_del_cert_key_pair (u32 ckpair_index);
 
 static inline int
 vcl_api_attach (void)
 {
-  if (vcm->cfg.vpp_app_socket_api)
+  if (vcm->cfg.vpp_app_socket_api || vcm->cfg.vpp_app_socket_api_v2)
     return vcl_sapi_attach ();
 #if VCL_BAPI_ENABLED
   return vcl_bapi_attach ();
@@ -867,7 +856,7 @@ vcl_api_attach (void)
 static inline int
 vcl_api_recv_fd (vcl_worker_t *wrk, int *fds, int n_fds)
 {
-  if (vcm->cfg.vpp_app_socket_api)
+  if (vcm->cfg.vpp_app_socket_api || vcm->cfg.vpp_app_socket_api_v2)
     return vcl_sapi_recv_fds (wrk, fds, n_fds);
 
 #if VCL_BAPI_ENABLED
@@ -877,21 +866,22 @@ vcl_api_recv_fd (vcl_worker_t *wrk, int *fds, int n_fds)
 #endif
 }
 
-static inline void
+static inline int
 vcl_api_detach (vcl_worker_t *wrk)
 {
-  if (vcm->cfg.vpp_app_socket_api)
+  if (vcm->cfg.vpp_app_socket_api || vcm->cfg.vpp_app_socket_api_v2)
     return vcl_sapi_detach (wrk);
 
 #if VCL_BAPI_ENABLED
   vcl_bapi_disconnect_from_vpp ();
 #endif
+  return 0;
 }
 
 static inline int
 vcl_api_add_cert_key_pair (vppcom_cert_key_pair_t *ckpair)
 {
-  if (vcm->cfg.vpp_app_socket_api)
+  if (vcm->cfg.vpp_app_socket_api || vcm->cfg.vpp_app_socket_api_v2)
     return vcl_sapi_add_cert_key_pair (ckpair);
 
 #if VCL_BAPI_ENABLED
@@ -904,7 +894,7 @@ vcl_api_add_cert_key_pair (vppcom_cert_key_pair_t *ckpair)
 static inline int
 vcl_api_app_worker_add (void)
 {
-  if (vcm->cfg.vpp_app_socket_api)
+  if (vcm->cfg.vpp_app_socket_api || vcm->cfg.vpp_app_socket_api_v2)
     return vcl_sapi_app_worker_add ();
 
 #if VCL_BAPI_ENABLED
@@ -920,7 +910,7 @@ vcl_api_app_worker_del (vcl_worker_t *wrk)
   if (wrk->api_client_handle == ~0)
     return;
 
-  if (vcm->cfg.vpp_app_socket_api)
+  if (vcm->cfg.vpp_app_socket_api || vcm->cfg.vpp_app_socket_api_v2)
     return vcl_sapi_app_worker_del (wrk);
 
 #if VCL_BAPI_ENABLED
@@ -931,7 +921,7 @@ vcl_api_app_worker_del (vcl_worker_t *wrk)
 static inline int
 vcl_api_del_cert_key_pair (uint32_t ckpair_index)
 {
-  if (vcm->cfg.vpp_app_socket_api)
+  if (vcm->cfg.vpp_app_socket_api || vcm->cfg.vpp_app_socket_api_v2)
     return vcl_sapi_del_cert_key_pair (ckpair_index);
 
 #if VCL_BAPI_ENABLED

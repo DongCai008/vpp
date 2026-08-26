@@ -51,18 +51,18 @@ vcl_cfg_parse_heapsize (char *conf_fname)
   fp = fopen (conf_fname, "r");
   if (fp == NULL)
     {
-      VCFG_DBG (0, "VCL<%d>: using default heapsize %lu (0x%lx)",
-		getpid (), (unsigned long) vcl_cfg->heapsize,
-		(unsigned long) vcl_cfg->heapsize);
+      VCFG_DBG (0, "VCL<%d>: using default heapsize %lu (0x%lx)", getpid (),
+		(unsigned long) vcl_cfg->heapsize, (unsigned long) vcl_cfg->heapsize);
       goto defaulted;
     }
 
   argv = calloc (1, sizeof (char *));
   if (argv == NULL)
     {
-      VCFG_DBG (0, "VCL<%d>: calloc failed, using default heapsize %lu"
-		" (0x%lx)", getpid (), (unsigned long) vcl_cfg->heapsize,
-		(unsigned long) vcl_cfg->heapsize);
+      VCFG_DBG (0,
+		"VCL<%d>: calloc failed, using default heapsize %lu"
+		" (0x%lx)",
+		getpid (), (unsigned long) vcl_cfg->heapsize, (unsigned long) vcl_cfg->heapsize);
       goto defaulted;
     }
 
@@ -79,9 +79,10 @@ vcl_cfg_parse_heapsize (char *conf_fname)
 	  char **tmp = realloc (argv, argc * sizeof (char *));
 	  if (tmp == NULL)
 	    {
-	      VCFG_DBG (0, "VCL<%d>: realloc failed, using default "
-			"heapsize %lu (0x%lx)", getpid (),
-			(unsigned long) vcl_cfg->heapsize,
+	      VCFG_DBG (0,
+			"VCL<%d>: realloc failed, using default "
+			"heapsize %lu (0x%lx)",
+			getpid (), (unsigned long) vcl_cfg->heapsize,
 			(unsigned long) vcl_cfg->heapsize);
 	      goto defaulted;
 	    }
@@ -89,9 +90,10 @@ vcl_cfg_parse_heapsize (char *conf_fname)
 	  arg = strndup (p, 1024);
 	  if (arg == NULL)
 	    {
-	      VCFG_DBG (0, "VCL<%d>: strndup failed, using default "
-			"heapsize %lu (0x%lx)", getpid (),
-			(unsigned long) vcl_cfg->heapsize,
+	      VCFG_DBG (0,
+			"VCL<%d>: strndup failed, using default "
+			"heapsize %lu (0x%lx)",
+			getpid (), (unsigned long) vcl_cfg->heapsize,
 			(unsigned long) vcl_cfg->heapsize);
 	      goto defaulted;
 	    }
@@ -106,9 +108,10 @@ vcl_cfg_parse_heapsize (char *conf_fname)
   char **tmp = realloc (argv, (argc + 1) * sizeof (char *));
   if (tmp == NULL)
     {
-      VCFG_DBG (0, "VCL<%d>: realloc failed, using default heapsize %lu "
-		"(0x%lx)", getpid (), (unsigned long) vcl_cfg->heapsize,
-		(unsigned long) vcl_cfg->heapsize);
+      VCFG_DBG (0,
+		"VCL<%d>: realloc failed, using default heapsize %lu "
+		"(0x%lx)",
+		getpid (), (unsigned long) vcl_cfg->heapsize, (unsigned long) vcl_cfg->heapsize);
       goto defaulted;
     }
   argv = tmp;
@@ -134,9 +137,10 @@ vcl_cfg_parse_heapsize (char *conf_fname)
 	    }
 	  if (size == 0)
 	    {
-	      VCFG_DBG (0, "VCL<%d>: parse error '%s %s', using default "
-			"heapsize %lu (0x%lx)", getpid (), argv[i],
-			argv[i + 1], (unsigned long) vcl_cfg->heapsize,
+	      VCFG_DBG (0,
+			"VCL<%d>: parse error '%s %s', using default "
+			"heapsize %lu (0x%lx)",
+			getpid (), argv[i], argv[i + 1], (unsigned long) vcl_cfg->heapsize,
 			(unsigned long) vcl_cfg->heapsize);
 	      goto defaulted;
 	    }
@@ -147,9 +151,10 @@ vcl_cfg_parse_heapsize (char *conf_fname)
 	    vcl_cfg->heapsize = size << 20;
 	  else
 	    {
-	      VCFG_DBG (0, "VCL<%d>: parse error '%s %s', using default "
-			"heapsize %lu (0x%lx)", getpid (), argv[i],
-			argv[i + 1], (unsigned long) vcl_cfg->heapsize,
+	      VCFG_DBG (0,
+			"VCL<%d>: parse error '%s %s', using default "
+			"heapsize %lu (0x%lx)",
+			getpid (), argv[i], argv[i + 1], (unsigned long) vcl_cfg->heapsize,
 			(unsigned long) vcl_cfg->heapsize);
 	      goto defaulted;
 	    }
@@ -186,15 +191,17 @@ vppcom_cfg_read_file (char *conf_fname)
 
   if (fstat (fd, &s) < 0)
     {
-      VCFG_DBG (0, "VCL<%d>: failed to stat `%s' using default configuration",
-		getpid (), conf_fname);
+      VCFG_DBG (0, "VCL<%d>: failed to stat `%s' using default configuration", getpid (),
+		conf_fname);
       goto file_done;
     }
 
   if (!(S_ISREG (s.st_mode) || S_ISLNK (s.st_mode)))
     {
-      VCFG_DBG (0, "VCL<%d>: not a regular file `%s', using default "
-		"configuration", getpid (), conf_fname);
+      VCFG_DBG (0,
+		"VCL<%d>: not a regular file `%s', using default "
+		"configuration",
+		getpid (), conf_fname);
       goto file_done;
     }
 
@@ -216,162 +223,138 @@ vppcom_cfg_read_file (char *conf_fname)
 
       if (vc_cfg_input)
 	{
-	  if (unformat (line_input, "heapsize %U", unformat_memory_size,
-			&vcl_cfg->heapsize))
+	  if (unformat (line_input, "heapsize %U", unformat_memory_size, &vcl_cfg->heapsize))
 	    {
 	      VCFG_DBG (0, "VCL<%d>: configured heapsize %lu", getpid (),
 			(unsigned long) vcl_cfg->heapsize);
 	    }
-	  else
-	    if (unformat
-		(line_input, "max-workers %u", &vcl_cfg->max_workers))
+	  else if (unformat (line_input, "max-workers %u", &vcl_cfg->max_workers))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured max-workers %u", getpid (),
-			vcl_cfg->max_workers);
+	      VCFG_DBG (0, "VCL<%d>: configured max-workers %u", getpid (), vcl_cfg->max_workers);
 	    }
-	  else if (unformat (line_input, "app-socket-api %s",
-			     &vcl_cfg->vpp_app_socket_api))
+	  else if (unformat (line_input, "app-socket-api %s", &vcl_cfg->vpp_app_socket_api))
 	    {
 	      vec_terminate_c_string (vcl_cfg->vpp_app_socket_api);
-	      VCFG_DBG (0, "VCL<%d>: configured app-socket-api (%s)",
-			getpid (), vcl_cfg->vpp_app_socket_api);
+	      VCFG_DBG (0, "VCL<%d>: configured app-socket-api (%s)", getpid (),
+			vcl_cfg->vpp_app_socket_api);
 	    }
-	  else if (unformat (line_input, "segment-size 0x%lx",
-			     &vcl_cfg->segment_size))
+	  else if (unformat (line_input, "app-socket-api-v2 %s", &vcl_cfg->vpp_app_socket_api_v2))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured segment_size 0x%lx (%lu)",
-			getpid (), vcl_cfg->segment_size,
-			vcl_cfg->segment_size);
+	      vec_terminate_c_string (vcl_cfg->vpp_app_socket_api_v2);
+	      VCFG_DBG (0, "VCL<%d>: configured app-socket-api-v2 (%s)", getpid (),
+			vcl_cfg->vpp_app_socket_api_v2);
 	    }
-	  else if (unformat (line_input, "segment-size %lu",
-			     &vcl_cfg->segment_size))
+	  else if (unformat (line_input, "segment-size 0x%lx", &vcl_cfg->segment_size))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured segment_size %lu (0x%lx)",
-			getpid (), vcl_cfg->segment_size,
-			vcl_cfg->segment_size);
+	      VCFG_DBG (0, "VCL<%d>: configured segment_size 0x%lx (%lu)", getpid (),
+			vcl_cfg->segment_size, vcl_cfg->segment_size);
 	    }
-	  else if (unformat (line_input, "add-segment-size 0x%lx",
-			     &vcl_cfg->add_segment_size))
+	  else if (unformat (line_input, "segment-size %lu", &vcl_cfg->segment_size))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured add_segment_size 0x%lx (%lu)",
-			getpid (), vcl_cfg->add_segment_size,
-			vcl_cfg->add_segment_size);
+	      VCFG_DBG (0, "VCL<%d>: configured segment_size %lu (0x%lx)", getpid (),
+			vcl_cfg->segment_size, vcl_cfg->segment_size);
 	    }
-	  else if (unformat (line_input, "add-segment-size %lu",
-			     &vcl_cfg->add_segment_size))
+	  else if (unformat (line_input, "add-segment-size 0x%lx", &vcl_cfg->add_segment_size))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured add_segment_size %lu (0x%lx)",
-			getpid (), vcl_cfg->add_segment_size,
-			vcl_cfg->add_segment_size);
+	      VCFG_DBG (0, "VCL<%d>: configured add_segment_size 0x%lx (%lu)", getpid (),
+			vcl_cfg->add_segment_size, vcl_cfg->add_segment_size);
+	    }
+	  else if (unformat (line_input, "add-segment-size %lu", &vcl_cfg->add_segment_size))
+	    {
+	      VCFG_DBG (0, "VCL<%d>: configured add_segment_size %lu (0x%lx)", getpid (),
+			vcl_cfg->add_segment_size, vcl_cfg->add_segment_size);
 	    }
 	  else if (unformat (line_input, "preallocated-fifo-pairs %u",
 			     &vcl_cfg->preallocated_fifo_pairs))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured preallocated_fifo_pairs %u "
-			"(0x%x)", getpid (), vcl_cfg->preallocated_fifo_pairs,
+	      VCFG_DBG (0,
+			"VCL<%d>: configured preallocated_fifo_pairs %u "
+			"(0x%x)",
+			getpid (), vcl_cfg->preallocated_fifo_pairs,
 			vcl_cfg->preallocated_fifo_pairs);
 	    }
-	  else if (unformat (line_input, "rx-fifo-size 0x%x",
-			     &vcl_cfg->rx_fifo_size))
+	  else if (unformat (line_input, "rx-fifo-size 0x%x", &vcl_cfg->rx_fifo_size))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured rx_fifo_size 0x%x (%u)",
-			getpid (), vcl_cfg->rx_fifo_size,
-			vcl_cfg->rx_fifo_size);
+	      VCFG_DBG (0, "VCL<%d>: configured rx_fifo_size 0x%x (%u)", getpid (),
+			vcl_cfg->rx_fifo_size, vcl_cfg->rx_fifo_size);
 	    }
-	  else if (unformat (line_input, "rx-fifo-size %u",
-			     &vcl_cfg->rx_fifo_size))
+	  else if (unformat (line_input, "rx-fifo-size %u", &vcl_cfg->rx_fifo_size))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured rx_fifo_size %u (0x%x)",
-			getpid (), vcl_cfg->rx_fifo_size,
-			vcl_cfg->rx_fifo_size);
+	      VCFG_DBG (0, "VCL<%d>: configured rx_fifo_size %u (0x%x)", getpid (),
+			vcl_cfg->rx_fifo_size, vcl_cfg->rx_fifo_size);
 	    }
-	  else if (unformat (line_input, "tx-fifo-size 0x%x",
-			     &vcl_cfg->tx_fifo_size))
+	  else if (unformat (line_input, "tx-fifo-size 0x%x", &vcl_cfg->tx_fifo_size))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured tx_fifo_size 0x%x (%u)",
-			getpid (), vcl_cfg->tx_fifo_size,
-			vcl_cfg->tx_fifo_size);
+	      VCFG_DBG (0, "VCL<%d>: configured tx_fifo_size 0x%x (%u)", getpid (),
+			vcl_cfg->tx_fifo_size, vcl_cfg->tx_fifo_size);
 	    }
-	  else if (unformat (line_input, "tx-fifo-size %u",
-			     &vcl_cfg->tx_fifo_size))
+	  else if (unformat (line_input, "tx-fifo-size %u", &vcl_cfg->tx_fifo_size))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured tx_fifo_size %u (0x%x)",
-			getpid (), vcl_cfg->tx_fifo_size,
-			vcl_cfg->tx_fifo_size);
+	      VCFG_DBG (0, "VCL<%d>: configured tx_fifo_size %u (0x%x)", getpid (),
+			vcl_cfg->tx_fifo_size, vcl_cfg->tx_fifo_size);
 	    }
-	  else if (unformat (line_input, "event-queue-size 0x%x",
-			     &vcl_cfg->event_queue_size))
+	  else if (unformat (line_input, "event-queue-size 0x%x", &vcl_cfg->event_queue_size))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured event_queue_size 0x%x (%u)",
-			getpid (), vcl_cfg->event_queue_size,
-			vcl_cfg->event_queue_size);
+	      VCFG_DBG (0, "VCL<%d>: configured event_queue_size 0x%x (%u)", getpid (),
+			vcl_cfg->event_queue_size, vcl_cfg->event_queue_size);
 	    }
-	  else if (unformat (line_input, "event-queue-size %u",
-			     &vcl_cfg->event_queue_size))
+	  else if (unformat (line_input, "event-queue-size %u", &vcl_cfg->event_queue_size))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured event_queue_size %u (0x%x)",
-			getpid (), vcl_cfg->event_queue_size,
-			vcl_cfg->event_queue_size);
+	      VCFG_DBG (0, "VCL<%d>: configured event_queue_size %u (0x%x)", getpid (),
+			vcl_cfg->event_queue_size, vcl_cfg->event_queue_size);
 	    }
-	  else if (unformat (line_input, "app-timeout %f",
-			     &vcl_cfg->app_timeout))
+	  else if (unformat (line_input, "app-timeout %f", &vcl_cfg->app_timeout))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured app_timeout %f",
-			getpid (), vcl_cfg->app_timeout);
+	      VCFG_DBG (0, "VCL<%d>: configured app_timeout %f", getpid (), vcl_cfg->app_timeout);
 	    }
-	  else if (unformat (line_input, "session-timeout %f",
-			     &vcl_cfg->session_timeout))
+	  else if (unformat (line_input, "session-timeout %f", &vcl_cfg->session_timeout))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured session_timeout %f",
-			getpid (), vcl_cfg->session_timeout);
+	      VCFG_DBG (0, "VCL<%d>: configured session_timeout %f", getpid (),
+			vcl_cfg->session_timeout);
 	    }
 	  else if (unformat (line_input, "app-proxy-transport-tcp"))
 	    {
 	      vcl_cfg->app_proxy_transport_tcp = 1;
-	      VCFG_DBG (0, "VCL<%d>: configured app_proxy_transport_tcp (%d)",
-			getpid (), vcl_cfg->app_proxy_transport_tcp);
+	      VCFG_DBG (0, "VCL<%d>: configured app_proxy_transport_tcp (%d)", getpid (),
+			vcl_cfg->app_proxy_transport_tcp);
 	    }
 	  else if (unformat (line_input, "app-proxy-transport-udp"))
 	    {
 	      vcl_cfg->app_proxy_transport_udp = 1;
-	      VCFG_DBG (0, "VCL<%d>: configured app_proxy_transport_udp (%d)",
-			getpid (), vcl_cfg->app_proxy_transport_udp);
+	      VCFG_DBG (0, "VCL<%d>: configured app_proxy_transport_udp (%d)", getpid (),
+			vcl_cfg->app_proxy_transport_udp);
 	    }
 	  else if (unformat (line_input, "app-scope-local"))
 	    {
 	      vcl_cfg->app_scope_local = 1;
-	      VCFG_DBG (0, "VCL<%d>: configured app_scope_local (%d)",
-			getpid (), vcl_cfg->app_scope_local);
+	      VCFG_DBG (0, "VCL<%d>: configured app_scope_local (%d)", getpid (),
+			vcl_cfg->app_scope_local);
 	    }
 	  else if (unformat (line_input, "app-scope-global"))
 	    {
 	      vcl_cfg->app_scope_global = 1;
-	      VCFG_DBG (0, "VCL<%d>: configured app_scope_global (%d)",
-			getpid (), vcl_cfg->app_scope_global);
+	      VCFG_DBG (0, "VCL<%d>: configured app_scope_global (%d)", getpid (),
+			vcl_cfg->app_scope_global);
 	    }
 	  else if (unformat (line_input, "huge_page"))
 	    {
 	      vcl_cfg->huge_page = 1;
-	      VCFG_DBG (0, "VCL<%d>: configured huge_page (%d)", getpid (),
-			vcl_cfg->huge_page);
+	      VCFG_DBG (0, "VCL<%d>: configured huge_page (%d)", getpid (), vcl_cfg->huge_page);
 	    }
 	  else if (unformat (line_input, "use-mq-eventfd"))
 	    {
 	      vcl_cfg->use_mq_eventfd = 1;
-	      VCFG_DBG (0, "VCL<%d>: configured with mq with eventfd",
-			getpid ());
+	      VCFG_DBG (0, "VCL<%d>: configured with mq with eventfd", getpid ());
 	    }
-	  else if (unformat (line_input, "tls-engine %u",
-			     &vcl_cfg->tls_engine))
+	  else if (unformat (line_input, "tls-engine %u", &vcl_cfg->tls_engine))
 	    {
-	      VCFG_DBG (0, "VCL<%d>: configured tls-engine %u (0x%x)",
-			getpid (), vcl_cfg->tls_engine, vcl_cfg->tls_engine);
+	      VCFG_DBG (0, "VCL<%d>: configured tls-engine %u (0x%x)", getpid (),
+			vcl_cfg->tls_engine, vcl_cfg->tls_engine);
 	    }
 	  else if (unformat (line_input, "multi-thread-workers"))
 	    {
 	      vcl_cfg->mt_wrk_supported = 1;
-	      VCFG_DBG (0, "VCL<%d>: configured with multithread workers",
-			getpid ());
+	      VCFG_DBG (0, "VCL<%d>: configured with multithread workers", getpid ());
 	    }
 	  else if (unformat (line_input, "app_original_dst"))
 	    {
@@ -379,18 +362,15 @@ vppcom_cfg_read_file (char *conf_fname)
 	      VCFG_DBG (0, "VCL<%d>: support original destination", getpid ());
 	    }
 #if VCL_BAPI_ENABLED
-	  else if (unformat (line_input, "namespace-secret %lu",
-			     &vcl_cfg->namespace_secret))
+	  else if (unformat (line_input, "namespace-secret %lu", &vcl_cfg->namespace_secret))
 	    {
 	      VCFG_DBG (0,
 			"VCL<%d>: configured namespace_secret %llu "
 			"(0x%llx)",
-			getpid (),
-			(unsigned long long) vcl_cfg->namespace_secret,
+			getpid (), (unsigned long long) vcl_cfg->namespace_secret,
 			(unsigned long long) vcl_cfg->namespace_secret);
 	    }
-	  else if (unformat (line_input, "namespace-id %v",
-			     &vcl_cfg->namespace_id))
+	  else if (unformat (line_input, "namespace-id %v", &vcl_cfg->namespace_id))
 	    {
 	      u32 max_nsid_vec_len = vcl_bapi_max_nsid_len ();
 	      u32 nsid_vec_len = vec_len (vcl_cfg->namespace_id);
@@ -406,12 +386,11 @@ vppcom_cfg_read_file (char *conf_fname)
 	      VCFG_DBG (0, "VCL<%d>: configured namespace_id %s", getpid (),
 			(char *) vcl_cfg->namespace_id);
 	    }
-	  else if (unformat (line_input, "api-socket-name %s",
-			     &vcl_cfg->vpp_bapi_socket_name))
+	  else if (unformat (line_input, "api-socket-name %s", &vcl_cfg->vpp_bapi_socket_name))
 	    {
 	      vec_terminate_c_string (vcl_cfg->vpp_bapi_socket_name);
-	      VCFG_DBG (0, "VCL<%d>: configured api-socket-name (%s)",
-			getpid (), vcl_cfg->vpp_bapi_socket_name);
+	      VCFG_DBG (0, "VCL<%d>: configured api-socket-name (%s)", getpid (),
+			vcl_cfg->vpp_bapi_socket_name);
 	    }
 	  else if (unformat (line_input, "uid %d", &uid))
 	    {
@@ -427,8 +406,7 @@ vppcom_cfg_read_file (char *conf_fname)
 	  else if (unformat (line_input, "}"))
 	    {
 	      vc_cfg_input = 0;
-	      VCFG_DBG (0, "VCL<%d>: completed parsing vppcom config!",
-			getpid ());
+	      VCFG_DBG (0, "VCL<%d>: completed parsing vppcom config!", getpid ());
 	      unformat_free (line_input);
 	      goto input_done;
 	    }
@@ -436,9 +414,8 @@ vppcom_cfg_read_file (char *conf_fname)
 	    {
 	      if (line_input->buffer[line_input->index] != '#')
 		{
-		  clib_warning ("VCL<%d>: Unknown vppcom config option: '%s'",
-				getpid (), (char *)
-				&line_input->buffer[line_input->index]);
+		  clib_warning ("VCL<%d>: Unknown vppcom config option: '%s'", getpid (),
+				(char *) &line_input->buffer[line_input->index]);
 		}
 	    }
 	  unformat_free (line_input);
@@ -469,15 +446,16 @@ vppcom_cfg (vcl_cfg_t *vcl_cfg)
       u32 tmp;
       if (sscanf (env_var_str, "%u", &tmp) != 1)
 	{
-	  VCFG_DBG (0, "VCL<%d>: WARNING: Invalid debug level specified "
-		    "in the environment variable " VPPCOM_ENV_DEBUG
-		    " (%s)!\n", getpid (), env_var_str);
+	  VCFG_DBG (0,
+		    "VCL<%d>: WARNING: Invalid debug level specified "
+		    "in the environment variable " VPPCOM_ENV_DEBUG " (%s)!\n",
+		    getpid (), env_var_str);
 	}
       else
 	{
 	  vcm->debug = tmp;
-	  VCFG_DBG (0, "VCL<%d>: configured VCL debug level (%u) from "
-		    VPPCOM_ENV_DEBUG "!", getpid (), vcm->debug);
+	  VCFG_DBG (0, "VCL<%d>: configured VCL debug level (%u) from " VPPCOM_ENV_DEBUG "!",
+		    getpid (), vcm->debug);
 	}
     }
   conf_fname = getenv (VPPCOM_ENV_CONF);
@@ -498,8 +476,8 @@ vppcom_cfg (vcl_cfg_t *vcl_cfg)
       vec_validate (vcm->cfg.namespace_id, ns_id_vec_len - 1);
       clib_memcpy (vcm->cfg.namespace_id, env_var_str, ns_id_vec_len);
 
-      VCFG_DBG (0, "VCL<%d>: configured namespace_id (%s) from "
-		VPPCOM_ENV_APP_NAMESPACE_ID "!", getpid (), env_var_str);
+      VCFG_DBG (0, "VCL<%d>: configured namespace_id (%s) from " VPPCOM_ENV_APP_NAMESPACE_ID "!",
+		getpid (), env_var_str);
     }
   env_var_str = getenv (VPPCOM_ENV_APP_NAMESPACE_SECRET);
   if (env_var_str)
@@ -507,46 +485,50 @@ vppcom_cfg (vcl_cfg_t *vcl_cfg)
       u64 tmp;
       if (sscanf (env_var_str, "%llu", (unsigned long long *) &tmp) != 1)
 	{
-	  VCFG_DBG (0, "VCL<%d>: WARNING: Invalid namespace secret specified"
-		    " in the environment variable "
-		    VPPCOM_ENV_APP_NAMESPACE_SECRET " (%s)!\n", getpid (),
-		    env_var_str);
+	  VCFG_DBG (0,
+		    "VCL<%d>: WARNING: Invalid namespace secret specified"
+		    " in the environment variable " VPPCOM_ENV_APP_NAMESPACE_SECRET " (%s)!\n",
+		    getpid (), env_var_str);
 	}
       else
 	{
 	  vcm->cfg.namespace_secret = tmp;
-	  VCFG_DBG (0, "VCL<%d>: configured namespace secret (%llu) from "
-		    VPPCOM_ENV_APP_NAMESPACE_SECRET "!", getpid (),
-		    (unsigned long long) vcm->cfg.namespace_secret);
+	  VCFG_DBG (
+	    0,
+	    "VCL<%d>: configured namespace secret (%llu) from " VPPCOM_ENV_APP_NAMESPACE_SECRET "!",
+	    getpid (), (unsigned long long) vcm->cfg.namespace_secret);
 	}
     }
   if (getenv (VPPCOM_ENV_APP_PROXY_TRANSPORT_TCP))
     {
       vcm->cfg.app_proxy_transport_tcp = 1;
-      VCFG_DBG (0, "VCL<%d>: configured app_proxy_transport_tcp (%u) from "
-		VPPCOM_ENV_APP_PROXY_TRANSPORT_TCP "!", getpid (),
-		vcm->cfg.app_proxy_transport_tcp);
+      VCFG_DBG (
+	0,
+	"VCL<%d>: configured app_proxy_transport_tcp (%u) from " VPPCOM_ENV_APP_PROXY_TRANSPORT_TCP
+	"!",
+	getpid (), vcm->cfg.app_proxy_transport_tcp);
     }
   if (getenv (VPPCOM_ENV_APP_PROXY_TRANSPORT_UDP))
     {
       vcm->cfg.app_proxy_transport_udp = 1;
-      VCFG_DBG (0, "VCL<%d>: configured app_proxy_transport_udp (%u) from "
-		VPPCOM_ENV_APP_PROXY_TRANSPORT_UDP "!", getpid (),
-		vcm->cfg.app_proxy_transport_udp);
+      VCFG_DBG (
+	0,
+	"VCL<%d>: configured app_proxy_transport_udp (%u) from " VPPCOM_ENV_APP_PROXY_TRANSPORT_UDP
+	"!",
+	getpid (), vcm->cfg.app_proxy_transport_udp);
     }
   if (getenv (VPPCOM_ENV_APP_SCOPE_LOCAL))
     {
       vcm->cfg.app_scope_local = 1;
-      VCFG_DBG (0, "VCL<%d>: configured app_scope_local (%u) from "
-		VPPCOM_ENV_APP_SCOPE_LOCAL "!", getpid (),
-		vcm->cfg.app_scope_local);
+      VCFG_DBG (0, "VCL<%d>: configured app_scope_local (%u) from " VPPCOM_ENV_APP_SCOPE_LOCAL "!",
+		getpid (), vcm->cfg.app_scope_local);
     }
   if (getenv (VPPCOM_ENV_APP_SCOPE_GLOBAL))
     {
       vcm->cfg.app_scope_global = 1;
-      VCFG_DBG (0, "VCL<%d>: configured app_scope_global (%u) from "
-		VPPCOM_ENV_APP_SCOPE_GLOBAL "!", getpid (),
-		vcm->cfg.app_scope_global);
+      VCFG_DBG (0,
+		"VCL<%d>: configured app_scope_global (%u) from " VPPCOM_ENV_APP_SCOPE_GLOBAL "!",
+		getpid (), vcm->cfg.app_scope_global);
     }
   env_var_str = getenv (VPPCOM_ENV_VPP_API_SOCKET);
   if (env_var_str)
@@ -562,11 +544,17 @@ vppcom_cfg (vcl_cfg_t *vcl_cfg)
       VCFG_DBG (0, "VCL<%d>: configured app-socket-api (%s)", getpid (),
 		vcl_cfg->vpp_app_socket_api);
     }
+  env_var_str = getenv ("VCL_APP_SOCKET_API_V2");
+  if (env_var_str)
+    {
+      vcm->cfg.vpp_app_socket_api_v2 = format (0, "%s%c", env_var_str, 0);
+      VCFG_DBG (0, "VCL<%d>: configured app-socket-api-v2 (%s)", getpid (),
+		vcl_cfg->vpp_app_socket_api_v2);
+    }
   env_var_str = getenv (VPPCOM_ENV_APP_USE_MQ_EVENTFD);
   if (env_var_str)
     {
       vcm->cfg.use_mq_eventfd = 1;
-      VCFG_DBG (0, "VCL<%d>: configured " VPPCOM_ENV_APP_USE_MQ_EVENTFD,
-		getpid ());
+      VCFG_DBG (0, "VCL<%d>: configured " VPPCOM_ENV_APP_USE_MQ_EVENTFD, getpid ());
     }
 }

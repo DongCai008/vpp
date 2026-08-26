@@ -18,6 +18,26 @@
 
 session_main_t session_main;
 
+static volatile u64 session_observability_next_token = 1;
+
+static u64
+session_observability_allocate_token (void)
+{
+  u64 current, next;
+
+  do
+    {
+      current = clib_atomic_load_acq_n (&session_observability_next_token);
+      if (current == 0 || current == ~0ULL)
+	return 0;
+      next = current + 1;
+    }
+  while (
+    !clib_atomic_cmp_and_swap_acq_relax_n (&session_observability_next_token, &current, next, 0));
+
+  return current;
+}
+
 typedef enum
 {
   SESSION_EVT_RPC,
@@ -26,10 +46,8 @@ typedef enum
 } session_evt_family_t;
 
 static inline int
-session_send_evt_to_thread (void *data, void *args,
-			    clib_thread_index_t thread_index,
-			    session_evt_type_t evt_type,
-			    session_evt_family_t family)
+session_send_evt_to_thread (void *data, void *args, clib_thread_index_t thread_index,
+			    session_evt_type_t evt_type, session_evt_family_t family)
 {
   session_worker_t *wrk = session_main_get_worker (thread_index);
   session_event_t *evt;
@@ -55,15 +73,13 @@ session_send_evt_to_thread (void *data, void *args,
       break;
     case SESSION_EVT_IO:
       ASSERT (evt_type == SESSION_IO_EVT_RX || evt_type == SESSION_IO_EVT_TX ||
-	      evt_type == SESSION_IO_EVT_TX_FLUSH ||
-	      evt_type == SESSION_IO_EVT_BUILTIN_RX);
+	      evt_type == SESSION_IO_EVT_TX_FLUSH || evt_type == SESSION_IO_EVT_BUILTIN_RX);
       msg = svm_msg_q_alloc_msg_w_ring (mq, SESSION_MQ_IO_EVT_RING);
       evt = (session_event_t *) svm_msg_q_msg_data (mq, &msg);
       evt->session_index = *(u32 *) data;
       break;
     case SESSION_EVT_SESSION:
-      ASSERT (evt_type == SESSION_CTRL_EVT_CLOSE ||
-	      evt_type == SESSION_CTRL_EVT_HALF_CLOSE ||
+      ASSERT (evt_type == SESSION_CTRL_EVT_CLOSE || evt_type == SESSION_CTRL_EVT_HALF_CLOSE ||
 	      evt_type == SESSION_CTRL_EVT_RESET);
       msg = svm_msg_q_alloc_msg_w_ring (mq, SESSION_MQ_IO_EVT_RING);
       evt = (session_event_t *) svm_msg_q_msg_data (mq, &msg);
@@ -87,28 +103,24 @@ session_send_evt_to_thread (void *data, void *args,
 
 /* Deprecated, use session_program_* functions */
 int
-session_send_io_evt_to_thread (svm_fifo_t * f, session_evt_type_t evt_type)
+session_send_io_evt_to_thread (svm_fifo_t *f, session_evt_type_t evt_type)
 {
-  return session_send_evt_to_thread (&f->vpp_session_index, 0,
-				     f->master_thread_index, evt_type,
+  return session_send_evt_to_thread (&f->vpp_session_index, 0, f->master_thread_index, evt_type,
 				     SESSION_EVT_IO);
 }
 
 /* Deprecated, use session_program_* functions */
 int
-session_send_io_evt_to_thread_custom (void *data,
-				      clib_thread_index_t thread_index,
+session_send_io_evt_to_thread_custom (void *data, clib_thread_index_t thread_index,
 				      session_evt_type_t evt_type)
 {
-  return session_send_evt_to_thread (data, 0, thread_index, evt_type,
-				     SESSION_EVT_IO);
+  return session_send_evt_to_thread (data, 0, thread_index, evt_type, SESSION_EVT_IO);
 }
 
 int
 session_program_tx_io_evt (session_handle_tu_t sh, session_evt_type_t evt_type)
 {
-  return session_send_evt_to_thread ((void *) &sh.session_index, 0,
-				     (u32) sh.thread_index, evt_type,
+  return session_send_evt_to_thread ((void *) &sh.session_index, 0, (u32) sh.thread_index, evt_type,
 				     SESSION_EVT_IO);
 }
 
@@ -124,52 +136,47 @@ session_program_rx_io_evt (session_handle_tu_t sh)
     }
   else
     {
-      return session_send_evt_to_thread (
-	(void *) &sh.session_index, 0, (u32) sh.thread_index,
-	SESSION_IO_EVT_BUILTIN_RX, SESSION_EVT_IO);
+      return session_send_evt_to_thread ((void *) &sh.session_index, 0, (u32) sh.thread_index,
+					 SESSION_IO_EVT_BUILTIN_RX, SESSION_EVT_IO);
     }
 }
 
 int
-session_program_transport_io_evt (session_handle_tu_t sh,
-				  session_evt_type_t evt_type)
+session_program_transport_io_evt (session_handle_tu_t sh, session_evt_type_t evt_type)
 {
-  return session_send_evt_to_thread ((void *) &sh.session_index, 0,
-				     (u32) sh.thread_index, evt_type,
+  return session_send_evt_to_thread ((void *) &sh.session_index, 0, (u32) sh.thread_index, evt_type,
 				     SESSION_EVT_IO);
 }
 
 int
-session_send_ctrl_evt_to_thread (session_t * s, session_evt_type_t evt_type)
+session_send_ctrl_evt_to_thread (session_t *s, session_evt_type_t evt_type)
 {
   /* only events supported are disconnect, shutdown and reset */
-  return session_send_evt_to_thread (s, 0, s->thread_index, evt_type,
-				     SESSION_EVT_SESSION);
+  return session_send_evt_to_thread (s, 0, s->thread_index, evt_type, SESSION_EVT_SESSION);
 }
 
-void
-session_send_rpc_evt_to_thread_force (clib_thread_index_t thread_index,
-				      void *fp, void *rpc_args)
+int
+session_send_rpc_evt_to_thread_force (clib_thread_index_t thread_index, void *fp, void *rpc_args)
 {
-  session_send_evt_to_thread (fp, rpc_args, thread_index, SESSION_CTRL_EVT_RPC,
-			      SESSION_EVT_RPC);
+  return session_send_evt_to_thread (fp, rpc_args, thread_index, SESSION_CTRL_EVT_RPC,
+				     SESSION_EVT_RPC);
 }
 
-void
-session_send_rpc_evt_to_thread (clib_thread_index_t thread_index, void *fp,
-				void *rpc_args)
+int
+session_send_rpc_evt_to_thread (clib_thread_index_t thread_index, void *fp, void *rpc_args)
 {
   if (thread_index != vlib_get_thread_index ())
-    session_send_rpc_evt_to_thread_force (thread_index, fp, rpc_args);
+    return session_send_rpc_evt_to_thread_force (thread_index, fp, rpc_args);
   else
     {
       void (*fnp) (void *) = fp;
       fnp (rpc_args);
+      return 0;
     }
 }
 
 void
-session_add_self_custom_tx_evt (transport_connection_t * tc, u8 has_prio)
+session_add_self_custom_tx_evt (transport_connection_t *tc, u8 has_prio)
 {
   session_t *s = session_get (tc->s_index, tc->thread_index);
 
@@ -179,8 +186,7 @@ session_add_self_custom_tx_evt (transport_connection_t * tc, u8 has_prio)
   if (!(s->flags & SESSION_F_CUSTOM_TX))
     {
       s->flags |= SESSION_F_CUSTOM_TX;
-      if (svm_fifo_set_event (s->tx_fifo)
-	  || transport_connection_is_descheduled (tc))
+      if (svm_fifo_set_event (s->tx_fifo) || transport_connection_is_descheduled (tc))
 	{
 	  session_evt_elt_t *elt;
 	  session_worker_t *wrk;
@@ -195,14 +201,13 @@ session_add_self_custom_tx_evt (transport_connection_t * tc, u8 has_prio)
 	  tc->flags &= ~TRANSPORT_CONNECTION_F_DESCHED;
 
 	  if (PREDICT_FALSE (wrk->state == SESSION_WRK_INTERRUPT))
-	    vlib_node_set_interrupt_pending (wrk->vm,
-					     session_queue_node.index);
+	    vlib_node_set_interrupt_pending (wrk->vm, session_queue_node.index);
 	}
     }
 }
 
 void
-sesssion_reschedule_tx (transport_connection_t * tc)
+sesssion_reschedule_tx (transport_connection_t *tc)
 {
   session_worker_t *wrk = session_main_get_worker (tc->thread_index);
   session_evt_elt_t *elt;
@@ -218,7 +223,7 @@ sesssion_reschedule_tx (transport_connection_t * tc)
 }
 
 static void
-session_program_transport_ctrl_evt (session_t * s, session_evt_type_t evt)
+session_program_transport_ctrl_evt (session_t *s, session_evt_type_t evt)
 {
   clib_thread_index_t thread_index = vlib_get_thread_index ();
   session_evt_elt_t *elt;
@@ -253,19 +258,355 @@ session_alloc (clib_thread_index_t thread_index)
   s->thread_index = thread_index;
   s->al_index = APP_INVALID_INDEX;
   s->listener_handle = SESSION_INVALID_HANDLE;
+  s->observability_association_token = session_observability_allocate_token ();
+  s->observability_token_version = s->observability_association_token ? 1 : 0;
 
   return s;
 }
 
 void
-session_free (session_t * s)
+session_free (session_t *s)
 {
   session_worker_t *wrk = &session_main.wrk[s->thread_index];
 
   SESSION_EVT (SESSION_EVT_FREE, s);
+  session_observability_fence_session (s, SESSION_OBSERVABILITY_RESULT_ASSOCIATION_TOKEN_STALE);
   if (CLIB_DEBUG)
     clib_memset (s, 0xFA, sizeof (*s));
   pool_put (wrk->sessions, s);
+}
+
+typedef struct
+{
+  session_handle_t session_handle;
+  session_observability_owner_t *owner;
+  session_observability_event_t event;
+} session_observability_rpc_t;
+
+static void
+session_observability_release_ticket (session_observability_sidecar_t *sidecar)
+{
+  /* The consumer has released the ring element before a sidecar can be
+   * published FREE.  A producer may only reuse an all-zero sidecar. */
+  clib_memset (sidecar, 0, sizeof (*sidecar));
+  clib_atomic_store_rel_n (&sidecar->ticket_state, SESSION_OBSERVABILITY_TICKET_FREE);
+}
+
+static void
+session_observability_release_pins (session_observability_owner_t *owner,
+				    session_observability_directory_t *directory,
+				    session_observability_cell_t *cell,
+				    session_observability_sidecar_t *sidecar)
+{
+  clib_atomic_fetch_sub_rel (&directory->admission_gate, 1);
+  clib_atomic_fetch_sub_rel (&directory->admissions, 1);
+  clib_atomic_fetch_sub_rel (&directory->reservations, 1);
+  clib_atomic_fetch_sub_rel (&directory->references, 1);
+  clib_atomic_fetch_sub_rel (&cell->references, 1);
+  clib_atomic_fetch_sub_rel (&cell->cell_references, 1);
+  clib_atomic_store_rel_n (&cell->admission_pin, 0);
+  clib_atomic_store_rel_n (&cell->reservation_pin, 0);
+  clib_atomic_fetch_sub_rel (&sidecar->references, 1);
+  session_observability_release_ticket (sidecar);
+  if (!clib_atomic_load_acq_n (&directory->references))
+    {
+      clib_memset (directory, 0, sizeof (*directory));
+      clib_atomic_store_rel_n (&directory->lifecycle, SESSION_OBSERVABILITY_DIRECTORY_FREE);
+    }
+  session_observability_owner_release (owner);
+}
+
+static int
+session_observability_tuple_is_valid (const session_observability_directory_t *directory,
+				      const session_observability_cell_t *cell,
+				      const session_observability_sidecar_t *sidecar,
+				      const session_observability_event_t *event)
+{
+  return clib_atomic_load_acq_n (&directory->lifecycle) == SESSION_OBSERVABILITY_DIRECTORY_LIVE &&
+	 !(clib_atomic_load_acq_n (&directory->admission_gate) &
+	   SESSION_OBSERVABILITY_ADMISSION_CLOSED) &&
+	 directory->entry_nonce == event->directory_nonce &&
+	 directory->association_token == event->association_token &&
+	 directory->session_handle == event->session_handle &&
+	 directory->attachment_instance == event->attachment_instance &&
+	 directory->binding_generation == event->binding_generation &&
+	 directory->owner_thread == event->owner_thread &&
+	 directory->vcl_application_association == event->vcl_application_association &&
+	 cell->allocation_nonce == event->allocation_nonce &&
+	 cell->directory_nonce == event->directory_nonce &&
+	 cell->attachment_instance == event->attachment_instance &&
+	 cell->binding_generation == event->binding_generation &&
+	 cell->association_token == event->association_token &&
+	 cell->session_handle == event->session_handle &&
+	 cell->owner_thread == event->owner_thread &&
+	 cell->request_vcl_application_association == event->vcl_application_association &&
+	 cell->ticket_sequence == event->ticket_sequence &&
+	 sidecar->ticket_sequence == event->ticket_sequence &&
+	 sidecar->attachment_slot == event->attachment_slot &&
+	 sidecar->allocation_nonce == event->allocation_nonce &&
+	 sidecar->directory_nonce == event->directory_nonce &&
+	 sidecar->attachment_instance == event->attachment_instance &&
+	 sidecar->binding_generation == event->binding_generation;
+}
+
+void
+session_observability_owner_release (session_observability_owner_t *owner)
+{
+  u32 references;
+
+  if (!owner)
+    return;
+  references = clib_atomic_fetch_sub_rel (&owner->references, 1);
+  if (references == 2 && clib_atomic_load_acq_n (&owner->fenced) && owner->drained)
+    owner->drained (owner);
+  if (references == 1 && owner->release)
+    owner->release (owner);
+}
+
+void
+session_observability_fence_owner (session_observability_owner_t *owner,
+				   session_observability_result_t result)
+{
+  session_observability_segment_t *segment;
+  u32 i;
+
+  if (!owner || !(segment = owner->segment))
+    return;
+  clib_atomic_store_rel_n (&owner->fenced, 1);
+  clib_atomic_store_rel_n (&segment->header.lifecycle, SESSION_OBSERVABILITY_HEADER_DETACHING);
+  for (i = 0; i < SESSION_OBSERVABILITY_SLOT_COUNT; i++)
+    {
+      session_observability_directory_t *directory = &segment->directory[i];
+      session_observability_cell_t *cell = &segment->cell[i];
+      session_observability_sidecar_t *sidecar = &segment->sidecar[i];
+      svm_msg_q_observability_ticket_t ticket = {
+	.state = &sidecar->ticket_state,
+	.cancellation = &cell->cancellation,
+	.ring_index = &sidecar->ring_index,
+	.ring_element_index = &sidecar->ring_element_index,
+	.descriptor_element_index = &sidecar->descriptor_element_index,
+      };
+      u32 cell_state;
+
+      clib_atomic_fetch_or (&directory->admission_gate, SESSION_OBSERVABILITY_ADMISSION_CLOSED);
+      clib_atomic_store_rel_n (&directory->lifecycle, SESSION_OBSERVABILITY_DIRECTORY_FENCING);
+      cell_state = clib_atomic_load_acq_n (&cell->cell_state);
+      if (cell_state == SESSION_OBSERVABILITY_CELL_QUEUED ||
+	  cell_state == SESSION_OBSERVABILITY_CELL_DRAINING)
+	{
+	  /* Queued tickets have one terminal owner: their consumer.  It will
+	   * drain the FIFO element, publish completion and release every pin. */
+	  (void) svm_msg_q_observability_cancel (&ticket);
+	  continue;
+	}
+      if (cell_state != SESSION_OBSERVABILITY_CELL_FREE)
+	{
+	  (void) svm_msg_q_observability_cancel (&ticket);
+	  session_observability_cell_complete (cell, result);
+	}
+    }
+}
+
+void
+session_observability_fence_session (session_t *s, session_observability_result_t result)
+{
+  (void) result;
+  if (!s)
+    return;
+  s->observability_token_version = 0;
+  s->observability_association_token = 0;
+}
+
+static void
+session_observability_dispatch_rpc (void *arg)
+{
+  session_observability_rpc_t *rpc = arg;
+  session_handle_tu_t handle = { .handle = rpc->session_handle };
+  session_observability_event_t queued_event;
+  session_observability_cell_t *cell;
+  session_observability_directory_t *directory;
+  session_observability_sidecar_t *sidecar;
+  session_observability_request_t request;
+  session_observability_reply_t reply = { 0 };
+  svm_msg_q_observability_ticket_t ticket;
+  svm_msg_q_msg_t msg;
+  session_t *s;
+  app_worker_t *app_wrk;
+  transport_proto_vft_t *vft;
+  u32 expected;
+  int rv = -1;
+
+  if (!rpc->owner || !rpc->owner->segment || !rpc->owner->queue ||
+      rpc->event.attachment_slot >= SESSION_OBSERVABILITY_SLOT_COUNT)
+    goto done;
+  cell = &rpc->owner->segment->cell[rpc->event.attachment_slot];
+  directory = &rpc->owner->segment->directory[rpc->event.attachment_slot];
+  sidecar = &rpc->owner->segment->sidecar[rpc->event.attachment_slot];
+  if (svm_msg_q_sub (rpc->owner->queue, &msg, SVM_Q_NOWAIT, 0) ||
+      svm_msg_q_msg_data (rpc->owner->queue, &msg) == 0)
+    goto stale;
+  clib_memcpy_fast (&queued_event, svm_msg_q_msg_data (rpc->owner->queue, &msg),
+		    sizeof (queued_event));
+  if (msg.ring_index != sidecar->ring_index || msg.elt_index != sidecar->ring_element_index ||
+      memcmp (&queued_event, &rpc->event, sizeof (queued_event)))
+    {
+      svm_msg_q_free_msg (rpc->owner->queue, &msg);
+      goto stale;
+    }
+  ticket = (svm_msg_q_observability_ticket_t){
+    .state = &sidecar->ticket_state,
+    .cancellation = &cell->cancellation,
+    .ring_index = &sidecar->ring_index,
+    .ring_element_index = &sidecar->ring_element_index,
+    .descriptor_element_index = &sidecar->descriptor_element_index,
+  };
+  expected = SESSION_OBSERVABILITY_CELL_QUEUED;
+  if (!clib_atomic_cmp_and_swap_acq_relax_n (&cell->cell_state, &expected,
+					     SESSION_OBSERVABILITY_CELL_DRAINING, 0))
+    {
+      svm_msg_q_free_msg (rpc->owner->queue, &msg);
+      goto stale;
+    }
+  if (svm_msg_q_observability_consume (&ticket) != 1)
+    {
+      svm_msg_q_free_msg (rpc->owner->queue, &msg);
+      goto stale;
+    }
+  /* The live/cancel decision is now final.  No transport callback can occur
+   * until the ticket has been removed from the FIFO. */
+  svm_msg_q_free_msg (rpc->owner->queue, &msg);
+  if (!session_observability_tuple_is_valid (directory, cell, sidecar, &rpc->event))
+    goto stale;
+  if (sidecar->queue_identity != rpc->owner->segment->header.queue_identity ||
+      sidecar->queue_generation != rpc->owner->segment->header.queue_generation)
+    goto stale;
+  s = session_get_from_handle_if_valid (handle);
+  if (!s || s->thread_index != vlib_get_thread_index ())
+    goto stale;
+  app_wrk = app_worker_get_if_valid (s->app_wrk_index);
+  if (!app_wrk || app_wrk->observability_association != rpc->event.vcl_application_association)
+    goto mismatch;
+  if (s->observability_token_version != 1 ||
+      s->observability_association_token != rpc->event.association_token ||
+      rpc->event.session_handle != rpc->session_handle ||
+      rpc->event.owner_thread != s->thread_index ||
+      rpc->event.vcl_application_association != app_wrk->observability_association)
+    goto stale;
+
+  vft = &tp_vfts[session_get_transport_proto (s)];
+  request = (session_observability_request_t){
+    .schema_version = SESSION_OBSERVABILITY_ABI_VERSION,
+    .sampling_point = cell->sampling_point,
+    .request_flags = cell->request_flags,
+    .request_id = cell->request_id,
+    .session_handle = rpc->event.session_handle,
+    .association_token = rpc->event.association_token,
+    .directory_nonce = rpc->event.directory_nonce,
+    .binding_generation = rpc->event.binding_generation,
+    .owner_thread = rpc->event.owner_thread,
+    .application_association = rpc->event.vcl_application_association,
+  };
+  if (vft->observability_request)
+    rv = vft->observability_request (s->connection_index, s->thread_index, &request, &reply);
+  if (!rv)
+    session_observability_cell_complete_reply (cell, &reply);
+  else
+    session_observability_cell_complete (cell, SESSION_OBSERVABILITY_RESULT_DISPATCH_REJECTED);
+  goto done;
+
+mismatch:
+  session_observability_cell_complete (cell, SESSION_OBSERVABILITY_RESULT_ASSOCIATION_MISMATCH);
+  goto done;
+stale:
+  session_observability_cell_complete (cell, SESSION_OBSERVABILITY_RESULT_ASSOCIATION_TOKEN_STALE);
+done:
+  if (rpc->event.attachment_slot < SESSION_OBSERVABILITY_SLOT_COUNT)
+    session_observability_release_pins (rpc->owner,
+					&rpc->owner->segment->directory[rpc->event.attachment_slot],
+					&rpc->owner->segment->cell[rpc->event.attachment_slot],
+					&rpc->owner->segment->sidecar[rpc->event.attachment_slot]);
+  clib_mem_free (rpc);
+}
+
+int
+session_observability_dispatch_prepare (session_observability_owner_t *owner,
+					const session_observability_event_t *event,
+					session_observability_dispatch_t *dispatch)
+{
+  session_observability_rpc_t *rpc;
+
+  if (!owner || !owner->segment || !owner->queue || !dispatch ||
+      clib_atomic_load_acq_n (&owner->fenced) || !event || !event->association_token ||
+      !event->vcl_application_association ||
+      event->attachment_slot >= SESSION_OBSERVABILITY_SLOT_COUNT ||
+      event->owner_thread !=
+	((session_handle_tu_t){ .handle = event->session_handle }).thread_index)
+    return -1;
+
+  rpc = clib_mem_alloc (sizeof (*rpc));
+  if (!rpc)
+    return -1;
+  rpc->session_handle = event->session_handle;
+  rpc->owner = owner;
+  rpc->event = *event;
+  dispatch->rpc = rpc;
+  return 0;
+}
+
+int
+session_observability_dispatch_commit (session_observability_dispatch_t *dispatch)
+{
+  session_observability_rpc_t *rpc;
+  int rv;
+
+  if (!dispatch || !(rpc = dispatch->rpc))
+    return -1;
+  rv = session_send_rpc_evt_to_thread (rpc->event.owner_thread, session_observability_dispatch_rpc,
+				       rpc);
+  if (!rv)
+    dispatch->rpc = 0;
+  return rv;
+}
+
+void
+session_observability_dispatch_retry (session_observability_dispatch_t *dispatch)
+{
+  session_observability_rpc_t *rpc;
+  session_worker_t *wrk;
+
+  if (!dispatch || !(rpc = dispatch->rpc))
+    return;
+  dispatch->rpc = 0;
+  wrk = session_main_get_worker (rpc->event.owner_thread);
+  clib_spinlock_lock (&wrk->observability_retry_lock);
+  vec_add1 (wrk->observability_retry_rpcs, rpc);
+  clib_spinlock_unlock (&wrk->observability_retry_lock);
+  vlib_node_set_interrupt_pending (wrk->vm, session_queue_node.index);
+}
+
+void
+session_observability_dispatch_retry_pending (clib_thread_index_t thread_index)
+{
+  session_worker_t *wrk = session_main_get_worker (thread_index);
+  session_observability_rpc_t **rpcs;
+  uword i;
+
+  clib_spinlock_lock (&wrk->observability_retry_lock);
+  rpcs = (session_observability_rpc_t **) wrk->observability_retry_rpcs;
+  wrk->observability_retry_rpcs = 0;
+  clib_spinlock_unlock (&wrk->observability_retry_lock);
+  for (i = 0; i < vec_len (rpcs); i++)
+    session_observability_dispatch_rpc (rpcs[i]);
+  vec_free (rpcs);
+}
+
+void
+session_observability_dispatch_cancel (session_observability_dispatch_t *dispatch)
+{
+  if (!dispatch || !dispatch->rpc)
+    return;
+  clib_mem_free (dispatch->rpc);
+  dispatch->rpc = 0;
 }
 
 u8
@@ -279,8 +620,8 @@ session_is_valid (u32 si, u8 thread_index)
   if (s->thread_index != thread_index || s->session_index != si)
     return 0;
 
-  if (s->session_state == SESSION_STATE_TRANSPORT_DELETED
-      || s->session_state <= SESSION_STATE_LISTENING)
+  if (s->session_state == SESSION_STATE_TRANSPORT_DELETED ||
+      s->session_state <= SESSION_STATE_LISTENING)
     return 1;
 
   if ((s->session_state == SESSION_STATE_CONNECTING ||
@@ -289,8 +630,8 @@ session_is_valid (u32 si, u8 thread_index)
     return 1;
 
   tc = session_get_transport (s);
-  if (s->connection_index != tc->c_index ||
-      s->thread_index != tc->thread_index || tc->s_index != si)
+  if (s->connection_index != tc->c_index || s->thread_index != tc->thread_index ||
+      tc->s_index != si)
     return 0;
 
   return 1;
@@ -304,7 +645,7 @@ session_cleanup (session_t *s)
 }
 
 static void
-session_cleanup_notify (session_t * s, session_cleanup_ntf_t ntf)
+session_cleanup_notify (session_t *s, session_cleanup_ntf_t ntf)
 {
   app_worker_t *app_wrk;
 
@@ -364,8 +705,8 @@ session_cleanup_half_open (session_handle_t ho_handle)
 	  return;
 	}
       /* Migrated transports are no longer half-opens */
-      transport_cleanup (session_get_transport_proto (ho),
-			 ho->connection_index, ho->al_index /* overloaded */);
+      transport_cleanup (session_get_transport_proto (ho), ho->connection_index,
+			 ho->al_index /* overloaded */);
     }
   else if (ho->session_state != SESSION_STATE_TRANSPORT_DELETED)
     {
@@ -489,13 +830,12 @@ session_half_open_migrated_notify (transport_connection_t *tc)
 }
 
 session_t *
-session_alloc_for_connection (transport_connection_t * tc)
+session_alloc_for_connection (transport_connection_t *tc)
 {
   session_t *s;
   clib_thread_index_t thread_index = tc->thread_index;
 
-  ASSERT (thread_index == vlib_get_thread_index ()
-	  || transport_protocol_is_cl (tc->proto));
+  ASSERT (thread_index == vlib_get_thread_index () || transport_protocol_is_cl (tc->proto));
 
   s = session_alloc (thread_index);
   s->session_type = session_type_from_proto_and_ip (tc->proto, tc->is_ip4);
@@ -511,8 +851,7 @@ static session_t *
 session_alloc_for_stream (session_handle_t parent_handle)
 {
   session_t *s, *ps;
-  clib_thread_index_t thread_index =
-    session_thread_from_handle (parent_handle);
+  clib_thread_index_t thread_index = session_thread_from_handle (parent_handle);
 
   ASSERT (thread_index == vlib_get_thread_index ());
 
@@ -546,8 +885,7 @@ session_alloc_for_half_open (transport_connection_t *tc)
 }
 
 void
-session_fifo_tuning (session_t * s, svm_fifo_t * f,
-		     session_ft_action_t act, u32 len)
+session_fifo_tuning (session_t *s, svm_fifo_t *f, session_ft_action_t act, u32 len)
 {
   if (s->flags & SESSION_F_CUSTOM_FIFO_TUNING)
     {
@@ -570,16 +908,14 @@ session_wrk_program_app_wrk_evts (session_worker_t *wrk, u32 app_wrk_index)
 
   ASSERT ((wrk - session_main.wrk) == vlib_get_thread_index ());
   need_interrupt = clib_bitmap_is_zero (wrk->app_wrks_pending_ntf);
-  wrk->app_wrks_pending_ntf =
-    clib_bitmap_set (wrk->app_wrks_pending_ntf, app_wrk_index, 1);
+  wrk->app_wrks_pending_ntf = clib_bitmap_set (wrk->app_wrks_pending_ntf, app_wrk_index, 1);
 
   if (need_interrupt)
     vlib_node_set_interrupt_pending (wrk->vm, session_input_node.index);
 }
 
 always_inline void
-session_program_io_event (app_worker_t *app_wrk, session_t *s,
-			  session_evt_type_t et, u8 is_cl)
+session_program_io_event (app_worker_t *app_wrk, session_t *s, session_evt_type_t et, u8 is_cl)
 {
   if (is_cl)
     {
@@ -601,8 +937,7 @@ session_program_io_event (app_worker_t *app_wrk, session_t *s,
 }
 
 static inline int
-session_notify_subscribers (u32 app_index, session_t *s, svm_fifo_t *f,
-			    session_evt_type_t evt_type)
+session_notify_subscribers (u32 app_index, session_t *s, svm_fifo_t *f, session_evt_type_t evt_type)
 {
   app_worker_t *app_wrk;
   application_t *app;
@@ -637,8 +972,7 @@ session_enqueue_notify_inline (session_t *s, u8 is_cl)
   session_program_io_event (app_wrk, s, SESSION_IO_EVT_RX, is_cl);
 
   if (PREDICT_FALSE (svm_fifo_n_subscribers (s->rx_fifo)))
-    return session_notify_subscribers (app_wrk->app_index, s, s->rx_fifo,
-				       SESSION_IO_EVT_RX);
+    return session_notify_subscribers (app_wrk->app_index, s, s->rx_fifo, SESSION_IO_EVT_RX);
 
   return 0;
 }
@@ -668,13 +1002,11 @@ session_dequeue_notify (session_t *s)
   if (PREDICT_FALSE (!app_wrk))
     return -1;
 
-  is_cl = s->session_state == SESSION_STATE_LISTENING ||
-	  s->session_state == SESSION_STATE_OPENED;
+  is_cl = s->session_state == SESSION_STATE_LISTENING || s->session_state == SESSION_STATE_OPENED;
   session_program_io_event (app_wrk, s, SESSION_IO_EVT_TX, is_cl ? 1 : 0);
 
   if (PREDICT_FALSE (svm_fifo_n_subscribers (s->tx_fifo)))
-    return session_notify_subscribers (app_wrk->app_index, s, s->tx_fifo,
-				       SESSION_IO_EVT_TX);
+    return session_notify_subscribers (app_wrk->app_index, s, s->tx_fifo, SESSION_IO_EVT_TX);
 
   return 0;
 }
@@ -702,10 +1034,8 @@ session_main_flush_enqueue_events (transport_proto_t transport_proto,
   for (i = 0; i < vec_len (handles); i++)
     {
       s = session_get_from_handle (handles[i]);
-      session_fifo_tuning (s, s->rx_fifo, SESSION_FT_ACTION_ENQUEUED,
-			   0 /* TODO/not needed */);
-      is_cl =
-	s->thread_index != thread_index || (s->flags & SESSION_F_IS_CLESS);
+      session_fifo_tuning (s, s->rx_fifo, SESSION_FT_ACTION_ENQUEUED, 0 /* TODO/not needed */);
+      is_cl = s->thread_index != thread_index || (s->flags & SESSION_F_IS_CLESS);
       if (!is_cl)
 	session_enqueue_notify_inline (s, 0);
       else
@@ -717,27 +1047,24 @@ session_main_flush_enqueue_events (transport_proto_t transport_proto,
 }
 
 int
-session_enqueue_dgram_connection_cl (session_t *s, session_dgram_hdr_t *hdr,
-				     vlib_buffer_t *b, u8 proto,
-				     u8 queue_event)
+session_enqueue_dgram_connection_cl (session_t *s, session_dgram_hdr_t *hdr, vlib_buffer_t *b,
+				     u8 proto, u8 queue_event)
 {
   session_t *awls;
 
   awls = app_listener_select_wrk_cl_session (s, hdr);
-  return session_enqueue_dgram_connection_inline (awls, hdr, b, proto,
-						  queue_event, 1 /* is_cl */);
+  return session_enqueue_dgram_connection_inline (awls, hdr, b, proto, queue_event, 1 /* is_cl */);
 }
 
 int
-session_tx_fifo_peek_bytes (transport_connection_t * tc, u8 * buffer,
-			    u32 offset, u32 max_bytes)
+session_tx_fifo_peek_bytes (transport_connection_t *tc, u8 *buffer, u32 offset, u32 max_bytes)
 {
   session_t *s = session_get (tc->s_index, tc->thread_index);
   return svm_fifo_peek (s->tx_fifo, offset, max_bytes, buffer);
 }
 
 u32
-session_tx_fifo_dequeue_drop (transport_connection_t * tc, u32 max_bytes)
+session_tx_fifo_dequeue_drop (transport_connection_t *tc, u32 max_bytes)
 {
   session_t *s = session_get (tc->s_index, tc->thread_index);
   u32 rv;
@@ -752,8 +1079,7 @@ session_tx_fifo_dequeue_drop (transport_connection_t * tc, u32 max_bytes)
 }
 
 int
-session_stream_connect_notify (transport_connection_t * tc,
-			       session_error_t err)
+session_stream_connect_notify (transport_connection_t *tc, session_error_t err)
 {
   u32 opaque = 0, new_ti, new_si;
   app_worker_t *app_wrk;
@@ -820,8 +1146,7 @@ session_switch_pool_closed_rpc (void *arg)
   if (!s)
     return;
 
-  transport_cleanup (session_get_transport_proto (s), s->connection_index,
-		     s->thread_index);
+  transport_cleanup (session_get_transport_proto (s), s->connection_index, s->thread_index);
   session_cleanup (s);
 }
 
@@ -833,6 +1158,10 @@ session_switch_pool (session_switch_pool_args_t *args)
 {
   session_t *s = session_get_from_handle (args->old_sh);
   ASSERT (s->thread_index == vlib_get_thread_index ());
+
+  /* The old handle may be recycled before the owner RPC runs.  Invalidate its
+   * private association token before publishing the migration callback. */
+  session_observability_fence_session (s, SESSION_OBSERVABILITY_RESULT_ASSOCIATION_MIGRATED);
 
   if (!(s->flags & SESSION_F_PROXY))
     {
@@ -855,8 +1184,7 @@ app_closed:
   session_send_rpc_evt_to_thread (session_thread_from_handle (args->new_sh),
 				  session_switch_pool_closed_rpc,
 				  uword_to_pointer (args->new_sh, void *));
-  transport_cleanup (session_get_transport_proto (s), s->connection_index,
-		     s->thread_index);
+  transport_cleanup (session_get_transport_proto (s), s->connection_index, s->thread_index);
   session_cleanup (s);
 }
 
@@ -919,8 +1247,8 @@ session_migrate_accept (session_t *s)
  * Move dgram session to the right thread
  */
 int
-session_dgram_connect_notify (transport_connection_t *tc,
-			      session_handle_tu_t osh, session_t **new_session)
+session_dgram_connect_notify (transport_connection_t *tc, session_handle_tu_t osh,
+			      session_t **new_session)
 {
   session_t *new_s;
 
@@ -928,6 +1256,8 @@ session_dgram_connect_notify (transport_connection_t *tc,
    * Clone half-open session to the right thread.
    */
   new_s = session_clone_safe (tc->s_index, osh.thread_index);
+  new_s->observability_association_token = session_observability_allocate_token ();
+  new_s->observability_token_version = new_s->observability_association_token ? 1 : 0;
   new_s->connection_index = tc->c_index;
   session_set_state (new_s, SESSION_STATE_READY);
   new_s->flags |= SESSION_F_IS_MIGRATING;
@@ -964,7 +1294,7 @@ session_dgram_connect_notify (transport_connection_t *tc,
  * Ultimately this leads to close being called on transport (passive close).
  */
 void
-session_transport_closing_notify (transport_connection_t * tc)
+session_transport_closing_notify (transport_connection_t *tc)
 {
   app_worker_t *app_wrk;
   session_t *s;
@@ -995,7 +1325,7 @@ session_transport_closing_notify (transport_connection_t * tc)
  * failed.
  */
 void
-session_transport_delete_notify (transport_connection_t * tc)
+session_transport_delete_notify (transport_connection_t *tc)
 {
   session_t *s;
 
@@ -1061,8 +1391,7 @@ session_transport_delete_notify (transport_connection_t * tc)
  * stats are to be collected.
  */
 void
-session_transport_delete_request (transport_connection_t *tc,
-				  transport_cleanup_cb_fn cb_fn)
+session_transport_delete_request (transport_connection_t *tc, transport_cleanup_cb_fn cb_fn)
 {
   session_t *s;
 
@@ -1130,7 +1459,7 @@ session_transport_delete_request (transport_connection_t *tc,
  * can be delayed a long time, e.g., tcp time-wait.
  */
 void
-session_transport_closed_notify (transport_connection_t * tc)
+session_transport_closed_notify (transport_connection_t *tc)
 {
   app_worker_t *app_wrk;
   session_t *s;
@@ -1167,7 +1496,7 @@ session_transport_closed_notify (transport_connection_t * tc)
  * Notify application that connection has been reset.
  */
 void
-session_transport_reset_notify (transport_connection_t * tc)
+session_transport_reset_notify (transport_connection_t *tc)
 {
   app_worker_t *app_wrk;
   session_t *s;
@@ -1186,7 +1515,7 @@ session_transport_reset_notify (transport_connection_t * tc)
 }
 
 int
-session_stream_accept_notify (transport_connection_t * tc)
+session_stream_accept_notify (transport_connection_t *tc)
 {
   app_worker_t *app_wrk;
   session_t *s;
@@ -1369,8 +1698,7 @@ session_open_vc (session_endpoint_cfg_t *rmt, session_handle_t *rsh)
   return 0;
 }
 
-typedef int (*session_open_service_fn) (session_endpoint_cfg_t *,
-					session_handle_t *);
+typedef int (*session_open_service_fn) (session_endpoint_cfg_t *, session_handle_t *);
 
 static session_open_service_fn session_open_srv_fns[TRANSPORT_N_SERVICES] = {
   session_open_vc,
@@ -1444,9 +1772,8 @@ session_open_stream (session_endpoint_cfg_t *sep, session_handle_t *rsh)
       return app_worker_connect_notify (app_wrk, 0, rv, sep->opaque);
     }
 
-  tc =
-    transport_get_connection (sep->transport_proto, conn_index,
-			      session_thread_from_handle (sep->parent_handle));
+  tc = transport_get_connection (sep->transport_proto, conn_index,
+				 session_thread_from_handle (sep->parent_handle));
 
   /* Attach transport to session and vice versa */
   s->connection_index = tc->c_index;
@@ -1473,7 +1800,7 @@ session_open_stream (session_endpoint_cfg_t *sep, session_handle_t *rsh)
  * @param sep Local endpoint to be listened on.
  */
 int
-session_listen (session_t * ls, session_endpoint_cfg_t * sep)
+session_listen (session_t *ls, session_endpoint_cfg_t *sep)
 {
   transport_endpoint_cfg_t *tep;
   int tc_index;
@@ -1482,8 +1809,7 @@ session_listen (session_t * ls, session_endpoint_cfg_t * sep)
   /* Transport bind/listen */
   tep = session_endpoint_to_transport_cfg (sep);
   s_index = ls->session_index;
-  tc_index = transport_start_listen (session_get_transport_proto (ls),
-				     s_index, tep);
+  tc_index = transport_start_listen (session_get_transport_proto (ls), s_index, tep);
 
   if (tc_index < 0)
     return tc_index;
@@ -1505,7 +1831,7 @@ session_listen (session_t * ls, session_endpoint_cfg_t * sep)
  * @param s Session to stop listening on. It must be in state LISTENING.
  */
 int
-session_stop_listen (session_t * s)
+session_stop_listen (session_t *s)
 {
   transport_proto_t tp = session_get_transport_proto (s);
   transport_connection_t *tc;
@@ -1547,7 +1873,7 @@ session_half_close (session_t *s)
  * requests are served before transport is notified.
  */
 void
-session_close (session_t * s)
+session_close (session_t *s)
 {
   if (!s || (s->flags & SESSION_F_APP_CLOSED))
     return;
@@ -1565,8 +1891,8 @@ session_close (session_t * s)
     {
       /* Session will only be removed once both app and transport
        * acknowledge the close */
-      if (s->session_state == SESSION_STATE_TRANSPORT_CLOSED
-	  || s->session_state == SESSION_STATE_TRANSPORT_DELETED)
+      if (s->session_state == SESSION_STATE_TRANSPORT_CLOSED ||
+	  s->session_state == SESSION_STATE_TRANSPORT_DELETED)
 	session_program_transport_ctrl_evt (s, SESSION_CTRL_EVT_CLOSE);
       return;
     }
@@ -1584,7 +1910,7 @@ session_close (session_t * s)
  * Force a close without waiting for data to be flushed
  */
 void
-session_reset (session_t * s)
+session_reset (session_t *s)
 {
   if (s->flags & SESSION_F_APP_CLOSED)
     return;
@@ -1625,8 +1951,7 @@ session_detach_app (session_t *s)
        * subsequently detach transport from session and enqueue a session
        * cleanup notification. Transport closed and cleanup notifications are
        * going to be dropped by session layer apis */
-      transport_close (session_get_transport_proto (s), s->connection_index,
-		       s->thread_index);
+      transport_close (session_get_transport_proto (s), s->connection_index, s->thread_index);
       tc = session_get_transport (s);
       tc->s_index = SESSION_INVALID_INDEX;
       session_set_state (s, SESSION_STATE_TRANSPORT_DELETED);
@@ -1656,8 +1981,7 @@ session_transport_half_close (session_t *s)
       s->session_state != SESSION_STATE_TRANSPORT_CLOSING)
     return;
 
-  transport_half_close (session_get_transport_proto (s), s->connection_index,
-			s->thread_index);
+  transport_half_close (session_get_transport_proto (s), s->connection_index, s->thread_index);
 }
 
 /**
@@ -1668,7 +1992,7 @@ session_transport_half_close (session_t *s)
  * Must be called from the session's thread.
  */
 void
-session_transport_close (session_t * s)
+session_transport_close (session_t *s)
 {
   if (s->session_state >= SESSION_STATE_APP_CLOSED)
     {
@@ -1690,15 +2014,14 @@ session_transport_close (session_t * s)
    */
   session_set_state (s, SESSION_STATE_APP_CLOSED);
 
-  transport_close (session_get_transport_proto (s), s->connection_index,
-		   s->thread_index);
+  transport_close (session_get_transport_proto (s), s->connection_index, s->thread_index);
 }
 
 /**
  * Force transport close
  */
 void
-session_transport_reset (session_t * s)
+session_transport_reset (session_t *s)
 {
   if (s->session_state >= SESSION_STATE_APP_CLOSED)
     {
@@ -1711,8 +2034,7 @@ session_transport_reset (session_t * s)
     }
 
   session_set_state (s, SESSION_STATE_APP_CLOSED);
-  transport_reset (session_get_transport_proto (s), s->connection_index,
-		   s->thread_index);
+  transport_reset (session_get_transport_proto (s), s->connection_index, s->thread_index);
 }
 
 /**
@@ -1723,13 +2045,12 @@ session_transport_reset (session_t * s)
  * closed.
  */
 void
-session_transport_cleanup (session_t * s)
+session_transport_cleanup (session_t *s)
 {
   /* Delete from main lookup table before we axe the the transport */
   session_lookup_del_session (s);
   if (s->session_state != SESSION_STATE_TRANSPORT_DELETED)
-    transport_cleanup (session_get_transport_proto (s), s->connection_index,
-		       s->thread_index);
+    transport_cleanup (session_get_transport_proto (s), s->connection_index, s->thread_index);
   /* Since we called cleanup, no delete notification will come. So, make
    * sure the session is properly freed. */
   segment_manager_dealloc_fifos (s->rx_fifo, s->tx_fifo);
@@ -1753,9 +2074,8 @@ session_vpp_wrk_mqs_alloc (session_main_t *smm)
 
   mq_q_length = clib_max (mq_q_length, smm->configured_wrk_mq_length);
 
-  svm_msg_q_ring_cfg_t rc[SESSION_MQ_N_RINGS] = {
-    { mq_q_length, evt_size, 0 }, { mq_q_length >> 1, 256, 0 }
-  };
+  svm_msg_q_ring_cfg_t rc[SESSION_MQ_N_RINGS] = { { mq_q_length, evt_size, 0 },
+						  { mq_q_length >> 1, 256, 0 } };
   cfg->consumer_pid = 0;
   cfg->n_rings = 2;
   cfg->q_nitems = mq_q_length;
@@ -1797,7 +2117,7 @@ session_main_get_wrk_mqs_segment (void)
 }
 
 u64
-session_segment_handle (session_t * s)
+session_segment_handle (session_t *s)
 {
   svm_fifo_t *f;
 
@@ -1805,37 +2125,30 @@ session_segment_handle (session_t * s)
     return SESSION_INVALID_HANDLE;
 
   f = s->rx_fifo;
-  return segment_manager_make_segment_handle (f->segment_manager,
-					      f->segment_index);
+  return segment_manager_make_segment_handle (f->segment_manager, f->segment_index);
 }
 
 void
-session_get_original_dst (transport_endpoint_t *i2o_src,
-			  transport_endpoint_t *i2o_dst,
+session_get_original_dst (transport_endpoint_t *i2o_src, transport_endpoint_t *i2o_dst,
 			  transport_proto_t transport_proto, u32 *original_dst,
 			  u16 *original_dst_port)
 {
   session_main_t *smm = vnet_get_session_main ();
-  ip_protocol_t proto =
-    (transport_proto == TRANSPORT_PROTO_TCP ? IPPROTO_TCP : IPPROTO_UDP);
+  ip_protocol_t proto = (transport_proto == TRANSPORT_PROTO_TCP ? IPPROTO_TCP : IPPROTO_UDP);
   if (!smm->original_dst_lookup || !i2o_dst->is_ip4)
     return;
-  smm->original_dst_lookup (&i2o_src->ip.ip4, i2o_src->port, &i2o_dst->ip.ip4,
-			    i2o_dst->port, proto, original_dst,
-			    original_dst_port);
+  smm->original_dst_lookup (&i2o_src->ip.ip4, i2o_src->port, &i2o_dst->ip.ip4, i2o_dst->port, proto,
+			    original_dst, original_dst_port);
 }
 
-static session_fifo_rx_fn *session_tx_fns[TRANSPORT_TX_N_FNS] = {
-    session_tx_fifo_peek_and_snd,
-    session_tx_fifo_dequeue_and_snd,
-    session_tx_fifo_dequeue_internal,
-    session_tx_fifo_dequeue_and_snd
-};
+static session_fifo_rx_fn *session_tx_fns[TRANSPORT_TX_N_FNS] = { session_tx_fifo_peek_and_snd,
+								  session_tx_fifo_dequeue_and_snd,
+								  session_tx_fifo_dequeue_internal,
+								  session_tx_fifo_dequeue_and_snd };
 
 void
-session_register_transport (transport_proto_t transport_proto,
-			    const transport_proto_vft_t * vft, u8 is_ip4,
-			    u32 output_node)
+session_register_transport (transport_proto_t transport_proto, const transport_proto_vft_t *vft,
+			    u8 is_ip4, u32 output_node)
 {
   session_main_t *smm = &session_main;
   session_type_t session_type;
@@ -1847,12 +2160,10 @@ session_register_transport (transport_proto_t transport_proto,
   vec_validate (smm->session_tx_fns, session_type);
 
   if (output_node != ~0)
-    next_index = vlib_node_add_next (vlib_get_main (),
-				     session_queue_node.index, output_node);
+    next_index = vlib_node_add_next (vlib_get_main (), session_queue_node.index, output_node);
 
   smm->session_type_to_next[session_type] = next_index;
-  smm->session_tx_fns[session_type] =
-    session_tx_fns[vft->transport_options.tx_type];
+  smm->session_tx_fns[session_type] = session_tx_fns[vft->transport_options.tx_type];
 }
 
 static void
@@ -1930,50 +2241,44 @@ session_add_transport_proto (void)
 }
 
 transport_connection_t *
-session_get_transport (session_t * s)
+session_get_transport (session_t *s)
 {
   if (s->session_state != SESSION_STATE_LISTENING)
-    return transport_get_connection (session_get_transport_proto (s),
-				     s->connection_index, s->thread_index);
+    return transport_get_connection (session_get_transport_proto (s), s->connection_index,
+				     s->thread_index);
   else
-    return transport_get_listener (session_get_transport_proto (s),
-				   s->connection_index);
+    return transport_get_listener (session_get_transport_proto (s), s->connection_index);
 }
 
 void
-session_get_endpoint (session_t *s, transport_endpoint_t *tep_rmt,
-		      transport_endpoint_t *tep_lcl)
+session_get_endpoint (session_t *s, transport_endpoint_t *tep_rmt, transport_endpoint_t *tep_lcl)
 {
   if (s->session_state != SESSION_STATE_LISTENING)
-    return transport_get_endpoint (session_get_transport_proto (s),
-				   s->connection_index, s->thread_index,
-				   tep_rmt, tep_lcl);
+    return transport_get_endpoint (session_get_transport_proto (s), s->connection_index,
+				   s->thread_index, tep_rmt, tep_lcl);
   else
-    return transport_get_listener_endpoint (
-      session_get_transport_proto (s), s->connection_index, tep_rmt, tep_lcl);
+    return transport_get_listener_endpoint (session_get_transport_proto (s), s->connection_index,
+					    tep_rmt, tep_lcl);
 }
 
 int
-session_transport_attribute (session_t *s, u8 is_get,
-			     transport_endpt_attr_t *attr)
+session_transport_attribute (session_t *s, u8 is_get, transport_endpt_attr_t *attr)
 {
   if (!is_get && s->session_state < SESSION_STATE_READY)
     return -1;
 
-  return transport_connection_attribute (session_get_transport_proto (s),
-					 s->connection_index, s->thread_index,
-					 is_get, attr);
+  return transport_connection_attribute (session_get_transport_proto (s), s->connection_index,
+					 s->thread_index, is_get, attr);
 }
 
 transport_connection_t *
-listen_session_get_transport (session_t * s)
+listen_session_get_transport (session_t *s)
 {
-  return transport_get_listener (session_get_transport_proto (s),
-				 s->connection_index);
+  return transport_get_listener (session_get_transport_proto (s), s->connection_index);
 }
 
 void
-session_queue_run_on_main_thread (vlib_main_t * vm)
+session_queue_run_on_main_thread (vlib_main_t *vm)
 {
   ASSERT (vlib_get_thread_index () == 0);
   vlib_node_set_interrupt_pending (vm, session_queue_node.index);
@@ -2012,8 +2317,7 @@ session_stats_collector_init (void)
   session_main_t *smm = &session_main;
   vlib_stats_collector_reg_t reg = {};
 
-  reg.entry_index =
-    vlib_stats_add_counter_vector ("/sys/session/sessions_per_worker");
+  reg.entry_index = vlib_stats_add_counter_vector ("/sys/session/sessions_per_worker");
   reg.private_data = vlib_stats_add_gauge ("/sys/session/sessions_total");
   reg.collect_fn = session_stats_collector_fn;
   vlib_stats_register_collector_fn (&reg);
@@ -2025,8 +2329,7 @@ session_stats_collector_init (void)
 }
 
 static clib_error_t *
-session_manager_main_enable (vlib_main_t *vm,
-			     session_rt_engine_type_t rt_engine_type)
+session_manager_main_enable (vlib_main_t *vm, session_rt_engine_type_t rt_engine_type)
 {
   session_main_t *smm = &session_main;
   vlib_thread_main_t *vtm = vlib_get_thread_main ();
@@ -2041,7 +2344,7 @@ session_manager_main_enable (vlib_main_t *vm,
   if (smm->is_initialized)
     goto done;
 
-  num_threads = 1 /* main thread */  + vtm->n_threads;
+  num_threads = 1 /* main thread */ + vtm->n_threads;
 
   if (num_threads < 1)
     return clib_error_return (0, "n_thread_stacks not set");
@@ -2057,14 +2360,14 @@ session_manager_main_enable (vlib_main_t *vm,
       wrk->new_head = clib_llist_make_head (wrk->event_elts, evt_list);
       wrk->old_head = clib_llist_make_head (wrk->event_elts, evt_list);
       wrk->pending_connects = clib_llist_make_head (wrk->event_elts, evt_list);
-      wrk->evts_pending_main =
-	clib_llist_make_head (wrk->event_elts, evt_list);
+      wrk->evts_pending_main = clib_llist_make_head (wrk->event_elts, evt_list);
       wrk->vm = vlib_get_main_by_index (i);
       wrk->last_vlib_time = vlib_time_now (vm);
       wrk->last_vlib_us_time = wrk->last_vlib_time * CLIB_US_TIME_FREQ;
       wrk->timerfd = -1;
       vec_validate (wrk->session_to_enqueue, smm->last_transport_proto_type);
       clib_spinlock_init (&wrk->session_migrate_lock);
+      clib_spinlock_init (&wrk->observability_retry_lock);
 
       if (!smm->no_adaptive && smm->use_private_rx_mqs)
 	session_wrk_enable_adaptive_mode (wrk);
@@ -2087,13 +2390,11 @@ session_manager_main_enable (vlib_main_t *vm,
 	{
 	  int j;
 	  preallocated_sessions_per_worker =
-	    (1.1 * (f64) smm->preallocated_sessions /
-	     (f64) (num_threads - 1));
+	    (1.1 * (f64) smm->preallocated_sessions / (f64) (num_threads - 1));
 
 	  for (j = 1; j < num_threads; j++)
 	    {
-	      pool_init_fixed (smm->wrk[j].sessions,
-			       preallocated_sessions_per_worker);
+	      pool_init_fixed (smm->wrk[j].sessions, preallocated_sessions_per_worker);
 	    }
 	}
     }
@@ -2116,10 +2417,9 @@ done:
 }
 
 static void
-session_manager_main_disable (vlib_main_t *vm,
-			      session_rt_engine_type_t rt_engine_type)
+session_manager_main_disable (vlib_main_t *vm, session_rt_engine_type_t rt_engine_type)
 {
-  transport_enable_disable (vm, 0 /* is_en */ );
+  transport_enable_disable (vm, 0 /* is_en */);
   session_rt_backend_enable_disable (rt_engine_type);
 }
 
@@ -2188,10 +2488,9 @@ session_node_enable_dma (u8 is_en, int n_vlibs)
 	{
 	  if (config_index >= 0)
 	    wrk->dma_enabled = true;
-	  wrk->dma_trans = (session_dma_transfer *) clib_mem_alloc (
-	    sizeof (session_dma_transfer) * DMA_TRANS_SIZE);
-	  bzero (wrk->dma_trans,
-		 sizeof (session_dma_transfer) * DMA_TRANS_SIZE);
+	  wrk->dma_trans = (session_dma_transfer *) clib_mem_alloc (sizeof (session_dma_transfer) *
+								    DMA_TRANS_SIZE);
+	  bzero (wrk->dma_trans, sizeof (session_dma_transfer) * DMA_TRANS_SIZE);
 	}
       else
 	{
@@ -2238,8 +2537,7 @@ session_node_enable_disable (u8 is_en)
 	    }
 	  else
 	    {
-	      vlib_process_signal_event_mt (vm,
-					    session_queue_process_node.index,
+	      vlib_process_signal_event_mt (vm, session_queue_process_node.index,
 					    SESSION_Q_PROCESS_STOP, 0);
 	    }
 	  if (!sm->poll_main)
@@ -2257,8 +2555,7 @@ session_node_enable_disable (u8 is_en)
 }
 
 clib_error_t *
-vnet_session_enable_disable (vlib_main_t *vm,
-			     session_enable_disable_args_t *args)
+vnet_session_enable_disable (vlib_main_t *vm, session_enable_disable_args_t *args)
 {
   clib_error_t *error = 0;
 
@@ -2281,7 +2578,7 @@ vnet_session_enable_disable (vlib_main_t *vm,
 }
 
 clib_error_t *
-session_main_init (vlib_main_t * vm)
+session_main_init (vlib_main_t *vm)
 {
   session_main_t *smm = &session_main;
 
@@ -2303,15 +2600,13 @@ session_main_init (vlib_main_t * vm)
 VLIB_INIT_FUNCTION (session_main_init);
 
 static clib_error_t *
-session_main_loop_init (vlib_main_t * vm)
+session_main_loop_init (vlib_main_t *vm)
 {
   session_main_t *smm = &session_main;
 
   if (smm->session_enable_asap)
     {
-      session_enable_disable_args_t args = { .is_en = 1,
-					     .rt_engine_type =
-					       smm->rt_engine_type };
+      session_enable_disable_args_t args = { .is_en = 1, .rt_engine_type = smm->rt_engine_type };
 
       vlib_worker_thread_barrier_sync (vm);
       vnet_session_enable_disable (vm, &args);

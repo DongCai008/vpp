@@ -79,6 +79,12 @@ if(VPP_BUILD_VCL_TESTS)
     NO_INSTALL
   )
 
+  add_vpp_test(observability_sapi_test
+    SOURCES vcl/observability_sapi_test.c
+    LINK_LIBRARIES vppcom pthread
+    NO_INSTALL
+  )
+
   add_vpp_test(evt_collector_sink
     SOURCES vcl/evt_collector_sink.c
     LINK_LIBRARIES vppcom pthread ${EPOLL_LIB}

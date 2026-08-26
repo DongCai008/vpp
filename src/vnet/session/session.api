@@ -33,6 +33,24 @@ typedef sdl_rule_v2
   string tag[64];
 };
 
+/** \brief Version-2 observability attachment capability
+    This is deliberately a value-only capability.  It carries no session,
+    transport, pool, or pointer identity. */
+typedef app_observability_attachment_descriptor_v2
+{
+  u16 abi;
+  u16 bytes;
+  u32 layout_hash;
+  u64 segment_handle;
+  u64 attachment_instance;
+  u64 attach_generation;
+  u64 queue_identity;
+  u64 queue_generation;
+  u32 segment_bytes;
+  u32 binding_index;
+  u64 binding_nonce;
+};
+
 enum transport_proto : u8
 {
         TRANSPORT_PROTO_API_TCP,
@@ -89,6 +107,35 @@ define app_attach_reply {
     u8 fd_flags;
     u32 segment_size;
     u64 segment_handle;
+    string segment_name[];
+};
+
+/** \brief Version-2 application attach
+    Kept distinct because app_attach_reply ends in a variable-length string. */
+define app_attach_v2 {
+    u32 client_index;
+    u32 context;
+    u64 options[18];
+    u16 observability_abi;
+    u16 observability_flags;
+    string namespace_id[];
+};
+
+define app_attach_v2_reply {
+    u32 context;
+    i32 retval;
+    u64 app_mq;
+    u64 vpp_ctrl_mq;
+    u8 vpp_ctrl_mq_thread;
+    u32 app_index;
+    u8 n_fds;
+    u8 fd_flags;
+    u32 segment_size;
+    u64 segment_handle;
+    u16 observability_abi;
+    u16 observability_flags;
+    u32 vcl_application_association;
+    vl_api_app_observability_attachment_descriptor_v2_t attachment_descriptor;
     string segment_name[];
 };
 
@@ -179,6 +226,107 @@ define app_worker_add_del_reply
   u64 segment_handle;
   bool is_add [default=true];
   string segment_name[];
+};
+
+/** \brief Version-2 application worker add/delete */
+define app_worker_add_del_v2
+{
+  u32 client_index;
+  u32 context;
+  u32 app_index;
+  u32 wrk_index;
+  bool is_add [default=true];
+  u16 observability_abi;
+  u16 observability_flags;
+};
+
+define app_worker_add_del_v2_reply
+{
+  u32 context;
+  i32 retval;
+  u32 wrk_index;
+  u64 app_event_queue_address;
+  u8 n_fds;
+  u8 fd_flags;
+  u64 segment_handle;
+  bool is_add [default=true];
+  u16 observability_abi;
+  u16 observability_flags;
+  u32 vcl_application_association;
+  vl_api_app_observability_attachment_descriptor_v2_t attachment_descriptor;
+  string segment_name[];
+};
+
+/** \brief Acknowledge that a version-2 attachment has been mapped */
+define app_observability_attach_ack_v2
+{
+  u32 client_index;
+  u32 context;
+  u32 vcl_application_association;
+  vl_api_app_observability_attachment_descriptor_v2_t attachment_descriptor;
+};
+
+define app_observability_attach_ack_v2_reply
+{
+  u32 context;
+  i32 retval;
+  u32 vcl_application_association;
+};
+
+/** \brief Start a version-2 attachment detach */
+define app_observability_detach_v2
+{
+  u32 client_index;
+  u32 context;
+  u32 vcl_application_association;
+  vl_api_app_observability_attachment_descriptor_v2_t attachment_descriptor;
+};
+
+define app_observability_detach_v2_reply
+{
+  u32 context;
+  i32 retval;
+  u32 vcl_application_association;
+};
+
+/** \brief Confirm version-2 attachment retirement */
+define app_observability_done_v2
+{
+  u32 client_index;
+  u32 context;
+  u32 vcl_application_association;
+  vl_api_app_observability_attachment_descriptor_v2_t attachment_descriptor;
+};
+
+define app_observability_done_v2_reply
+{
+  u32 context;
+  i32 retval;
+  u32 vcl_application_association;
+};
+
+/** \brief Submit one bounded, owner-worker observability request
+    The association token is a private ABA fence and is never part of a
+    transport handle or an application receipt. */
+define app_observability_request_v2
+{
+  u32 client_index;
+  u32 context;
+  u64 session_handle;
+  u64 association_token;
+  u64 request_id;
+  u32 application_association;
+  u32 attachment_slot;
+  u32 sampling_point;
+  u32 request_flags;
+};
+
+define app_observability_request_v2_reply
+{
+  u32 context;
+  i32 retval;
+  u32 attachment_slot;
+  u64 ticket_sequence;
 };
 
 /** \brief enable/disable session layer

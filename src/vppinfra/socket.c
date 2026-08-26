@@ -4,7 +4,7 @@
  */
 
 #include <stdio.h>
-#include <string.h>		/* strchr */
+#include <string.h> /* strchr */
 #define __USE_GNU
 #define _GNU_SOURCE
 #include <sys/types.h>
@@ -31,7 +31,7 @@
 #endif
 
 __clib_export void
-clib_socket_tx_add_formatted (clib_socket_t * s, char *fmt, ...)
+clib_socket_tx_add_formatted (clib_socket_t *s, char *fmt, ...)
 {
   va_list va;
   va_start (va, fmt);
@@ -49,7 +49,7 @@ find_free_port (word sock)
     {
       struct sockaddr_in a;
 
-      clib_memset (&a, 0, sizeof (a));	/* Warnings be gone */
+      clib_memset (&a, 0, sizeof (a)); /* Warnings be gone */
 
       a.sin_family = PF_INET;
       a.sin_addr.s_addr = INADDR_ANY;
@@ -63,7 +63,7 @@ find_free_port (word sock)
 }
 
 static clib_error_t *
-default_socket_write (clib_socket_t * s)
+default_socket_write (clib_socket_t *s)
 {
   clib_error_t *err = 0;
   word written = 0;
@@ -87,8 +87,7 @@ default_socket_write (clib_socket_t * s)
   /* A "real" error occurred. */
   if (written < 0)
     {
-      err = clib_error_return_unix (0, "write %wd bytes (fd %d, '%s')",
-				    tx_len, s->fd, s->config);
+      err = clib_error_return_unix (0, "write %wd bytes (fd %d, '%s')", tx_len, s->fd, s->config);
       vec_free (s->tx_buffer);
       goto done;
     }
@@ -114,7 +113,7 @@ done:
 }
 
 static clib_error_t *
-default_socket_read (clib_socket_t * sock, int n_bytes)
+default_socket_read (clib_socket_t *sock, int n_bytes)
 {
   word fd, n_read;
   u8 *buf;
@@ -136,8 +135,8 @@ default_socket_read (clib_socket_t * sock, int n_bytes)
       if (!unix_error_is_fatal (errno))
 	goto non_fatal;
 
-      return clib_error_return_unix (0, "read %d bytes (fd %d, '%s')",
-				     n_bytes, sock->fd, sock->config);
+      return clib_error_return_unix (0, "read %d bytes (fd %d, '%s')", n_bytes, sock->fd,
+				     sock->config);
     }
 
   /* Other side closed the socket. */
@@ -151,7 +150,7 @@ non_fatal:
 }
 
 static clib_error_t *
-default_socket_close (clib_socket_t * s)
+default_socket_close (clib_socket_t *s)
 {
   if (close (s->fd) < 0)
     return clib_error_return_unix (0, "close (fd %d, %s)", s->fd, s->config);
@@ -159,8 +158,7 @@ default_socket_close (clib_socket_t * s)
 }
 
 static clib_error_t *
-default_socket_sendmsg (clib_socket_t * s, void *msg, int msglen,
-			int fds[], int num_fds)
+default_socket_sendmsg (clib_socket_t *s, void *msg, int msglen, int fds[], int num_fds)
 {
   struct msghdr mh = { 0 };
   struct iovec iov[1];
@@ -190,14 +188,27 @@ default_socket_sendmsg (clib_socket_t * s, void *msg, int msglen,
   return 0;
 }
 
-
 static clib_error_t *
-default_socket_recvmsg (clib_socket_t * s, void *msg, int msglen,
-			int fds[], int num_fds)
+default_socket_recvmsg (clib_socket_t *s, void *msg, int msglen, int fds[], int num_fds)
+{
+  clib_error_t *err;
+  ssize_t size;
+
+  err = clib_socket_recvmsg_with_result (s, msg, msglen, fds, num_fds, &size, 0, 0);
+  if (err)
+    return err;
+
+  if (size != msglen)
+    return clib_error_return_unix (0, "recvmsg: malformed message (fd %d, '%s')", s->fd, s->config);
+  return 0;
+}
+
+__clib_export clib_error_t *
+clib_socket_recvmsg_with_result (clib_socket_t *s, void *msg, int msglen, int fds[], int num_fds,
+				 ssize_t *bytes, int *msg_flags, u32 *n_fds_received)
 {
 #if CLIB_LINUX
-  char ctl[CMSG_SPACE (sizeof (int) * num_fds) +
-	   CMSG_SPACE (sizeof (struct ucred))];
+  char ctl[CMSG_SPACE (sizeof (int) * num_fds) + CMSG_SPACE (sizeof (struct ucred))];
   struct ucred *cr = 0;
 #else
   char ctl[CMSG_SPACE (sizeof (int) * num_fds)];
@@ -206,6 +217,20 @@ default_socket_recvmsg (clib_socket_t * s, void *msg, int msglen,
   struct iovec iov[1];
   ssize_t size;
   struct cmsghdr *cmsg;
+  u32 received_fd_count = 0;
+
+  if (bytes)
+    *bytes = -1;
+  if (msg_flags)
+    *msg_flags = 0;
+  if (n_fds_received)
+    *n_fds_received = 0;
+  if (fds)
+    {
+      u32 i;
+      for (i = 0; i < num_fds; i++)
+	fds[i] = -1;
+    }
 
   iov[0].iov_base = msg;
   iov[0].iov_len = msglen;
@@ -218,12 +243,15 @@ default_socket_recvmsg (clib_socket_t * s, void *msg, int msglen,
 
   /* receive the incoming message */
   size = recvmsg (s->fd, &mh, 0);
-  if (size != msglen)
-    {
-      return (size == 0) ? clib_error_return (0, "disconnected") :
-	clib_error_return_unix (0, "recvmsg: malformed message (fd %d, '%s')",
-				s->fd, s->config);
-    }
+  if (size < 0)
+    return clib_error_return_unix (0, "recvmsg");
+  if (size == 0)
+    return clib_error_return (0, "disconnected");
+
+  if (bytes)
+    *bytes = size;
+  if (msg_flags)
+    *msg_flags = mh.msg_flags;
 
   cmsg = CMSG_FIRSTHDR (&mh);
   while (cmsg)
@@ -240,10 +268,25 @@ default_socket_recvmsg (clib_socket_t * s, void *msg, int msglen,
 	    }
 	  else
 #endif
-	  if (cmsg->cmsg_type == SCM_RIGHTS)
+	    if (cmsg->cmsg_type == SCM_RIGHTS)
 	    {
-	      clib_memcpy_fast (fds, CMSG_DATA (cmsg),
-				num_fds * sizeof (int));
+	      u32 n_fds, i;
+	      int *received_fds;
+
+	      if (cmsg->cmsg_len < CMSG_LEN (0) || (cmsg->cmsg_len - CMSG_LEN (0)) % sizeof (int))
+		return clib_error_return (0, "recvmsg: malformed SCM_RIGHTS");
+	      n_fds = (cmsg->cmsg_len - CMSG_LEN (0)) / sizeof (int);
+	      received_fds = (int *) CMSG_DATA (cmsg);
+	      if (n_fds_received)
+		*n_fds_received += n_fds;
+	      for (i = 0; i < n_fds; i++)
+		{
+		  if (fds && received_fd_count < num_fds)
+		    fds[received_fd_count] = received_fds[i];
+		  else
+		    close (received_fds[i]);
+		  received_fd_count++;
+		}
 	    }
 	}
       cmsg = CMSG_NXTHDR (&mh, cmsg);
@@ -252,7 +295,7 @@ default_socket_recvmsg (clib_socket_t * s, void *msg, int msglen,
 }
 
 static void
-socket_init_funcs (clib_socket_t * s)
+socket_init_funcs (clib_socket_t *s)
 {
   if (!s->write_func)
     s->write_func = default_socket_write;
@@ -264,6 +307,13 @@ socket_init_funcs (clib_socket_t * s)
     s->sendmsg_func = default_socket_sendmsg;
   if (!s->recvmsg_func)
     s->recvmsg_func = default_socket_recvmsg;
+}
+
+__clib_export void
+clib_socket_init_fd (clib_socket_t *s, int fd)
+{
+  s->fd = fd;
+  socket_init_funcs (s);
 }
 
 static const struct
@@ -279,10 +329,7 @@ static const struct
     .type = CLIB_SOCKET_TYPE_UNIX,
     .skip_prefix = 1,
     .is_local = 1 },
-  { .prefix = "tcp:",
-    .family = AF_INET,
-    .type = CLIB_SOCKET_TYPE_INET,
-    .skip_prefix = 1 },
+  { .prefix = "tcp:", .family = AF_INET, .type = CLIB_SOCKET_TYPE_INET, .skip_prefix = 1 },
 #if CLIB_LINUX
   { .prefix = "abstract:",
     .family = AF_UNIX,
@@ -511,13 +558,11 @@ clib_socket_init (clib_socket_t *s)
 	      if (!host)
 		err = clib_error_return (0, "unknown host `%s'", name);
 	      else
-		clib_memcpy (&si.sin_addr.s_addr, host->h_addr_list[0],
-			     host->h_length);
+		clib_memcpy (&si.sin_addr.s_addr, host->h_addr_list[0], host->h_length);
 	    }
 
 	  else
-	    si.sin_addr.s_addr =
-	      htonl (s->is_server ? INADDR_LOOPBACK : INADDR_ANY);
+	    si.sin_addr.s_addr = htonl (s->is_server ? INADDR_LOOPBACK : INADDR_ANY);
 
 	  if (err)
 	    goto done;
@@ -551,8 +596,7 @@ clib_socket_init (clib_socket_t *s)
 	  if (S_ISSOCK (st.st_mode))
 	    {
 	      int client_fd = socket (AF_UNIX, SOCK_STREAM, 0);
-	      int ret = connect (client_fd, (const struct sockaddr *) &su,
-				 sizeof (su));
+	      int ret = connect (client_fd, (const struct sockaddr *) &su, sizeof (su));
 	      typeof (errno) connect_errno = errno;
 	      close (client_fd);
 
@@ -598,11 +642,9 @@ clib_socket_init (clib_socket_t *s)
 
   socket_init_funcs (s);
 
-  if ((s->fd = socket (sa->sa_family,
-		       s->is_seqpacket ? SOCK_SEQPACKET : SOCK_STREAM, 0)) < 0)
+  if ((s->fd = socket (sa->sa_family, s->is_seqpacket ? SOCK_SEQPACKET : SOCK_STREAM, 0)) < 0)
     {
-      err =
-	clib_error_return_unix (0, "socket (fd %d, '%s')", s->fd, s->config);
+      err = clib_error_return_unix (0, "socket (fd %d, '%s')", s->fd, s->config);
       goto done;
     }
 
@@ -615,23 +657,20 @@ clib_socket_init (clib_socket_t *s)
 	  word port = find_free_port (s->fd);
 	  if (port < 0)
 	    {
-	      err = clib_error_return (0, "no free port (fd %d, '%s')", s->fd,
-				       s->config);
+	      err = clib_error_return (0, "no free port (fd %d, '%s')", s->fd, s->config);
 	      goto done;
 	    }
 	  si.sin_port = port;
 	  need_bind = 0;
 	}
 
-      if (setsockopt (s->fd, SOL_SOCKET, SO_REUSEADDR, &((int){ 1 }),
-		      sizeof (int)) < 0)
+      if (setsockopt (s->fd, SOL_SOCKET, SO_REUSEADDR, &((int){ 1 }), sizeof (int)) < 0)
 	clib_unix_warning ("setsockopt SO_REUSEADDR fails");
 
 #if CLIB_LINUX
       if (sa->sa_family == AF_UNIX && s->passcred)
 	{
-	  if (setsockopt (s->fd, SOL_SOCKET, SO_PASSCRED, &((int){ 1 }),
-			  sizeof (int)) < 0)
+	  if (setsockopt (s->fd, SOL_SOCKET, SO_PASSCRED, &((int){ 1 }), sizeof (int)) < 0)
 	    {
 	      err = clib_error_return_unix (0,
 					    "setsockopt (SO_PASSCRED, "
@@ -656,16 +695,14 @@ clib_socket_init (clib_socket_t *s)
 
 	  if (bind_ret < 0)
 	    {
-	      err = clib_error_return_unix (0, "bind (fd %d, '%s')", s->fd,
-					    s->config);
+	      err = clib_error_return_unix (0, "bind (fd %d, '%s')", s->fd, s->config);
 	      goto done;
 	    }
 	}
 
       if (listen (s->fd, 5) < 0)
 	{
-	  err = clib_error_return_unix (0, "listen (fd %d, '%s')", s->fd,
-					s->config);
+	  err = clib_error_return_unix (0, "listen (fd %d, '%s')", s->fd, s->config);
 	  goto done;
 	}
     }
@@ -673,8 +710,7 @@ clib_socket_init (clib_socket_t *s)
     {
       if (s->non_blocking_connect && fcntl (s->fd, F_SETFL, O_NONBLOCK) < 0)
 	{
-	  err = clib_error_return_unix (0, "fcntl NONBLOCK (fd %d, '%s')",
-					s->fd, s->config);
+	  err = clib_error_return_unix (0, "fcntl NONBLOCK (fd %d, '%s')", s->fd, s->config);
 	  goto done;
 	}
 
@@ -682,17 +718,14 @@ clib_socket_init (clib_socket_t *s)
 	;
       if (rv < 0 && !(s->non_blocking_connect && errno == EINPROGRESS))
 	{
-	  err = clib_error_return_unix (0, "connect (fd %d, '%s')", s->fd,
-					s->config);
+	  err = clib_error_return_unix (0, "connect (fd %d, '%s')", s->fd, s->config);
 	  goto done;
 	}
       /* Connect was blocking so set fd to non-blocking now unless
        * blocking mode explicitly requested. */
-      if (!s->non_blocking_connect && !s->is_blocking &&
-	  fcntl (s->fd, F_SETFL, O_NONBLOCK) < 0)
+      if (!s->non_blocking_connect && !s->is_blocking && fcntl (s->fd, F_SETFL, O_NONBLOCK) < 0)
 	{
-	  err = clib_error_return_unix (0, "fcntl NONBLOCK2 (fd %d, '%s')",
-					s->fd, s->config);
+	  err = clib_error_return_unix (0, "fcntl NONBLOCK2 (fd %d, '%s')", s->fd, s->config);
 	  goto done;
 	}
     }
@@ -715,7 +748,7 @@ done:
 }
 
 __clib_export clib_error_t *
-clib_socket_accept (clib_socket_t * server, clib_socket_t * client)
+clib_socket_accept (clib_socket_t *server, clib_socket_t *client)
 {
   clib_error_t *err = 0;
   socklen_t len = 0;
@@ -725,14 +758,12 @@ clib_socket_accept (clib_socket_t * server, clib_socket_t * client)
   /* Accept the new socket connection. */
   client->fd = accept (server->fd, 0, 0);
   if (client->fd < 0)
-    return clib_error_return_unix (0, "accept (fd %d, '%s')",
-				   server->fd, server->config);
+    return clib_error_return_unix (0, "accept (fd %d, '%s')", server->fd, server->config);
 
   /* Set the new socket to be non-blocking. */
   if (fcntl (client->fd, F_SETFL, O_NONBLOCK) < 0)
     {
-      err = clib_error_return_unix (0, "fcntl O_NONBLOCK (fd %d)",
-				    client->fd);
+      err = clib_error_return_unix (0, "fcntl O_NONBLOCK (fd %d)", client->fd);
       goto close_client;
     }
 

@@ -3,9 +3,10 @@
  */
 
 #include <vcl/vcl_private.h>
+#include <sys/mman.h>
 
 vcl_mq_evt_conn_t *
-vcl_mq_evt_conn_alloc (vcl_worker_t * wrk)
+vcl_mq_evt_conn_alloc (vcl_worker_t *wrk)
 {
   vcl_mq_evt_conn_t *mqc;
   pool_get (wrk->mq_evt_conns, mqc);
@@ -14,13 +15,13 @@ vcl_mq_evt_conn_alloc (vcl_worker_t * wrk)
 }
 
 u32
-vcl_mq_evt_conn_index (vcl_worker_t * wrk, vcl_mq_evt_conn_t * mqc)
+vcl_mq_evt_conn_index (vcl_worker_t *wrk, vcl_mq_evt_conn_t *mqc)
 {
   return (mqc - wrk->mq_evt_conns);
 }
 
 vcl_mq_evt_conn_t *
-vcl_mq_evt_conn_get (vcl_worker_t * wrk, u32 mq_conn_idx)
+vcl_mq_evt_conn_get (vcl_worker_t *wrk, u32 mq_conn_idx)
 {
   return pool_elt_at_index (wrk->mq_evt_conns, mq_conn_idx);
 }
@@ -45,7 +46,7 @@ vcl_mq_epoll_add_api_sock (vcl_worker_t *wrk)
 }
 
 int
-vcl_mq_epoll_add_evfd (vcl_worker_t * wrk, svm_msg_q_t * mq)
+vcl_mq_epoll_add_evfd (vcl_worker_t *wrk, svm_msg_q_t *mq)
 {
   struct epoll_event e = { 0 };
   vcl_mq_evt_conn_t *mqc;
@@ -82,7 +83,7 @@ vcl_mq_epoll_add_evfd (vcl_worker_t * wrk, svm_msg_q_t * mq)
 }
 
 int
-vcl_mq_epoll_del_evfd (vcl_worker_t * wrk, u32 mqc_index)
+vcl_mq_epoll_del_evfd (vcl_worker_t *wrk, u32 mqc_index)
 {
   vcl_mq_evt_conn_t *mqc;
 
@@ -110,13 +111,13 @@ vcl_worker_alloc (void)
 }
 
 static void
-vcl_worker_free (vcl_worker_t * wrk)
+vcl_worker_free (vcl_worker_t *wrk)
 {
   pool_put (vcm->workers, wrk);
 }
 
 void
-vcl_worker_cleanup (vcl_worker_t * wrk, u8 notify_vpp)
+vcl_worker_cleanup (vcl_worker_t *wrk, u8 notify_vpp)
 {
   clib_spinlock_lock (&vcm->workers_lock);
   if (notify_vpp)
@@ -124,6 +125,10 @@ vcl_worker_cleanup (vcl_worker_t * wrk, u8 notify_vpp)
 
   if (wrk->mqs_epfd > 0)
     close (wrk->mqs_epfd);
+  if (wrk->observability_segment)
+    munmap (wrk->observability_segment, SESSION_OBSERVABILITY_SEGMENT_BYTES);
+  if (wrk->observability_fd >= 0)
+    close (wrk->observability_fd);
   pool_free (wrk->sessions);
   pool_free (wrk->mq_evt_conns);
   hash_free (wrk->session_index_by_vpp_handles);
@@ -155,8 +160,7 @@ vcl_worker_detached_start_signal_mq (vcl_worker_t *wrk)
   struct epoll_event evt = {};
   evt.events = EPOLLIN;
   evt.data.u32 = VCL_EP_PIPEFD_EVT;
-  if (vcm->vcl_epoll_ctl (wrk->mqs_epfd, EPOLL_CTL_ADD,
-			  wrk->detached_pipefds[0], &evt) < 0)
+  if (vcm->vcl_epoll_ctl (wrk->mqs_epfd, EPOLL_CTL_ADD, wrk->detached_pipefds[0], &evt) < 0)
     {
       VDBG (0, "failed to add mq eventfd to mq epoll fd");
       exit (1);
@@ -179,8 +183,7 @@ vcl_worker_detached_signal_mq (vcl_worker_t *wrk)
 void
 vcl_worker_detached_stop_signal_mq (vcl_worker_t *wrk)
 {
-  if (vcm->vcl_epoll_ctl (wrk->mqs_epfd, EPOLL_CTL_DEL,
-			  wrk->detached_pipefds[0], 0) < 0)
+  if (vcm->vcl_epoll_ctl (wrk->mqs_epfd, EPOLL_CTL_DEL, wrk->detached_pipefds[0], 0) < 0)
     {
       VDBG (0, "failed to del mq eventfd to mq epoll fd");
       exit (1);
@@ -227,8 +230,7 @@ vcl_worker_detach_sessions (vcl_worker_t *wrk)
       s->flags |= VCL_SESSION_F_APP_CLOSING;
     }
 
-  hash_foreach (seg_index, val, seg_indices_map,
-		({ vec_add1 (seg_indices, seg_index); }));
+  hash_foreach (seg_index, val, seg_indices_map, ({ vec_add1 (seg_indices, seg_index); }));
 
   /* If multi-threaded apps, wait for all threads to hopefully finish
    * their blocking operations  */
@@ -253,8 +255,7 @@ vcl_worker_detach_sessions (vcl_worker_t *wrk)
 }
 
 void
-vcl_worker_set_wait_mq_fns (vcl_worker_wait_mq_fn pre_wait,
-			    vcl_worker_wait_mq_fn post_wait)
+vcl_worker_set_wait_mq_fns (vcl_worker_wait_mq_fn pre_wait, vcl_worker_wait_mq_fn post_wait)
 {
   vcl_worker_t *wrk = vcl_worker_get_current ();
   wrk->pre_wait_fn = pre_wait;
@@ -283,6 +284,7 @@ vcl_worker_alloc_and_init ()
   wrk = vcl_worker_alloc ();
   vcl_set_worker_index (wrk->wrk_index);
   wrk->api_client_handle = ~0;
+  wrk->observability_fd = -1;
   wrk->thread_id = pthread_self ();
   wrk->current_pid = getpid ();
 
@@ -332,7 +334,7 @@ vcl_worker_register_with_vpp (void)
 }
 
 svm_msg_q_t *
-vcl_worker_ctrl_mq (vcl_worker_t * wrk)
+vcl_worker_ctrl_mq (vcl_worker_t *wrk)
 {
   return wrk->ctrl_mq;
 }
@@ -349,12 +351,11 @@ vcl_init_epoll_fns ()
 }
 
 int
-vcl_session_read_ready (vcl_session_t * s)
+vcl_session_read_ready (vcl_session_t *s)
 {
   if (PREDICT_FALSE (s->flags & VCL_SESSION_F_IS_VEP))
     {
-      VDBG (0, "ERROR: session %u: cannot read from an epoll session!",
-	    s->session_index);
+      VDBG (0, "ERROR: session %u: cannot read from an epoll session!", s->session_index);
       return VPPCOM_EBADFD;
     }
 
@@ -389,8 +390,7 @@ vcl_session_read_ready (vcl_session_t * s)
     }
   else
     {
-      return (s->session_state == VCL_STATE_DISCONNECT) ? VPPCOM_ECONNRESET :
-							  VPPCOM_ENOTCONN;
+      return (s->session_state == VCL_STATE_DISCONNECT) ? VPPCOM_ECONNRESET : VPPCOM_ENOTCONN;
     }
 }
 
@@ -429,12 +429,12 @@ vcl_session_read_ready2 (vcl_session_t *s)
 }
 
 int
-vcl_session_write_ready (vcl_session_t * s)
+vcl_session_write_ready (vcl_session_t *s)
 {
   if (PREDICT_FALSE (s->flags & VCL_SESSION_F_IS_VEP))
     {
-      VDBG (0, "session %u [0x%llx]: cannot write to an epoll session!",
-	    s->session_index, s->vpp_handle);
+      VDBG (0, "session %u [0x%llx]: cannot write to an epoll session!", s->session_index,
+	    s->vpp_handle);
       return VPPCOM_EBADFD;
     }
 
@@ -464,14 +464,12 @@ vcl_session_write_ready (vcl_session_t * s)
     }
   else
     {
-      return (s->session_state == VCL_STATE_DISCONNECT) ?
-	VPPCOM_ECONNRESET : VPPCOM_ENOTCONN;
+      return (s->session_state == VCL_STATE_DISCONNECT) ? VPPCOM_ECONNRESET : VPPCOM_ENOTCONN;
     }
 }
 
 int
-vcl_session_alloc_ext_cfg (vcl_session_t *s,
-			   transport_endpt_ext_cfg_type_t type, u32 len)
+vcl_session_alloc_ext_cfg (vcl_session_t *s, transport_endpt_ext_cfg_type_t type, u32 len)
 {
   if (s->ext_config)
     return -1;
@@ -485,8 +483,7 @@ vcl_session_alloc_ext_cfg (vcl_session_t *s,
 }
 
 int
-vcl_segment_attach (u64 segment_handle, char *name, ssvm_segment_type_t type,
-		    int fd)
+vcl_segment_attach (u64 segment_handle, char *name, ssvm_segment_type_t type, int fd)
 {
   fifo_segment_create_args_t _a, *a = &_a;
   int rv;
@@ -525,7 +522,7 @@ vcl_segment_table_lookup (u64 segment_handle)
 
   if (!seg_indexp)
     return VCL_INVALID_SEGMENT_INDEX;
-  return ((u32) * seg_indexp);
+  return ((u32) *seg_indexp);
 }
 
 void
@@ -536,7 +533,7 @@ vcl_segment_detach (u64 segment_handle)
   u32 segment_index;
 
   segment_index = vcl_segment_table_lookup (segment_handle);
-  if (segment_index == (u32) ~ 0)
+  if (segment_index == (u32) ~0)
     return;
 
   clib_rwlock_writer_lock (&vcm->segment_table_lock);
@@ -581,9 +578,8 @@ vcl_segment_detach_segments (u32 *seg_indices)
 }
 
 int
-vcl_segment_attach_session (uword segment_handle, uword rxf_offset,
-			    uword txf_offset, uword mq_offset, u32 mq_index,
-			    u8 is_ct, vcl_session_t *s)
+vcl_segment_attach_session (uword segment_handle, uword rxf_offset, uword txf_offset,
+			    uword mq_offset, u32 mq_index, u8 is_ct, vcl_session_t *s)
 {
   u32 fs_index, eqs_index;
   svm_fifo_t *rxf, *txf;
@@ -593,8 +589,7 @@ vcl_segment_attach_session (uword segment_handle, uword rxf_offset,
   fs_index = vcl_segment_table_lookup (segment_handle);
   if (fs_index == VCL_INVALID_SEGMENT_INDEX)
     {
-      VDBG (0, "ERROR: segment for session %u is not mounted!",
-	    s->session_index);
+      VDBG (0, "ERROR: segment for session %u is not mounted!", s->session_index);
       return -1;
     }
 
@@ -664,8 +659,7 @@ vcl_session_detach_fifos (vcl_session_t *s)
 
   clib_rwlock_reader_lock (&vcm->segment_table_lock);
 
-  fs = fifo_segment_get_segment_if_valid (&vcm->segment_main,
-					  s->rx_fifo->segment_index);
+  fs = fifo_segment_get_segment_if_valid (&vcm->segment_main, s->rx_fifo->segment_index);
   if (!fs)
     goto done;
 
@@ -673,8 +667,7 @@ vcl_session_detach_fifos (vcl_session_t *s)
   fifo_segment_free_client_fifo (fs, s->tx_fifo);
   if (s->ct_rx_fifo)
     {
-      fs = fifo_segment_get_segment_if_valid (&vcm->segment_main,
-					      s->ct_rx_fifo->segment_index);
+      fs = fifo_segment_get_segment_if_valid (&vcm->segment_main, s->ct_rx_fifo->segment_index);
       if (!fs)
 	goto done;
 
@@ -687,8 +680,7 @@ done:
 }
 
 int
-vcl_segment_attach_mq (uword segment_handle, uword mq_offset, u32 mq_index,
-		       svm_msg_q_t **mq)
+vcl_segment_attach_mq (uword segment_handle, uword mq_offset, u32 mq_index, svm_msg_q_t **mq)
 {
   fifo_segment_t *fs;
   u32 fs_index;
@@ -734,8 +726,7 @@ vcl_segment_discover_mqs (uword segment_handle, int *fds, u32 n_fds)
 }
 
 svm_fifo_chunk_t *
-vcl_segment_alloc_chunk (uword segment_handle, u32 slice_index, u32 size,
-			 uword *offset)
+vcl_segment_alloc_chunk (uword segment_handle, u32 slice_index, u32 size, uword *offset)
 {
   svm_fifo_chunk_t *c;
   fifo_segment_t *fs;
@@ -906,25 +897,23 @@ vcl_format_accepted_session (u8 *s, va_list *args)
   if (listener_session->session_type == VPPCOM_PROTO_QUIC &&
       !vcl_session_is_connectable_listener (wrk, client_session))
     {
-      s =
-	format (s, "stream %u [0x%llx] connection %u [0x%llx]",
-		client_session->session_index, client_session->vpp_handle,
-		listener_session->session_index, listener_session->vpp_handle);
+      s = format (s, "stream %u [0x%llx] connection %u [0x%llx]", client_session->session_index,
+		  client_session->vpp_handle, listener_session->session_index,
+		  listener_session->vpp_handle);
     }
   else
     {
-      s = format (
-	s,
-	"session %u [0x%llx] peer: %U:%u local: %U:%u listener %u "
-	"[0x%llx] ",
-	client_session->session_index, client_session->vpp_handle,
-	vcl_format_ip46_address, &client_session->transport.rmt_ip,
-	client_session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
-	clib_net_to_host_u16 (client_session->transport.rmt_port),
-	vcl_format_ip46_address, &client_session->transport.lcl_ip,
-	client_session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
-	clib_net_to_host_u16 (client_session->transport.lcl_port),
-	listener_session->session_index, listener_session->vpp_handle);
+      s = format (s,
+		  "session %u [0x%llx] peer: %U:%u local: %U:%u listener %u "
+		  "[0x%llx] ",
+		  client_session->session_index, client_session->vpp_handle,
+		  vcl_format_ip46_address, &client_session->transport.rmt_ip,
+		  client_session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
+		  clib_net_to_host_u16 (client_session->transport.rmt_port),
+		  vcl_format_ip46_address, &client_session->transport.lcl_ip,
+		  client_session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
+		  clib_net_to_host_u16 (client_session->transport.lcl_port),
+		  listener_session->session_index, listener_session->vpp_handle);
     }
 
   return s;
@@ -938,17 +927,15 @@ vcl_format_connected_session (u8 *s, va_list *args)
   if (session->session_type == VPPCOM_PROTO_QUIC &&
       session->parent_handle != SESSION_INVALID_HANDLE)
     {
-      s = format (s, "stream %u [0x%llx]", session->session_index,
-		  session->vpp_handle);
+      s = format (s, "stream %u [0x%llx]", session->session_index, session->vpp_handle);
     }
   else
     {
-      s = format (s, "session %u [0x%llx] local: %U:%u remote %U:%u",
-		  session->session_index, session->vpp_handle,
-		  vcl_format_ip46_address, &session->transport.lcl_ip,
+      s = format (s, "session %u [0x%llx] local: %U:%u remote %U:%u", session->session_index,
+		  session->vpp_handle, vcl_format_ip46_address, &session->transport.lcl_ip,
 		  session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
-		  clib_net_to_host_u16 (session->transport.lcl_port),
-		  vcl_format_ip46_address, &session->transport.rmt_ip,
+		  clib_net_to_host_u16 (session->transport.lcl_port), vcl_format_ip46_address,
+		  &session->transport.rmt_ip,
 		  session->transport.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6,
 		  clib_net_to_host_u16 (session->transport.rmt_port));
     }
@@ -963,16 +950,14 @@ vcl_heap_alloc (void)
   void *vcl_mem;
   void *heap;
 
-  vcl_mem = mmap (0, vcl_cfg->heapsize, PROT_READ | PROT_WRITE,
-		  MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+  vcl_mem = mmap (0, vcl_cfg->heapsize, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
   if (vcl_mem == MAP_FAILED)
     {
       VDBG (0,
 	    "ERROR: mmap(0, %lu == 0x%lx, "
 	    "PROT_READ | PROT_WRITE,MAP_SHARED | MAP_ANONYMOUS, "
 	    "-1, 0) failed!",
-	    (unsigned long) vcl_cfg->heapsize,
-	    (unsigned long) vcl_cfg->heapsize);
+	    (unsigned long) vcl_cfg->heapsize, (unsigned long) vcl_cfg->heapsize);
       ASSERT (vcl_mem != MAP_FAILED);
       return;
     }
@@ -996,6 +981,5 @@ vcl_heap_alloc (void)
 
   if (vcm->debug > 0)
     fprintf (stderr, "allocated VCL heap = %p, size %lu (0x%lx)\n", heap,
-	     (unsigned long) vcl_cfg->heapsize,
-	     (unsigned long) vcl_cfg->heapsize);
+	     (unsigned long) vcl_cfg->heapsize, (unsigned long) vcl_cfg->heapsize);
 }

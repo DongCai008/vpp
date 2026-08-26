@@ -178,7 +178,9 @@ endif()
 # sanitizers
 ##############################################################################
 
-option(VPP_ENABLE_SANITIZE_ADDR "Enable Address Sanitizer" OFF)
+# Keep all linked unit-test and test-plugin builds memory safe by default.
+# Production packaging can still opt out explicitly with -DVPP_ENABLE_SANITIZE_ADDR=OFF.
+option(VPP_ENABLE_SANITIZE_ADDR "Enable Address Sanitizer" ON)
 set(VPP_SANITIZE_ADDR_OPTIONS
   "unmap_shadow_on_exit=1:disable_coredump=0:abort_on_error=1:detect_leaks=0"
   CACHE

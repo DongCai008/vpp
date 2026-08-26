@@ -11,19 +11,19 @@
 #include <poll.h>
 
 static inline svm_msg_q_ring_t *
-svm_msg_q_ring_inline (svm_msg_q_t * mq, u32 ring_index)
+svm_msg_q_ring_inline (svm_msg_q_t *mq, u32 ring_index)
 {
   return vec_elt_at_index (mq->rings, ring_index);
 }
 
 svm_msg_q_ring_t *
-svm_msg_q_ring (svm_msg_q_t * mq, u32 ring_index)
+svm_msg_q_ring (svm_msg_q_t *mq, u32 ring_index)
 {
   return svm_msg_q_ring_inline (mq, ring_index);
 }
 
 static inline void *
-svm_msg_q_ring_data (svm_msg_q_ring_t * ring, u32 elt_index)
+svm_msg_q_ring_data (svm_msg_q_ring_t *ring, u32 elt_index)
 {
   ASSERT (elt_index < ring->nitems);
   return (ring->shr->data + elt_index * ring->elsize);
@@ -109,8 +109,7 @@ svm_msg_q_size_to_alloc (svm_msg_q_cfg_t *cfg)
       rings_sz += (uword) ring_cfg->nitems * ring_cfg->elsize;
     }
 
-  q_sz = sizeof (svm_msg_q_shared_queue_t) +
-	 cfg->q_nitems * sizeof (svm_msg_q_msg_t);
+  q_sz = sizeof (svm_msg_q_shared_queue_t) + cfg->q_nitems * sizeof (svm_msg_q_msg_t);
   mq_sz = sizeof (svm_msg_q_shared_t) + q_sz + rings_sz;
 
   return mq_sz;
@@ -142,8 +141,7 @@ svm_msg_q_attach (svm_msg_q_t *mq, void *smq_base)
   mq->q.evtfd = -1;
   n_rings = smq->n_rings;
   vec_validate (mq->rings, n_rings - 1);
-  q_sz = sizeof (svm_msg_q_shared_queue_t) +
-	 mq->q.shr->maxsize * sizeof (svm_msg_q_msg_t);
+  q_sz = sizeof (svm_msg_q_shared_queue_t) + mq->q.shr->maxsize * sizeof (svm_msg_q_msg_t);
   ring = (void *) ((u8 *) smq->q + q_sz);
   for (i = 0; i < n_rings; i++)
     {
@@ -166,49 +164,59 @@ svm_msg_q_cleanup (svm_msg_q_t *mq)
 }
 
 void
-svm_msg_q_free (svm_msg_q_t * mq)
+svm_msg_q_free (svm_msg_q_t *mq)
 {
+  svm_msg_q_shared_t *smq;
+
+  /* svm_msg_q_attach() exposes the shared queue member, rather than the
+   * enclosing allocation returned by svm_msg_q_alloc(). */
+  smq = (svm_msg_q_shared_t *) ((u8 *) mq->q.shr - STRUCT_OFFSET_OF (svm_msg_q_shared_t, q));
   svm_msg_q_cleanup (mq);
-  clib_mem_free (mq->q.shr);
+  clib_mem_free (smq);
   clib_mem_free (mq);
 }
 
-static void
+static int
 svm_msg_q_send_signal (svm_msg_q_t *mq, u8 is_consumer)
 {
+  int rv;
+
   if (mq->q.evtfd == -1)
     {
       if (is_consumer)
 	{
-	  int rv = pthread_mutex_lock (&mq->q.shr->mutex);
+	  rv = pthread_mutex_lock (&mq->q.shr->mutex);
 	  if (PREDICT_FALSE (rv == EOWNERDEAD))
 	    {
-	      rv = pthread_mutex_consistent (&mq->q.shr->mutex);
-	      return;
+	      (void) svm_msg_q_observability_owner_dead (mq);
+	      pthread_mutex_unlock (&mq->q.shr->mutex);
+	      return -1;
 	    }
 	}
 
-      (void) pthread_cond_broadcast (&mq->q.shr->condvar);
+      rv = pthread_cond_broadcast (&mq->q.shr->condvar);
 
       if (is_consumer)
 	pthread_mutex_unlock (&mq->q.shr->mutex);
+      return rv ? -1 : 0;
     }
   else
     {
-      int __clib_unused rv;
       u64 data = 1;
 
       if (mq->q.evtfd < 0)
-	return;
+	return 0;
 
       rv = write (mq->q.evtfd, &data, sizeof (data));
       if (PREDICT_FALSE (rv < 0))
-	clib_unix_warning ("signal write on %d returned %d", mq->q.evtfd, rv);
+	return -1;
     }
+
+  return 0;
 }
 
 svm_msg_q_msg_t
-svm_msg_q_alloc_msg_w_ring (svm_msg_q_t * mq, u32 ring_index)
+svm_msg_q_alloc_msg_w_ring (svm_msg_q_t *mq, u32 ring_index)
 {
   svm_msg_q_ring_shared_t *sr;
   svm_msg_q_ring_t *ring;
@@ -226,8 +234,8 @@ svm_msg_q_alloc_msg_w_ring (svm_msg_q_t * mq, u32 ring_index)
 }
 
 int
-svm_msg_q_lock_and_alloc_msg_w_ring (svm_msg_q_t * mq, u32 ring_index,
-				     u8 noblock, svm_msg_q_msg_t * msg)
+svm_msg_q_lock_and_alloc_msg_w_ring (svm_msg_q_t *mq, u32 ring_index, u8 noblock,
+				     svm_msg_q_msg_t *msg)
 {
   if (noblock)
     {
@@ -250,36 +258,198 @@ svm_msg_q_lock_and_alloc_msg_w_ring (svm_msg_q_t * mq, u32 ring_index,
   return 0;
 }
 
-svm_msg_q_msg_t
-svm_msg_q_alloc_msg (svm_msg_q_t * mq, u32 nbytes)
+svm_msg_q_observability_reservation_result_t
+svm_msg_q_observability_try_reserve_commit (svm_msg_q_t *mq, u32 ring_index,
+					    svm_msg_q_observability_ticket_t *ticket,
+					    const void *event, u32 event_bytes,
+					    svm_msg_q_msg_t *msg)
 {
-  svm_msg_q_msg_t msg = {.as_u64 = ~0 };
+  int rv;
+  svm_msg_q_ring_t *ring;
+  svm_msg_q_ring_shared_t *sr;
+  u32 expected;
+  u8 notify_deferred = 0;
+
+  if (!mq || !event || !msg || !ticket || !ticket->state || !ticket->cancellation ||
+      !ticket->ring_index || !ticket->ring_element_index || !ticket->descriptor_element_index ||
+      ring_index >= vec_len (mq->rings))
+    return SVM_MSG_Q_OBSERVABILITY_STALE;
+  if (svm_msg_q_observability_is_broken (mq))
+    return SVM_MSG_Q_OBSERVABILITY_BROKEN;
+
+  if (mq->q.evtfd == -1)
+    {
+      rv = pthread_mutex_trylock (&mq->q.shr->mutex);
+      if (rv == EOWNERDEAD)
+	{
+	  /* An owner died while mutating the shared descriptor/ring state.  Its
+	   * outcome cannot be reconstructed, so this attachment queue is never
+	   * recovered in place or reused. */
+	  (void) svm_msg_q_observability_owner_dead (mq);
+	  clib_atomic_store_rel_n (ticket->cancellation, 1);
+	  clib_atomic_store_rel_n (ticket->state, SVM_MSG_Q_OBSERVABILITY_TICKET_OWNER_DEAD);
+	  pthread_mutex_unlock (&mq->q.shr->mutex);
+	  return SVM_MSG_Q_OBSERVABILITY_OWNER_DEAD;
+	}
+      if (rv)
+	return SVM_MSG_Q_OBSERVABILITY_BUSY;
+    }
+  else if (!clib_spinlock_trylock (&mq->q.lock))
+    return SVM_MSG_Q_OBSERVABILITY_BUSY;
+
+  if (svm_msg_q_observability_is_broken (mq))
+    {
+      svm_msg_q_unlock (mq);
+      return SVM_MSG_Q_OBSERVABILITY_BROKEN;
+    }
+  if (mq->q.observability_notify_deferred)
+    {
+      notify_deferred = svm_msg_q_send_signal (mq, 0 /* is consumer */) != 0;
+      if (!notify_deferred)
+	mq->q.observability_notify_deferred = 0;
+    }
+
+  if (PREDICT_FALSE (svm_msg_q_is_full (mq)))
+    {
+      svm_msg_q_unlock (mq);
+      return SVM_MSG_Q_OBSERVABILITY_DESCRIPTOR_FULL;
+    }
+  if (PREDICT_FALSE (svm_msg_q_ring_is_full (mq, ring_index)))
+    {
+      svm_msg_q_unlock (mq);
+      return SVM_MSG_Q_OBSERVABILITY_RING_FULL;
+    }
+
+  ring = svm_msg_q_ring_inline (mq, ring_index);
+  sr = ring->shr;
+  if (PREDICT_FALSE (event_bytes != ring->elsize))
+    {
+      svm_msg_q_unlock (mq);
+      return SVM_MSG_Q_OBSERVABILITY_STALE;
+    }
+
+  if (clib_atomic_load_acq_n (ticket->cancellation) ||
+      clib_atomic_load_acq_n (ticket->state) != SVM_MSG_Q_OBSERVABILITY_TICKET_LOCAL_RESERVED)
+    {
+      svm_msg_q_unlock (mq);
+      return SVM_MSG_Q_OBSERVABILITY_CANCELLED;
+    }
+
+  expected = SVM_MSG_Q_OBSERVABILITY_TICKET_LOCAL_RESERVED;
+  if (!clib_atomic_cmp_and_swap_acq_relax_n (ticket->state, &expected,
+					     SVM_MSG_Q_OBSERVABILITY_TICKET_COMMITTING, 0))
+    {
+      svm_msg_q_unlock (mq);
+      return expected == SVM_MSG_Q_OBSERVABILITY_TICKET_CANCELLED ?
+	       SVM_MSG_Q_OBSERVABILITY_CANCELLED :
+	       SVM_MSG_Q_OBSERVABILITY_STALE;
+    }
+  if (clib_atomic_load_acq_n (ticket->cancellation))
+    {
+      clib_atomic_store_rel_n (ticket->state, SVM_MSG_Q_OBSERVABILITY_TICKET_CANCELLED);
+      svm_msg_q_unlock (mq);
+      return SVM_MSG_Q_OBSERVABILITY_CANCELLED;
+    }
+
+  *msg = svm_msg_q_alloc_msg_w_ring (mq, ring_index);
+  *ticket->ring_index = msg->ring_index;
+  *ticket->ring_element_index = msg->elt_index;
+  clib_memcpy_fast (svm_msg_q_msg_data (mq, msg), event, event_bytes);
+
+  if (clib_atomic_load_acq_n (ticket->cancellation))
+    {
+      sr->tail = (sr->tail + ring->nitems - 1) % ring->nitems;
+      clib_atomic_fetch_sub_rel (&sr->cursize, 1);
+      *ticket->ring_index = 0;
+      *ticket->ring_element_index = 0;
+      *ticket->descriptor_element_index = 0;
+      clib_atomic_store_rel_n (ticket->state, SVM_MSG_Q_OBSERVABILITY_TICKET_CANCELLED);
+      svm_msg_q_unlock (mq);
+      return SVM_MSG_Q_OBSERVABILITY_CANCELLED;
+    }
+
+  clib_atomic_store_rel_n (ticket->state, SVM_MSG_Q_OBSERVABILITY_TICKET_QUEUED);
+  *ticket->descriptor_element_index = mq->q.shr->tail;
+  rv = svm_msg_q_add_raw (mq, msg);
+  svm_msg_q_unlock (mq);
+  if (rv || notify_deferred)
+    {
+      mq->q.observability_notify_deferred = 1;
+      return SVM_MSG_Q_OBSERVABILITY_COMMITTED_NOTIFY_DEFERRED;
+    }
+  return SVM_MSG_Q_OBSERVABILITY_COMMITTED_NOTIFIED;
+}
+
+int
+svm_msg_q_observability_cancel (svm_msg_q_observability_ticket_t *ticket)
+{
+  u32 expected;
+
+  if (!ticket || !ticket->state || !ticket->cancellation)
+    return -1;
+  expected = SVM_MSG_Q_OBSERVABILITY_TICKET_LOCAL_RESERVED;
+  if (clib_atomic_cmp_and_swap_acq_relax_n (ticket->state, &expected,
+					    SVM_MSG_Q_OBSERVABILITY_TICKET_CANCELLED, 0))
+    {
+      clib_atomic_store_rel_n (ticket->cancellation, 1);
+      return 1;
+    }
+  if (expected == SVM_MSG_Q_OBSERVABILITY_TICKET_COMMITTING ||
+      expected == SVM_MSG_Q_OBSERVABILITY_TICKET_QUEUED)
+    {
+      clib_atomic_store_rel_n (ticket->cancellation, 1);
+      return 0;
+    }
+  return -1;
+}
+
+int
+svm_msg_q_observability_consume (svm_msg_q_observability_ticket_t *ticket)
+{
+  u32 expected;
+
+  if (!ticket || !ticket->state || !ticket->cancellation)
+    return -1;
+  expected = SVM_MSG_Q_OBSERVABILITY_TICKET_QUEUED;
+  if (!clib_atomic_cmp_and_swap_acq_relax_n (ticket->state, &expected,
+					     SVM_MSG_Q_OBSERVABILITY_TICKET_DRAINING, 0))
+    return -1;
+  expected = 0;
+  if (!clib_atomic_cmp_and_swap_acq_relax_n (ticket->cancellation, &expected, 3, 0))
+    return 0;
+  return 1;
+}
+
+svm_msg_q_msg_t
+svm_msg_q_alloc_msg (svm_msg_q_t *mq, u32 nbytes)
+{
+  svm_msg_q_msg_t msg = { .as_u64 = ~0 };
   svm_msg_q_ring_shared_t *sr;
   svm_msg_q_ring_t *ring;
 
   vec_foreach (ring, mq->rings)
-  {
-    sr = ring->shr;
-    if (ring->elsize < nbytes || sr->cursize == ring->nitems)
-      continue;
-    msg.ring_index = ring - mq->rings;
-    msg.elt_index = sr->tail;
-    sr->tail = (sr->tail + 1) % ring->nitems;
-    clib_atomic_fetch_add_relax (&sr->cursize, 1);
-    break;
-  }
+    {
+      sr = ring->shr;
+      if (ring->elsize < nbytes || sr->cursize == ring->nitems)
+	continue;
+      msg.ring_index = ring - mq->rings;
+      msg.elt_index = sr->tail;
+      sr->tail = (sr->tail + 1) % ring->nitems;
+      clib_atomic_fetch_add_relax (&sr->cursize, 1);
+      break;
+    }
   return msg;
 }
 
 void *
-svm_msg_q_msg_data (svm_msg_q_t * mq, svm_msg_q_msg_t * msg)
+svm_msg_q_msg_data (svm_msg_q_t *mq, svm_msg_q_msg_t *msg)
 {
   svm_msg_q_ring_t *ring = svm_msg_q_ring_inline (mq, msg->ring_index);
   return svm_msg_q_ring_data (ring, msg->elt_index);
 }
 
 void
-svm_msg_q_free_msg (svm_msg_q_t * mq, svm_msg_q_msg_t * msg)
+svm_msg_q_free_msg (svm_msg_q_t *mq, svm_msg_q_msg_t *msg)
 {
   svm_msg_q_ring_shared_t *sr;
   svm_msg_q_ring_t *ring;
@@ -294,8 +464,8 @@ svm_msg_q_free_msg (svm_msg_q_t * mq, svm_msg_q_msg_t * msg)
     }
   else
     {
-      clib_warning ("message out of order: elt %u head %u ring %u",
-		    msg->elt_index, sr->head, msg->ring_index);
+      clib_warning ("message out of order: elt %u head %u ring %u", msg->elt_index, sr->head,
+		    msg->ring_index);
       /* for now, expect messages to be processed in order */
       ASSERT (0);
     }
@@ -308,7 +478,7 @@ svm_msg_q_free_msg (svm_msg_q_t * mq, svm_msg_q_msg_t * msg)
 }
 
 static int
-svm_msq_q_msg_is_valid (svm_msg_q_t * mq, svm_msg_q_msg_t * msg)
+svm_msq_q_msg_is_valid (svm_msg_q_t *mq, svm_msg_q_msg_t *msg)
 {
   u32 dist1, dist2, tail, head;
   svm_msg_q_ring_shared_t *sr;
@@ -330,7 +500,7 @@ svm_msq_q_msg_is_valid (svm_msg_q_t * mq, svm_msg_q_msg_t * msg)
   return (dist1 < dist2);
 }
 
-void
+int
 svm_msg_q_add_raw (svm_msg_q_t *mq, svm_msg_q_msg_t *msg)
 {
   svm_msg_q_shared_queue_t *sq = mq->q.shr;
@@ -344,11 +514,12 @@ svm_msg_q_add_raw (svm_msg_q_t *mq, svm_msg_q_msg_t *msg)
 
   sz = clib_atomic_fetch_add_rel (&sq->cursize, 1);
   if (!sz)
-    svm_msg_q_send_signal (mq, 0 /* is consumer */);
+    return svm_msg_q_send_signal (mq, 0 /* is consumer */);
+  return 0;
 }
 
 int
-svm_msg_q_add (svm_msg_q_t * mq, svm_msg_q_msg_t * msg, int nowait)
+svm_msg_q_add (svm_msg_q_t *mq, svm_msg_q_msg_t *msg, int nowait)
 {
   ASSERT (svm_msq_q_msg_is_valid (mq, msg));
 
@@ -379,7 +550,7 @@ svm_msg_q_add (svm_msg_q_t * mq, svm_msg_q_msg_t * msg, int nowait)
 }
 
 void
-svm_msg_q_add_and_unlock (svm_msg_q_t * mq, svm_msg_q_msg_t * msg)
+svm_msg_q_add_and_unlock (svm_msg_q_t *mq, svm_msg_q_msg_t *msg)
 {
   ASSERT (svm_msq_q_msg_is_valid (mq, msg));
   svm_msg_q_add_raw (mq, msg);
@@ -429,8 +600,7 @@ svm_msg_q_sub_raw_batch (svm_msg_q_t *mq, svm_msg_q_msg_t *msg_buf, u32 n_msgs)
     {
       u32 first_batch = sq->maxsize - sq->head;
       clib_memcpy_fast (msg_buf, headp, sq->elsize * first_batch);
-      clib_memcpy_fast (msg_buf + first_batch, sq->data,
-			sq->elsize * (to_deq - first_batch));
+      clib_memcpy_fast (msg_buf + first_batch, sq->data, sq->elsize * (to_deq - first_batch));
       sq->head = (sq->head + to_deq) % sq->maxsize;
     }
 
@@ -442,8 +612,7 @@ svm_msg_q_sub_raw_batch (svm_msg_q_t *mq, svm_msg_q_msg_t *msg_buf, u32 n_msgs)
 }
 
 int
-svm_msg_q_sub (svm_msg_q_t *mq, svm_msg_q_msg_t *msg,
-	       svm_q_conditional_wait_t cond, u32 time)
+svm_msg_q_sub (svm_msg_q_t *mq, svm_msg_q_msg_t *msg, svm_q_conditional_wait_t cond, u32 time)
 {
   int rc = 0;
 
@@ -460,7 +629,8 @@ svm_msg_q_sub (svm_msg_q_t *mq, svm_msg_q_msg_t *msg,
 	}
       else
 	{
-	  svm_msg_q_wait (mq, SVM_MQ_WAIT_EMPTY);
+	  if ((rc = svm_msg_q_wait (mq, SVM_MQ_WAIT_EMPTY)))
+	    return rc;
 	}
     }
 
@@ -498,12 +668,26 @@ svm_msg_q_wait (svm_msg_q_t *mq, svm_msg_q_wait_type_t type)
       rv = pthread_mutex_lock (&mq->q.shr->mutex);
       if (PREDICT_FALSE (rv == EOWNERDEAD))
 	{
-	  rv = pthread_mutex_consistent (&mq->q.shr->mutex);
-	  return rv;
+	  (void) svm_msg_q_observability_owner_dead (mq);
+	  pthread_mutex_unlock (&mq->q.shr->mutex);
+	  return EOWNERDEAD;
 	}
 
       while (fn (mq))
-	pthread_cond_wait (&mq->q.shr->condvar, &mq->q.shr->mutex);
+	{
+	  rv = pthread_cond_wait (&mq->q.shr->condvar, &mq->q.shr->mutex);
+	  if (PREDICT_FALSE (rv == EOWNERDEAD))
+	    {
+	      (void) svm_msg_q_observability_owner_dead (mq);
+	      pthread_mutex_unlock (&mq->q.shr->mutex);
+	      return EOWNERDEAD;
+	    }
+	  if (rv)
+	    {
+	      pthread_mutex_unlock (&mq->q.shr->mutex);
+	      return rv;
+	    }
+	}
 
       pthread_mutex_unlock (&mq->q.shr->mutex);
     }
@@ -598,8 +782,9 @@ svm_msg_q_timedwait (svm_msg_q_t *mq, double timeout)
       rv = pthread_mutex_lock (&sq->mutex);
       if (PREDICT_FALSE (rv == EOWNERDEAD))
 	{
-	  rv = pthread_mutex_consistent (&sq->mutex);
-	  return rv;
+	  (void) svm_msg_q_observability_owner_dead (mq);
+	  pthread_mutex_unlock (&sq->mutex);
+	  return EOWNERDEAD;
 	}
 
       /* check if we're still in a signalable state after grabbing lock */
@@ -614,6 +799,13 @@ svm_msg_q_timedwait (svm_msg_q_t *mq, double timeout)
       ts.tv_sec = (time_t) then;
       ts.tv_nsec = (then - (time_t) then) * 1e9;
       rv = pthread_cond_timedwait (&sq->condvar, &sq->mutex, &ts);
+
+      if (PREDICT_FALSE (rv == EOWNERDEAD))
+	{
+	  (void) svm_msg_q_observability_owner_dead (mq);
+	  pthread_mutex_unlock (&sq->mutex);
+	  return EOWNERDEAD;
+	}
 
       pthread_mutex_unlock (&sq->mutex);
       return rv;
@@ -647,14 +839,13 @@ svm_msg_q_timedwait (svm_msg_q_t *mq, double timeout)
 }
 
 u8 *
-format_svm_msg_q (u8 * s, va_list * args)
+format_svm_msg_q (u8 *s, va_list *args)
 {
   svm_msg_q_t *mq = va_arg (*args, svm_msg_q_t *);
   s = format (s, " [Q:%d/%d]", mq->q.shr->cursize, mq->q.shr->maxsize);
   for (u32 i = 0; i < vec_len (mq->rings); i++)
     {
-      s = format (s, " [R%d:%d/%d]", i, mq->rings[i].shr->cursize,
-		  mq->rings[i].nitems);
+      s = format (s, " [R%d:%d/%d]", i, mq->rings[i].shr->cursize, mq->rings[i].nitems);
     }
   return s;
 }

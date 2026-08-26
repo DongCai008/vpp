@@ -10,6 +10,7 @@
 #include <svm/message_queue.h>
 #include <vnet/session/application_crypto.h>
 #include <vnet/session/session_types.h>
+#include <vnet/session/session_observability.h>
 #include <svm/fifo_segment.h>
 
 typedef struct session_cb_vft_
@@ -21,46 +22,44 @@ typedef struct session_cb_vft_
   int (*del_segment_callback) (u32 app_wrk_index, u64 segment_handle);
 
   /** Notify server of newly accepted session */
-  int (*session_accept_callback) (session_t * new_session);
+  int (*session_accept_callback) (session_t *new_session);
 
   /** Connection request callback */
-  int (*session_connected_callback) (u32 app_wrk_index, u32 opaque,
-				     session_t * s, session_error_t code);
+  int (*session_connected_callback) (u32 app_wrk_index, u32 opaque, session_t *s,
+				     session_error_t code);
 
   /** Notify app that session is closing */
-  void (*session_disconnect_callback) (session_t * s);
+  void (*session_disconnect_callback) (session_t *s);
 
   /** Notify app that transport is closed */
-  void (*session_transport_closed_callback) (session_t * s);
+  void (*session_transport_closed_callback) (session_t *s);
 
   /** Notify app that session or transport are about to be removed */
-  void (*session_cleanup_callback) (session_t * s, session_cleanup_ntf_t ntf);
+  void (*session_cleanup_callback) (session_t *s, session_cleanup_ntf_t ntf);
 
   /** Notify app that half open state was cleaned up (optional) */
   void (*half_open_cleanup_callback) (session_t *s);
 
   /** Notify app that session was reset */
-  void (*session_reset_callback) (session_t * s);
+  void (*session_reset_callback) (session_t *s);
 
   /** Notify app that session pool migration happened */
-  void (*session_migrate_callback) (session_t * s, session_handle_t new_sh);
+  void (*session_migrate_callback) (session_t *s, session_handle_t new_sh);
 
   /** Notify app (external only) that listen was processed */
-  int (*session_listened_callback) (u32 app_wrk_index, u32 api_context,
-				    session_handle_t handle, int rv);
+  int (*session_listened_callback) (u32 app_wrk_index, u32 api_context, session_handle_t handle,
+				    int rv);
   /** Notify app (external only) that unlisten was processed */
-  void (*session_unlistened_callback) (u32 app_wrk_index, session_handle_t sh,
-				       u32 context, int rv);
+  void (*session_unlistened_callback) (u32 app_wrk_index, session_handle_t sh, u32 context, int rv);
 
   /** Direct RX callback for built-in application */
-  int (*builtin_app_rx_callback) (session_t * session);
+  int (*builtin_app_rx_callback) (session_t *session);
 
   /** Direct TX callback for built-in application */
-  int (*builtin_app_tx_callback) (session_t * session);
+  int (*builtin_app_tx_callback) (session_t *session);
 
   /** Delegate fifo-tuning-logic to application */
-  int (*fifo_tuning_callback) (session_t * s, svm_fifo_t * f,
-			       session_ft_action_t act, u32 bytes);
+  int (*fifo_tuning_callback) (session_t *s, svm_fifo_t *f, session_ft_action_t act, u32 bytes);
   /** Custom fifo allocation for proxy */
   int (*proxy_alloc_session_fifos) (session_t *s);
 
@@ -74,21 +73,21 @@ typedef struct session_cb_vft_
   int (*app_crypto_async) (app_crypto_async_req_t *req);
 } session_cb_vft_t;
 
-#define foreach_app_init_args			\
-  _(u32, api_client_index)			\
-  _(u8 *, name)					\
-  _(u64 *, options)				\
-  _(u8 *, namespace_id)				\
-  _(session_cb_vft_t *, session_cb_vft)		\
-  _(u32, app_index)				\
-  _(u8, use_sock_api)				\
+#define foreach_app_init_args                                                                      \
+  _ (u32, api_client_index)                                                                        \
+  _ (u8 *, name)                                                                                   \
+  _ (u64 *, options)                                                                               \
+  _ (u8 *, namespace_id)                                                                           \
+  _ (session_cb_vft_t *, session_cb_vft)                                                           \
+  _ (u32, app_index)                                                                               \
+  _ (u8, use_sock_api)
 
 typedef struct _vnet_app_attach_args_t
 {
 #define _(_type, _name) _type _name;
   foreach_app_init_args
 #undef _
-  ssvm_private_t * segment;
+    ssvm_private_t *segment;
   svm_msg_q_t *app_evt_q;
   u64 segment_handle;
 } vnet_app_attach_args_t;
@@ -124,8 +123,8 @@ typedef struct _vnet_unlisten_args_t
     char *uri;
     session_handle_t handle; /**< Session handle */
   };
-  u32 app_index;		/**< Owning application index */
-  u32 wrk_map_index;		/**< App's local pool worker index */
+  u32 app_index;     /**< Owning application index */
+  u32 wrk_map_index; /**< App's local pool worker index */
 } vnet_unlisten_args_t;
 
 typedef struct _vnet_connect_args
@@ -221,18 +220,19 @@ typedef enum _app_options_flags
 #undef _
 } app_options_flags_t;
 
-#define foreach_fd_type						\
-  _(VPP_MQ_SEGMENT, "Fd for vpp's event mq segment")		\
-  _(MEMFD_SEGMENT, "Fd for memfd segment")			\
-  _(MQ_EVENTFD, "Event fd used by message queue")		\
-  _(VPP_MQ_EVENTFD, "Event fd used by vpp's message queue")	\
+#define foreach_fd_type                                                                            \
+  _ (VPP_MQ_SEGMENT, "Fd for vpp's event mq segment")                                              \
+  _ (MEMFD_SEGMENT, "Fd for memfd segment")                                                        \
+  _ (MQ_EVENTFD, "Event fd used by message queue")                                                 \
+  _ (VPP_MQ_EVENTFD, "Event fd used by vpp's message queue")                                       \
+  _ (OBSERVABILITY_ATTACHMENT, "Sealed observability attachment memfd")
 
 typedef enum session_fd_type_
 {
 #define _(sym, str) SESSION_FD_##sym,
   foreach_fd_type
 #undef _
-  SESSION_N_FD_TYPE
+    SESSION_N_FD_TYPE
 } session_fd_type_t;
 
 typedef enum session_fd_flag_
@@ -258,28 +258,28 @@ session_error_t vnet_unlisten (vnet_unlisten_args_t *a);
 session_error_t vnet_shutdown_session (vnet_shutdown_args_t *a);
 session_error_t vnet_disconnect_session (vnet_disconnect_args_t *a);
 
-int vnet_app_add_cert_key_pair (vnet_app_add_cert_key_pair_args_t * a);
+int vnet_app_add_cert_key_pair (vnet_app_add_cert_key_pair_args_t *a);
 int vnet_app_del_cert_key_pair (u32 index);
 
 uword unformat_vnet_uri (unformat_input_t *input, va_list *args);
 
 typedef struct app_session_transport_
 {
-  ip46_address_t rmt_ip;	/**< remote ip */
-  ip46_address_t lcl_ip;	/**< local ip */
-  u16 rmt_port;			/**< remote port (network order) */
-  u16 lcl_port;			/**< local port (network order) */
-  u8 is_ip4;			/**< set if uses ip4 networking */
+  ip46_address_t rmt_ip; /**< remote ip */
+  ip46_address_t lcl_ip; /**< local ip */
+  u16 rmt_port;		 /**< remote port (network order) */
+  u16 lcl_port;		 /**< local port (network order) */
+  u8 is_ip4;		 /**< set if uses ip4 networking */
 } app_session_transport_t;
 
-#define foreach_app_session_field                                             \
-  _ (svm_fifo_t, *rx_fifo)		 /**< rx fifo */                      \
-  _ (svm_fifo_t, *tx_fifo)		 /**< tx fifo */                      \
-  _ (session_type_t, session_type)	 /**< session type */                 \
-  _ (volatile u8, session_state)	 /**< session state */                \
-  _ (u32, session_index)		 /**< index in owning pool */         \
-  _ (app_session_transport_t, transport) /**< transport info */               \
-  _ (svm_msg_q_t, *vpp_evt_q)		 /**< vpp event queue  */             \
+#define foreach_app_session_field                                                                  \
+  _ (svm_fifo_t, *rx_fifo)		 /**< rx fifo */                                           \
+  _ (svm_fifo_t, *tx_fifo)		 /**< tx fifo */                                           \
+  _ (session_type_t, session_type)	 /**< session type */                                      \
+  _ (volatile u8, session_state)	 /**< session state */                                     \
+  _ (u32, session_index)		 /**< index in owning pool */                              \
+  _ (app_session_transport_t, transport) /**< transport info */                                    \
+  _ (svm_msg_q_t, *vpp_evt_q)		 /**< vpp event queue  */                                  \
   _ (u8, is_dgram)			 /**< flag for dgram mode */
 
 typedef struct
@@ -292,7 +292,7 @@ typedef struct
 typedef struct session_listen_msg_
 {
   u32 client_index;
-  u32 context;			/* Not needed but keeping it for compatibility with bapi */
+  u32 context; /* Not needed but keeping it for compatibility with bapi */
   u32 wrk_index;
   u32 vrf;
   u16 port;
@@ -304,8 +304,7 @@ typedef struct session_listen_msg_
   u8 dscp;
 } __clib_packed session_listen_msg_t;
 
-STATIC_ASSERT (sizeof (session_listen_msg_t) <= SESSION_CTRL_MSG_MAX_SIZE,
-	       "msg too large");
+STATIC_ASSERT (sizeof (session_listen_msg_t) <= SESSION_CTRL_MSG_MAX_SIZE, "msg too large");
 
 typedef struct session_listen_uri_msg_
 {
@@ -314,8 +313,7 @@ typedef struct session_listen_uri_msg_
   u8 uri[56];
 } __clib_packed session_listen_uri_msg_t;
 
-STATIC_ASSERT (sizeof (session_listen_uri_msg_t) <= SESSION_CTRL_MSG_MAX_SIZE,
-	       "msg too large");
+STATIC_ASSERT (sizeof (session_listen_uri_msg_t) <= SESSION_CTRL_MSG_MAX_SIZE, "msg too large");
 
 typedef struct session_bound_msg_
 {
@@ -394,8 +392,7 @@ typedef struct session_connect_msg_
   uword ext_config;
 } __clib_packed session_connect_msg_t;
 
-STATIC_ASSERT (sizeof (session_connect_msg_t) <= SESSION_CTRL_MSG_MAX_SIZE,
-	       "msg too large");
+STATIC_ASSERT (sizeof (session_connect_msg_t) <= SESSION_CTRL_MSG_MAX_SIZE, "msg too large");
 
 typedef struct session_connect_uri_msg_
 {
@@ -404,8 +401,7 @@ typedef struct session_connect_uri_msg_
   u8 uri[56];
 } __clib_packed session_connect_uri_msg_t;
 
-STATIC_ASSERT (sizeof (session_connect_uri_msg_t) <=
-	       SESSION_CTRL_MSG_MAX_SIZE, "msg too large");
+STATIC_ASSERT (sizeof (session_connect_uri_msg_t) <= SESSION_CTRL_MSG_MAX_SIZE, "msg too large");
 
 typedef struct session_connected_msg_
 {
@@ -534,9 +530,9 @@ typedef struct session_cleanup_msg_
 
 typedef struct session_app_wrk_rpc_msg_
 {
-  u32 client_index;	/**< app client index */
-  u32 wrk_index;	/**< dst worker index */
-  u8 data[64];		/**< rpc data */
+  u32 client_index; /**< app client index */
+  u32 wrk_index;    /**< dst worker index */
+  u8 data[64];	    /**< rpc data */
 } __clib_packed session_app_wrk_rpc_msg_t;
 
 typedef struct session_transport_attr_msg_
@@ -562,19 +558,16 @@ typedef struct app_session_event_
 } __clib_packed app_session_evt_t;
 
 static inline void
-app_alloc_ctrl_evt_to_vpp (svm_msg_q_t * mq, app_session_evt_t * app_evt,
-			   u8 evt_type)
+app_alloc_ctrl_evt_to_vpp (svm_msg_q_t *mq, app_session_evt_t *app_evt, u8 evt_type)
 {
-  svm_msg_q_lock_and_alloc_msg_w_ring (mq,
-				       SESSION_MQ_CTRL_EVT_RING,
-				       SVM_Q_WAIT, &app_evt->msg);
+  svm_msg_q_lock_and_alloc_msg_w_ring (mq, SESSION_MQ_CTRL_EVT_RING, SVM_Q_WAIT, &app_evt->msg);
   app_evt->evt = svm_msg_q_msg_data (mq, &app_evt->msg);
   clib_memset (app_evt->evt, 0, sizeof (*app_evt->evt));
   app_evt->evt->event_type = evt_type;
 }
 
 static inline void
-app_send_ctrl_evt_to_vpp (svm_msg_q_t * mq, app_session_evt_t * app_evt)
+app_send_ctrl_evt_to_vpp (svm_msg_q_t *mq, app_session_evt_t *app_evt)
 {
   svm_msg_q_add_and_unlock (mq, &app_evt->msg);
 }
@@ -592,8 +585,7 @@ app_send_ctrl_evt_to_vpp (svm_msg_q_t * mq, app_session_evt_t * app_evt)
  * @return		0 if success, negative integer otherwise
  */
 static inline int
-app_send_io_evt_to_vpp (svm_msg_q_t * mq, u32 session_index, u8 evt_type,
-			u8 noblock)
+app_send_io_evt_to_vpp (svm_msg_q_t *mq, u32 session_index, u8 evt_type, u8 noblock)
 {
   session_event_t *evt;
   svm_msg_q_msg_t msg;
@@ -602,8 +594,7 @@ app_send_io_evt_to_vpp (svm_msg_q_t * mq, u32 session_index, u8 evt_type,
     {
       if (svm_msg_q_try_lock (mq))
 	return -1;
-      if (PREDICT_FALSE (
-	    svm_msg_q_or_ring_is_full (mq, SESSION_MQ_IO_EVT_RING)))
+      if (PREDICT_FALSE (svm_msg_q_or_ring_is_full (mq, SESSION_MQ_IO_EVT_RING)))
 	{
 	  svm_msg_q_unlock (mq);
 	  return -2;
@@ -632,8 +623,7 @@ app_send_io_evt_to_vpp (svm_msg_q_t * mq, u32 session_index, u8 evt_type,
 /* NOTE: Make sure the segs parameter has the first element of the array empty
 to write-in the header */
 always_inline u32
-app_gen_dgram_header (svm_fifo_seg_t *segs, u32 data_len,
-		      app_session_transport_t *at, u16 gso_size)
+app_gen_dgram_header (svm_fifo_seg_t *segs, u32 data_len, app_session_transport_t *at, u16 gso_size)
 {
   session_dgram_hdr_t *hdr = (session_dgram_hdr_t *) segs[0].data;
   u32 dgram_len = data_len;
@@ -656,9 +646,8 @@ app_gen_dgram_header (svm_fifo_seg_t *segs, u32 data_len,
 }
 
 always_inline int
-app_send_dgram_segs_raw (svm_fifo_t *f, app_session_transport_t *at,
-			 svm_msg_q_t *vpp_evt_q, svm_fifo_seg_t *segs,
-			 u32 nsegs, u32 seg_len, u8 evt_type, u8 do_evt,
+app_send_dgram_segs_raw (svm_fifo_t *f, app_session_transport_t *at, svm_msg_q_t *vpp_evt_q,
+			 svm_fifo_seg_t *segs, u32 nsegs, u32 seg_len, u8 evt_type, u8 do_evt,
 			 u8 noblock)
 {
   int rv;
@@ -673,40 +662,34 @@ app_send_dgram_segs_raw (svm_fifo_t *f, app_session_transport_t *at,
   if (do_evt)
     {
       if (svm_fifo_set_event (f))
-	app_send_io_evt_to_vpp (vpp_evt_q, f->vpp_session_index, evt_type,
-				noblock);
+	app_send_io_evt_to_vpp (vpp_evt_q, f->vpp_session_index, evt_type, noblock);
     }
   return seg_len - sizeof (session_dgram_hdr_t);
 }
 
 always_inline int
-app_send_dgram_raw_gso (svm_fifo_t *f, app_session_transport_t *at,
-			svm_msg_q_t *vpp_evt_q, u8 *data, u32 len,
-			u16 gso_size, u8 evt_type, u8 do_evt, u8 noblock)
+app_send_dgram_raw_gso (svm_fifo_t *f, app_session_transport_t *at, svm_msg_q_t *vpp_evt_q,
+			u8 *data, u32 len, u16 gso_size, u8 evt_type, u8 do_evt, u8 noblock)
 {
   session_dgram_hdr_t hdr;
   svm_fifo_seg_t segs[2] = { { (u8 *) &hdr, sizeof (hdr) }, { data, len } };
   u32 seg_len = app_gen_dgram_header (segs, len, at, gso_size);
-  return app_send_dgram_segs_raw (f, at, vpp_evt_q, segs, 2, seg_len, evt_type,
-				  do_evt, noblock);
+  return app_send_dgram_segs_raw (f, at, vpp_evt_q, segs, 2, seg_len, evt_type, do_evt, noblock);
 }
 
-#define app_send_dgram_raw(f, at, vpp_evt_q, data, len, evt_type, do_evt,     \
-			   noblock)                                           \
-  app_send_dgram_raw_gso (f, at, vpp_evt_q, data, len, 0, evt_type, do_evt,   \
-			  noblock)
+#define app_send_dgram_raw(f, at, vpp_evt_q, data, len, evt_type, do_evt, noblock)                 \
+  app_send_dgram_raw_gso (f, at, vpp_evt_q, data, len, 0, evt_type, do_evt, noblock)
 
 always_inline int
-app_send_dgram (app_session_t * s, u8 * data, u32 len, u8 noblock)
+app_send_dgram (app_session_t *s, u8 *data, u32 len, u8 noblock)
 {
-  return app_send_dgram_raw (s->tx_fifo, &s->transport, s->vpp_evt_q, data,
-			     len, SESSION_IO_EVT_TX, 1 /* do_evt */ ,
-			     noblock);
+  return app_send_dgram_raw (s->tx_fifo, &s->transport, s->vpp_evt_q, data, len, SESSION_IO_EVT_TX,
+			     1 /* do_evt */, noblock);
 }
 
 always_inline int
-app_send_dgram_segs (app_session_t *s, svm_fifo_seg_t *segs, u32 data_nsegs,
-		     u32 data_len, u8 noblock)
+app_send_dgram_segs (app_session_t *s, svm_fifo_seg_t *segs, u32 data_nsegs, u32 data_len,
+		     u8 noblock)
 {
   session_dgram_hdr_t hdr;
   ASSERT (segs != NULL);
@@ -715,14 +698,13 @@ app_send_dgram_segs (app_session_t *s, svm_fifo_seg_t *segs, u32 data_nsegs,
   segs[0].len = sizeof (hdr);
 
   u32 seg_len = app_gen_dgram_header (segs, data_len, &s->transport, 0);
-  return app_send_dgram_segs_raw (s->tx_fifo, &s->transport, s->vpp_evt_q,
-				  segs, data_nsegs + 1, seg_len,
-				  SESSION_IO_EVT_TX, 1 /* do_evt */, noblock);
+  return app_send_dgram_segs_raw (s->tx_fifo, &s->transport, s->vpp_evt_q, segs, data_nsegs + 1,
+				  seg_len, SESSION_IO_EVT_TX, 1 /* do_evt */, noblock);
 }
 
 always_inline int
-app_send_stream_raw (svm_fifo_t * f, svm_msg_q_t * vpp_evt_q, u8 * data,
-		     u32 len, u8 evt_type, u8 do_evt, u8 noblock)
+app_send_stream_raw (svm_fifo_t *f, svm_msg_q_t *vpp_evt_q, u8 *data, u32 len, u8 evt_type,
+		     u8 do_evt, u8 noblock)
 {
   int rv;
 
@@ -730,21 +712,20 @@ app_send_stream_raw (svm_fifo_t * f, svm_msg_q_t * vpp_evt_q, u8 * data,
   if (do_evt)
     {
       if (rv > 0 && svm_fifo_set_event (f))
-	app_send_io_evt_to_vpp (vpp_evt_q, f->vpp_session_index, evt_type,
-				noblock);
+	app_send_io_evt_to_vpp (vpp_evt_q, f->vpp_session_index, evt_type, noblock);
     }
   return rv;
 }
 
 always_inline int
-app_send_stream (app_session_t * s, u8 * data, u32 len, u8 noblock)
+app_send_stream (app_session_t *s, u8 *data, u32 len, u8 noblock)
 {
-  return app_send_stream_raw (s->tx_fifo, s->vpp_evt_q, data, len,
-			      SESSION_IO_EVT_TX, 1 /* do_evt */ , noblock);
+  return app_send_stream_raw (s->tx_fifo, s->vpp_evt_q, data, len, SESSION_IO_EVT_TX,
+			      1 /* do_evt */, noblock);
 }
 
 always_inline int
-app_send (app_session_t * s, u8 * data, u32 len, u8 noblock)
+app_send (app_session_t *s, u8 *data, u32 len, u8 noblock)
 {
   if (s->is_dgram)
     return app_send_dgram (s, data, len, noblock);
@@ -752,8 +733,8 @@ app_send (app_session_t * s, u8 * data, u32 len, u8 noblock)
 }
 
 always_inline int
-app_recv_dgram_raw (svm_fifo_t * f, u8 * buf, u32 len,
-		    app_session_transport_t * at, u8 clear_evt, u8 peek)
+app_recv_dgram_raw (svm_fifo_t *f, u8 *buf, u32 len, app_session_transport_t *at, u8 clear_evt,
+		    u8 peek)
 {
   session_dgram_pre_hdr_t ph;
   u32 max_deq;
@@ -766,7 +747,7 @@ app_recv_dgram_raw (svm_fifo_t * f, u8 * buf, u32 len,
   if (max_deq <= sizeof (session_dgram_hdr_t))
     return 0;
 
-  svm_fifo_peek (f, 0, sizeof (ph), (u8 *) & ph);
+  svm_fifo_peek (f, 0, sizeof (ph), (u8 *) &ph);
   ASSERT (ph.data_length >= ph.data_offset);
 
   /* Check if we have the full dgram */
@@ -786,13 +767,13 @@ app_recv_dgram_raw (svm_fifo_t * f, u8 * buf, u32 len,
 }
 
 always_inline int
-app_recv_dgram (app_session_t * s, u8 * buf, u32 len)
+app_recv_dgram (app_session_t *s, u8 *buf, u32 len)
 {
   return app_recv_dgram_raw (s->rx_fifo, buf, len, &s->transport, 1, 0);
 }
 
 always_inline int
-app_recv_stream_raw (svm_fifo_t * f, u8 * buf, u32 len, u8 clear_evt, u8 peek)
+app_recv_stream_raw (svm_fifo_t *f, u8 *buf, u32 len, u8 clear_evt, u8 peek)
 {
   if (clear_evt)
     svm_fifo_unset_event (f);
@@ -804,13 +785,13 @@ app_recv_stream_raw (svm_fifo_t * f, u8 * buf, u32 len, u8 clear_evt, u8 peek)
 }
 
 always_inline int
-app_recv_stream (app_session_t * s, u8 * buf, u32 len)
+app_recv_stream (app_session_t *s, u8 *buf, u32 len)
 {
   return app_recv_stream_raw (s->rx_fifo, buf, len, 1, 0);
 }
 
 always_inline int
-app_recv (app_session_t * s, u8 * data, u32 len)
+app_recv (app_session_t *s, u8 *data, u32 len)
 {
   if (s->is_dgram)
     return app_recv_dgram (s, data, len);
@@ -819,12 +800,12 @@ app_recv (app_session_t * s, u8 * data, u32 len)
 
 static char *session_error_str[] = {
 #define _(sym, str) str,
-    foreach_session_error
+  foreach_session_error
 #undef _
 };
 
 static inline u8 *
-format_session_error (u8 * s, va_list * args)
+format_session_error (u8 *s, va_list *args)
 {
   session_error_t error = va_arg (*args, session_error_t);
   if (-error >= 0 && -error < SESSION_N_ERRORS)
@@ -848,6 +829,16 @@ typedef enum app_sapi_msg_type
   APP_SAPI_MSG_TYPE_SEND_FDS,
   APP_SAPI_MSG_TYPE_ADD_DEL_CERT_KEY,
   APP_SAPI_MSG_TYPE_ADD_DEL_CERT_KEY_REPLY,
+  APP_SAPI_MSG_TYPE_ATTACH_V2,
+  APP_SAPI_MSG_TYPE_ATTACH_V2_REPLY,
+  APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_V2,
+  APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_V2_REPLY,
+  APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2,
+  APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2_REPLY,
+  APP_SAPI_MSG_TYPE_OBS_DETACH_V2,
+  APP_SAPI_MSG_TYPE_OBS_DETACH_V2_REPLY,
+  APP_SAPI_MSG_TYPE_OBS_DONE_V2,
+  APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY,
 } __clib_packed app_sapi_msg_type_e;
 
 typedef struct app_sapi_attach_msg_
@@ -857,7 +848,7 @@ typedef struct app_sapi_attach_msg_
 } __clib_packed app_sapi_attach_msg_t;
 
 STATIC_ASSERT (sizeof (u64) * APP_OPTIONS_N_OPTIONS <=
-	       sizeof (((app_sapi_attach_msg_t *) 0)->options),
+		 sizeof (((app_sapi_attach_msg_t *) 0)->options),
 	       "Out of options, fix message definition");
 
 typedef struct app_sapi_attach_reply_msg_
@@ -908,7 +899,49 @@ typedef struct app_sapi_cert_key_add_del_reply_msg_
   u32 index;
 } __clib_packed app_sapi_cert_key_add_del_reply_msg_t;
 
-typedef struct app_sapi_msg_
+typedef struct
+{
+  app_sapi_attach_msg_t base;
+  u16 abi;
+  u16 flags;
+} __clib_packed app_sapi_attach_v2_msg_t;
+
+typedef struct
+{
+  app_sapi_attach_reply_msg_t base;
+  u16 abi;
+  u32 association;
+  session_observability_descriptor_t descriptor;
+} __clib_packed app_sapi_attach_v2_reply_msg_t;
+
+typedef struct
+{
+  app_sapi_worker_add_del_msg_t base;
+  u16 abi;
+} __clib_packed app_sapi_worker_add_del_v2_msg_t;
+
+typedef struct
+{
+  app_sapi_worker_add_del_reply_msg_t base;
+  u16 abi;
+  u32 association;
+  session_observability_descriptor_t descriptor;
+} __clib_packed app_sapi_worker_add_del_v2_reply_msg_t;
+
+typedef struct
+{
+  u32 association;
+  session_observability_descriptor_t descriptor;
+} __clib_packed app_sapi_observability_control_v2_msg_t;
+
+typedef struct
+{
+  i32 retval;
+  u32 association;
+  session_observability_descriptor_t descriptor;
+} __clib_packed app_sapi_observability_control_v2_reply_msg_t;
+
+typedef struct app_sapi_legacy_msg_
 {
   app_sapi_msg_type_e type;
   union
@@ -920,7 +953,96 @@ typedef struct app_sapi_msg_
     app_sapi_cert_key_add_del_msg_t cert_key_add_del;
     app_sapi_cert_key_add_del_reply_msg_t cert_key_add_del_reply;
   };
+} __clib_packed app_sapi_legacy_msg_t;
+
+typedef struct app_sapi_msg_
+{
+  app_sapi_msg_type_e type;
+  union
+  {
+    app_sapi_attach_msg_t attach;
+    app_sapi_attach_reply_msg_t attach_reply;
+    app_sapi_worker_add_del_msg_t worker_add_del;
+    app_sapi_worker_add_del_reply_msg_t worker_add_del_reply;
+    app_sapi_cert_key_add_del_msg_t cert_key_add_del;
+    app_sapi_cert_key_add_del_reply_msg_t cert_key_add_del_reply;
+    app_sapi_attach_v2_msg_t attach_v2;
+    app_sapi_attach_v2_reply_msg_t attach_v2_reply;
+    app_sapi_worker_add_del_v2_msg_t worker_add_del_v2;
+    app_sapi_worker_add_del_v2_reply_msg_t worker_add_del_v2_reply;
+    app_sapi_observability_control_v2_msg_t observability_control_v2;
+    app_sapi_observability_control_v2_reply_msg_t observability_control_v2_reply;
+  };
 } __clib_packed app_sapi_msg_t;
+
+STATIC_ASSERT (sizeof (app_sapi_attach_v2_msg_t) == 212, "socket v2 attach request ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_attach_v2_reply_msg_t) == 109,
+	       "socket v2 attach reply ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_worker_add_del_v2_msg_t) == 11,
+	       "socket v2 worker request ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_worker_add_del_v2_reply_msg_t) == 101,
+	       "socket v2 worker reply ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_observability_control_v2_msg_t) == 68,
+	       "socket v2 control request ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_observability_control_v2_reply_msg_t) == 72,
+	       "socket v2 control reply ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_legacy_msg_t) == 209, "legacy socket ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_msg_t) == 213, "socket v2 fixed frame ABI changed");
+
+static inline int
+app_sapi_msg_v2_active_bytes (app_sapi_msg_type_e type)
+{
+  switch (type)
+    {
+    case APP_SAPI_MSG_TYPE_ATTACH:
+      return sizeof (app_sapi_attach_msg_t);
+    case APP_SAPI_MSG_TYPE_ATTACH_REPLY:
+      return sizeof (app_sapi_attach_reply_msg_t);
+    case APP_SAPI_MSG_TYPE_ADD_DEL_WORKER:
+      return sizeof (app_sapi_worker_add_del_msg_t);
+    case APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_REPLY:
+      return sizeof (app_sapi_worker_add_del_reply_msg_t);
+    case APP_SAPI_MSG_TYPE_SEND_FDS:
+      return 0;
+    case APP_SAPI_MSG_TYPE_ADD_DEL_CERT_KEY:
+      return sizeof (app_sapi_cert_key_add_del_msg_t);
+    case APP_SAPI_MSG_TYPE_ADD_DEL_CERT_KEY_REPLY:
+      return sizeof (app_sapi_cert_key_add_del_reply_msg_t);
+    case APP_SAPI_MSG_TYPE_ATTACH_V2:
+      return sizeof (app_sapi_attach_v2_msg_t);
+    case APP_SAPI_MSG_TYPE_ATTACH_V2_REPLY:
+      return sizeof (app_sapi_attach_v2_reply_msg_t);
+    case APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_V2:
+      return sizeof (app_sapi_worker_add_del_v2_msg_t);
+    case APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_V2_REPLY:
+      return sizeof (app_sapi_worker_add_del_v2_reply_msg_t);
+    case APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2:
+    case APP_SAPI_MSG_TYPE_OBS_DETACH_V2:
+    case APP_SAPI_MSG_TYPE_OBS_DONE_V2:
+      return sizeof (app_sapi_observability_control_v2_msg_t);
+    case APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2_REPLY:
+    case APP_SAPI_MSG_TYPE_OBS_DETACH_V2_REPLY:
+    case APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY:
+      return sizeof (app_sapi_observability_control_v2_reply_msg_t);
+    default:
+      return -1;
+    }
+}
+
+static inline int
+app_sapi_msg_v2_validate (const app_sapi_msg_t *msg)
+{
+  int active_bytes;
+  uword i;
+
+  active_bytes = app_sapi_msg_v2_active_bytes (msg->type);
+  if (active_bytes < 0)
+    return -1;
+  for (i = active_bytes; i < sizeof (msg->attach_v2); i++)
+    if (((const u8 *) &msg->attach_v2)[i])
+      return -1;
+  return 0;
+}
 
 static inline void
 session_endpoint_init_ext_cfgs (session_endpoint_cfg_t *sep_ext, u32 len)
@@ -931,20 +1053,17 @@ session_endpoint_init_ext_cfgs (session_endpoint_cfg_t *sep_ext, u32 len)
 }
 
 static inline transport_endpt_ext_cfg_t *
-session_endpoint_add_ext_cfg (session_endpoint_cfg_t *sep_ext,
-			      transport_endpt_ext_cfg_type_t type, u16 len)
+session_endpoint_add_ext_cfg (session_endpoint_cfg_t *sep_ext, transport_endpt_ext_cfg_type_t type,
+			      u16 len)
 {
   transport_endpt_ext_cfg_t *ext_cfg;
 
   if (!sep_ext->ext_cfgs.len)
-    session_endpoint_init_ext_cfgs (sep_ext,
-				    TRANSPORT_ENDPT_EXT_CFGS_CHUNK_SIZE);
+    session_endpoint_init_ext_cfgs (sep_ext, TRANSPORT_ENDPT_EXT_CFGS_CHUNK_SIZE);
 
-  ASSERT (sep_ext->ext_cfgs.tail_offset + len +
-	    TRANSPORT_ENDPT_EXT_CFG_HEADER_SIZE <
+  ASSERT (sep_ext->ext_cfgs.tail_offset + len + TRANSPORT_ENDPT_EXT_CFG_HEADER_SIZE <
 	  sep_ext->ext_cfgs.len);
-  ext_cfg = (transport_endpt_ext_cfg_t *) (sep_ext->ext_cfgs.data +
-					   sep_ext->ext_cfgs.tail_offset);
+  ext_cfg = (transport_endpt_ext_cfg_t *) (sep_ext->ext_cfgs.data + sep_ext->ext_cfgs.tail_offset);
   ext_cfg->len = len;
   ext_cfg->type = type;
   if (type == TRANSPORT_ENDPT_EXT_CFG_CRYPTO && len >= sizeof (transport_endpt_crypto_cfg_t))
@@ -954,8 +1073,7 @@ session_endpoint_add_ext_cfg (session_endpoint_cfg_t *sep_ext,
 }
 
 static inline transport_endpt_ext_cfg_t *
-session_endpoint_get_ext_cfg (session_endpoint_cfg_t *sep_ext,
-			      transport_endpt_ext_cfg_type_t type)
+session_endpoint_get_ext_cfg (session_endpoint_cfg_t *sep_ext, transport_endpt_ext_cfg_type_t type)
 {
   transport_endpt_ext_cfg_t *ext_cfg;
 
@@ -963,8 +1081,7 @@ session_endpoint_get_ext_cfg (session_endpoint_cfg_t *sep_ext,
     return 0;
 
   ext_cfg = (transport_endpt_ext_cfg_t *) sep_ext->ext_cfgs.data;
-  while ((u8 *) ext_cfg <
-	 sep_ext->ext_cfgs.data + sep_ext->ext_cfgs.tail_offset)
+  while ((u8 *) ext_cfg < sep_ext->ext_cfgs.data + sep_ext->ext_cfgs.tail_offset)
     {
       if (ext_cfg->type == type)
 	return ext_cfg;
