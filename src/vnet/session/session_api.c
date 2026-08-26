@@ -2847,6 +2847,15 @@ sapi_observability_request_handler (app_namespace_t *app_ns, clib_socket_t *cs, 
   if (!session || session->app_wrk_index != app_wrk_index ||
       session->observability_token_version != 1 || !session->observability_association_token)
     goto direct;
+  /* This is the prompt rejection path.  Dispatch repeats the lookup and
+   * insertion while holding the terminal-registry lock, so two concurrent
+   * attachment slots cannot both reach an owner VFT. */
+  if (is_terminal &&
+      session_observability_terminal_request_id_in_use (&attachment->owner, request->request_id))
+    {
+      result = SESSION_OBSERVABILITY_RESULT_DISPATCH_REJECTED;
+      goto direct;
+    }
   ticket = clib_atomic_fetch_add_rel (&attachment->segment->header.ticket_sequence_next, 1);
   if (!ticket)
     {
@@ -3102,6 +3111,29 @@ session_observability_test_socket_control (clib_socket_t *cs, app_sapi_msg_t *ms
 					   u32 app_wrk_index)
 {
   return sapi_observability_control_handler (cs, msg, app_wrk_index);
+}
+
+int
+session_observability_test_socket_request (clib_socket_t *cs, app_sapi_msg_t *msg,
+					   u32 app_wrk_index)
+{
+  app_worker_t *app_wrk = app_worker_get_if_valid (app_wrk_index);
+  application_t *app = app_wrk ? application_get (app_wrk->app_index) : 0;
+  app_namespace_t *app_ns = app ? app_namespace_get (app->ns_index) : 0;
+
+  if (!app_ns || !cs || !msg)
+    return -1;
+  switch (msg->type)
+    {
+    case APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2:
+      return sapi_observability_request_handler (app_ns, cs, msg, app_wrk_index, 1);
+    case APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2:
+      return sapi_observability_terminal_await_handler (app_ns, cs, msg, app_wrk_index);
+    case APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2:
+      return sapi_observability_terminal_cancel_handler (cs, msg, app_wrk_index);
+    default:
+      return -1;
+    }
 }
 
 void

@@ -328,6 +328,8 @@ typedef void (*session_observability_completion_fn_t) (void *context,
 
 int session_observability_terminal_complete (const session_observability_terminal_sink_t *sink,
 					     const session_observability_reply_t *reply);
+int session_observability_terminal_request_id_in_use (session_observability_owner_t *owner,
+						      u64 request_id);
 int session_observability_terminal_await (session_observability_owner_t *owner, u64 request_id,
 					  session_observability_completion_fn_t completion,
 					  void *completion_context);

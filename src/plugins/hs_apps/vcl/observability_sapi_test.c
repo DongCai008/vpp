@@ -459,6 +459,14 @@ observability_sapi_success (const char *socket_path)
   if (rv)
     goto fail;
   stage = 6;
+  /* A second arm must be rejected while the first terminal record is either
+   * pending or completed-but-unawaited; rotating VCL attachment slots must
+   * not create an unreachable second sink. */
+  rv = vppcom_session_observability_terminal_arm (client, 0x5031374231500001ULL,
+						  VPPCOM_OBSERVABILITY_TERMINAL, 0);
+  if (rv != VPPCOM_EINVAL)
+    goto fail;
+  stage = 7;
   rv = vppcom_session_observability_terminal_await (0x5031374231500001ULL, &reply);
   if (rv || reply.request_id != 0x5031374231500001ULL || reply.status != 1 ||
       reply.detail != SESSION_OBSERVABILITY_RESULT_OK || reply.reply_flags != 1 ||
@@ -466,12 +474,45 @@ observability_sapi_success (const char *socket_path)
       memcmp (reply.receipt, expected_terminal_receipt, sizeof (expected_terminal_receipt) - 1))
     goto fail;
 
-  /* The completed public operation consumed the sole socket completion. */
-  stage = 7;
+  /* Reusing an already consumed request ID creates a new terminal sink.  The
+   * fixture calls its opaque sink twice; exactly one reply may reach VCL. */
+  stage = 8;
+  rv = vppcom_session_observability_terminal_arm (client, 0x5031374231500001ULL,
+						  VPPCOM_OBSERVABILITY_TERMINAL, 0);
+  if (rv)
+    goto fail;
+  stage = 9;
+  rv = vppcom_session_observability_terminal_await (0x5031374231500001ULL, &reply);
+  if (rv || reply.request_id != 0x5031374231500001ULL || reply.status != 1 ||
+      reply.detail != SESSION_OBSERVABILITY_RESULT_OK || reply.reply_flags != 1 ||
+      reply.receipt_length != sizeof (expected_terminal_receipt) - 1 ||
+      memcmp (reply.receipt, expected_terminal_receipt, sizeof (expected_terminal_receipt) - 1))
+    goto fail;
+
+  /* Cancellation after a producer froze the receipt must not overwrite it.
+   * Give the deferred fixture one scheduler turn before issuing cancellation. */
+  stage = 10;
+  rv = vppcom_session_observability_terminal_arm (client, 0x5031374231500002ULL,
+						  VPPCOM_OBSERVABILITY_TERMINAL, 0);
+  if (rv)
+    goto fail;
+  usleep (100000);
+  if (vppcom_session_observability_terminal_cancel (0x5031374231500002ULL))
+    goto fail;
+  stage = 11;
+  rv = vppcom_session_observability_terminal_await (0x5031374231500002ULL, &reply);
+  if (rv || reply.request_id != 0x5031374231500002ULL || reply.status != 1 ||
+      reply.detail != SESSION_OBSERVABILITY_RESULT_OK || reply.reply_flags != 1 ||
+      reply.receipt_length != sizeof (expected_terminal_receipt) - 1 ||
+      memcmp (reply.receipt, expected_terminal_receipt, sizeof (expected_terminal_receipt) - 1))
+    goto fail;
+
+  /* The completed public operations consumed their sole socket completions. */
+  stage = 12;
   pfd = (struct pollfd){ .fd = wrk->app_api_sock.fd, .events = POLLIN };
   if (poll (&pfd, 1, 0))
     goto fail;
-  stage = 8;
+  stage = 13;
   if (vppcom_session_close (client) || vcl_sapi_detach (wrk))
     goto fail;
   client = INVALID_SESSION_ID;
@@ -481,7 +522,7 @@ observability_sapi_success (const char *socket_path)
       WEXITSTATUS (child_status))
     goto fail;
   server = -1;
-  printf ("REQUEST_SUCCESS_OK public-vcl-owner-vft-single-receipt-terminal-arm-await\n");
+  printf ("REQUEST_SUCCESS_OK terminal-duplicate-reuse-cancel-once\n");
   fflush (stdout);
   _exit (0);
 

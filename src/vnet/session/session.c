@@ -288,6 +288,7 @@ typedef struct
 typedef struct
 {
   u64 opaque;
+  volatile u32 references;
   session_observability_owner_t *owner;
   session_observability_directory_t *directory;
   session_observability_cell_t *cell;
@@ -299,7 +300,23 @@ typedef struct
   u8 arm_pending;
   u8 pins_held;
   u8 completed;
+  u8 registered;
+  u8 retired;
 } session_observability_terminal_t;
+
+typedef struct
+{
+  session_observability_terminal_t *terminal;
+  session_observability_owner_t *owner;
+  session_observability_directory_t *directory;
+  session_observability_cell_t *cell;
+  session_observability_sidecar_t *sidecar;
+  session_observability_completion_fn_t completion;
+  void *completion_context;
+  session_observability_reply_t reply;
+  u8 release_pins;
+  u8 drop_registry_ref;
+} session_observability_terminal_action_t;
 
 static session_observability_terminal_t **session_observability_terminals;
 static clib_spinlock_t session_observability_terminals_lock;
@@ -324,10 +341,47 @@ session_observability_terminal_find (u64 opaque, uword *index)
   return 0;
 }
 
-static void
-session_observability_terminal_remove (uword index)
+static session_observability_terminal_t *
+session_observability_terminal_find_owner (session_observability_owner_t *owner, u64 request_id,
+					   uword *index)
 {
+  session_observability_terminal_t *terminal;
+  uword i;
+
+  vec_foreach_index (i, session_observability_terminals)
+    {
+      terminal = session_observability_terminals[i];
+      if (terminal->owner == owner && terminal->event.request_id == request_id)
+	{
+	  if (index)
+	    *index = i;
+	  return terminal;
+	}
+    }
+  return 0;
+}
+
+static void
+session_observability_terminal_get (session_observability_terminal_t *terminal)
+{
+  clib_atomic_fetch_add_rel (&terminal->references, 1);
+}
+
+static void
+session_observability_terminal_put (session_observability_terminal_t *terminal)
+{
+  if (clib_atomic_fetch_sub_rel (&terminal->references, 1) == 1)
+    clib_mem_free (terminal);
+}
+
+static u8
+session_observability_terminal_remove (session_observability_terminal_t *terminal, uword index)
+{
+  if (!terminal->registered)
+    return 0;
   vec_del1 (session_observability_terminals, index);
+  terminal->registered = 0;
+  return 1;
 }
 
 static void
@@ -387,30 +441,6 @@ session_observability_release_pins (session_observability_owner_t *owner,
   session_observability_owner_release (owner);
 }
 
-static void
-session_observability_terminal_finish (session_observability_terminal_t *terminal,
-				       const session_observability_reply_t *reply)
-{
-  session_observability_completion_fn_t completion;
-  void *completion_context;
-
-  if (terminal->pins_held)
-    {
-      session_observability_cell_complete_reply (terminal->cell, reply);
-      session_observability_release_pins (terminal->owner, terminal->directory, terminal->cell,
-					  terminal->sidecar);
-      terminal->pins_held = 0;
-    }
-  terminal->reply = *reply;
-  terminal->completed = 1;
-  completion = terminal->completion;
-  completion_context = terminal->completion_context;
-  terminal->completion = 0;
-  terminal->completion_context = 0;
-  if (completion)
-    completion (completion_context, reply);
-}
-
 static session_observability_reply_t
 session_observability_terminal_result (session_observability_terminal_t *terminal,
 				       session_observability_result_t result)
@@ -422,46 +452,116 @@ session_observability_terminal_result (session_observability_terminal_t *termina
   };
 }
 
+static void
+session_observability_terminal_action_prepare (session_observability_terminal_t *terminal,
+					       session_observability_terminal_action_t *action)
+{
+  if (terminal->arm_pending)
+    return;
+  action->reply = terminal->reply;
+  if (terminal->pins_held)
+    {
+      action->owner = terminal->owner;
+      action->directory = terminal->directory;
+      action->cell = terminal->cell;
+      action->sidecar = terminal->sidecar;
+      action->release_pins = 1;
+      terminal->pins_held = 0;
+    }
+  if (terminal->completion)
+    {
+      action->completion = terminal->completion;
+      action->completion_context = terminal->completion_context;
+      terminal->completion = 0;
+      terminal->completion_context = 0;
+    }
+}
+
+static void
+session_observability_terminal_action_run (session_observability_terminal_action_t *action)
+{
+  if (action->release_pins)
+    {
+      session_observability_cell_complete_reply (action->cell, &action->reply);
+      session_observability_release_pins (action->owner, action->directory, action->cell,
+					  action->sidecar);
+    }
+  if (action->completion)
+    action->completion (action->completion_context, &action->reply);
+}
+
+static int
+session_observability_terminal_complete_locked (session_observability_terminal_t *terminal,
+						const session_observability_reply_t *reply,
+						session_observability_terminal_action_t *action)
+{
+  if (terminal->completed)
+    return -1;
+  terminal->reply = *reply;
+  terminal->reply.request_id = terminal->event.request_id;
+  terminal->completed = 1;
+  session_observability_terminal_action_prepare (terminal, action);
+  return 0;
+}
+
+static int
+session_observability_terminal_result_locked (session_observability_terminal_t *terminal,
+					      session_observability_result_t result,
+					      session_observability_terminal_action_t *action)
+{
+  if (terminal->completed)
+    return -1;
+  terminal->reply = session_observability_terminal_result (terminal, result);
+  terminal->completed = 1;
+  session_observability_terminal_action_prepare (terminal, action);
+  return 0;
+}
+
+int
+session_observability_terminal_request_id_in_use (session_observability_owner_t *owner,
+						  u64 request_id)
+{
+  int in_use;
+
+  clib_spinlock_lock (&session_observability_terminals_lock);
+  in_use = session_observability_terminal_find_owner (owner, request_id, 0) != 0;
+  clib_spinlock_unlock (&session_observability_terminals_lock);
+  return in_use;
+}
+
 int
 session_observability_terminal_complete (const session_observability_terminal_sink_t *sink,
 					 const session_observability_reply_t *reply)
 {
   session_observability_terminal_t *terminal;
-  session_observability_reply_t frozen;
+  session_observability_terminal_action_t action = { 0 };
   uword index;
-  u8 had_waiter;
+  u8 drop_registry_ref = 0;
 
   if (!sink || !sink->opaque || !reply || reply->receipt_length > SESSION_OBSERVABILITY_RECEIPT_MAX)
     return -1;
   clib_spinlock_lock (&session_observability_terminals_lock);
   terminal = session_observability_terminal_find (sink->opaque, &index);
-  if (!terminal || terminal->completed)
+  if (!terminal)
     {
       clib_spinlock_unlock (&session_observability_terminals_lock);
       return -1;
     }
-  frozen = *reply;
-  frozen.request_id = terminal->event.request_id;
-  terminal->reply = frozen;
-  terminal->completed = 1;
-  if (terminal->arm_pending)
+  session_observability_terminal_get (terminal);
+  if (session_observability_terminal_complete_locked (terminal, reply, &action))
     {
       clib_spinlock_unlock (&session_observability_terminals_lock);
-      return 0;
+      session_observability_terminal_put (terminal);
+      return -1;
     }
-  had_waiter = terminal->completion != 0;
-  if (had_waiter)
-    session_observability_terminal_remove (index);
+  if (action.completion)
+    drop_registry_ref = session_observability_terminal_remove (terminal, index);
   clib_spinlock_unlock (&session_observability_terminals_lock);
 
-  session_observability_terminal_finish (terminal, &frozen);
-  if (!had_waiter)
-    {
-      /* A completed record without a waiter remains bounded by the attachment
-       * slot and is consumed by the later await operation. */
-      return 0;
-    }
-  clib_mem_free (terminal);
+  session_observability_terminal_action_run (&action);
+  if (drop_registry_ref)
+    session_observability_terminal_put (terminal);
+  session_observability_terminal_put (terminal);
   return 0;
 }
 
@@ -471,8 +571,9 @@ session_observability_terminal_await (session_observability_owner_t *owner, u64 
 				      void *completion_context)
 {
   session_observability_terminal_t *terminal;
-  session_observability_reply_t reply;
+  session_observability_terminal_action_t action = { 0 };
   uword i;
+  u8 drop_registry_ref = 0;
 
   if (!owner || !request_id || !completion)
     return -1;
@@ -482,9 +583,11 @@ session_observability_terminal_await (session_observability_owner_t *owner, u64 
       terminal = session_observability_terminals[i];
       if (terminal->owner != owner || terminal->event.request_id != request_id)
 	continue;
+      session_observability_terminal_get (terminal);
       if (terminal->completion)
 	{
 	  clib_spinlock_unlock (&session_observability_terminals_lock);
+	  session_observability_terminal_put (terminal);
 	  return -1;
 	}
       if (!terminal->completed || terminal->arm_pending)
@@ -492,13 +595,18 @@ session_observability_terminal_await (session_observability_owner_t *owner, u64 
 	  terminal->completion = completion;
 	  terminal->completion_context = completion_context;
 	  clib_spinlock_unlock (&session_observability_terminals_lock);
+	  session_observability_terminal_put (terminal);
 	  return 0;
 	}
-      reply = terminal->reply;
-      session_observability_terminal_remove (i);
+      terminal->completion = completion;
+      terminal->completion_context = completion_context;
+      session_observability_terminal_action_prepare (terminal, &action);
+      drop_registry_ref = session_observability_terminal_remove (terminal, i);
       clib_spinlock_unlock (&session_observability_terminals_lock);
-      completion (completion_context, &reply);
-      clib_mem_free (terminal);
+      session_observability_terminal_action_run (&action);
+      if (drop_registry_ref)
+	session_observability_terminal_put (terminal);
+      session_observability_terminal_put (terminal);
       return 0;
     }
   clib_spinlock_unlock (&session_observability_terminals_lock);
@@ -510,8 +618,9 @@ session_observability_terminal_cancel (session_observability_owner_t *owner, u64
 				       session_observability_result_t result)
 {
   session_observability_terminal_t *terminal;
-  session_observability_reply_t reply;
+  session_observability_terminal_action_t action = { 0 };
   uword i;
+  u8 drop_registry_ref = 0;
 
   if (!owner || !request_id)
     return -1;
@@ -521,16 +630,21 @@ session_observability_terminal_cancel (session_observability_owner_t *owner, u64
       terminal = session_observability_terminals[i];
       if (terminal->owner == owner && terminal->event.request_id == request_id)
 	{
+	  session_observability_terminal_get (terminal);
 	  if (terminal->completed)
 	    {
 	      clib_spinlock_unlock (&session_observability_terminals_lock);
+	      session_observability_terminal_put (terminal);
 	      return 0;
 	    }
-	  session_observability_terminal_remove (i);
+	  session_observability_terminal_result_locked (terminal, result, &action);
+	  if (action.completion)
+	    drop_registry_ref = session_observability_terminal_remove (terminal, i);
 	  clib_spinlock_unlock (&session_observability_terminals_lock);
-	  reply = session_observability_terminal_result (terminal, result);
-	  session_observability_terminal_finish (terminal, &reply);
-	  clib_mem_free (terminal);
+	  session_observability_terminal_action_run (&action);
+	  if (drop_registry_ref)
+	    session_observability_terminal_put (terminal);
+	  session_observability_terminal_put (terminal);
 	  return 0;
 	}
     }
@@ -542,9 +656,9 @@ static void
 session_observability_terminal_fence (session_observability_owner_t *owner, session_handle_t handle,
 				      session_observability_result_t result)
 {
-  session_observability_terminal_t **terminals = 0;
+  session_observability_terminal_action_t *actions = 0;
+  session_observability_terminal_action_t action;
   session_observability_terminal_t *terminal;
-  session_observability_reply_t reply;
   uword i;
 
   clib_spinlock_lock (&session_observability_terminals_lock);
@@ -554,18 +668,39 @@ session_observability_terminal_fence (session_observability_owner_t *owner, sess
       if ((owner && terminal->owner != owner) ||
 	  (handle != SESSION_INVALID_HANDLE && terminal->event.session_handle != handle))
 	continue;
-      vec_add1 (terminals, terminal);
-      session_observability_terminal_remove (i - 1);
+      /* A session fence cannot rewrite a receipt already frozen for the
+       * original attachment.  Owner teardown has no surviving VCL await
+       * endpoint, so it retires both pending and committed records. */
+      if (!owner && terminal->completed)
+	continue;
+      session_observability_terminal_get (terminal);
+      action = (session_observability_terminal_action_t){ .terminal = terminal };
+      if (!terminal->completed)
+	{
+	  terminal->retired = 1;
+	  session_observability_terminal_result_locked (terminal, result, &action);
+	}
+      if (owner)
+	{
+	  terminal->retired = 1;
+	  terminal->arm_pending = 0;
+	  session_observability_terminal_action_prepare (terminal, &action);
+	  action.drop_registry_ref = session_observability_terminal_remove (terminal, i - 1);
+	}
+      else if (action.completion)
+	action.drop_registry_ref = session_observability_terminal_remove (terminal, i - 1);
+      vec_add1 (actions, action);
     }
   clib_spinlock_unlock (&session_observability_terminals_lock);
-  vec_foreach_index (i, terminals)
+  vec_foreach_index (i, actions)
     {
-      terminal = terminals[i];
-      reply = session_observability_terminal_result (terminal, result);
-      session_observability_terminal_finish (terminal, &reply);
-      clib_mem_free (terminal);
+      action = actions[i];
+      session_observability_terminal_action_run (&action);
+      if (action.drop_registry_ref)
+	session_observability_terminal_put (action.terminal);
+      session_observability_terminal_put (action.terminal);
     }
-  vec_free (terminals);
+  vec_free (actions);
 }
 
 static int
@@ -688,8 +823,10 @@ session_observability_dispatch_rpc (void *arg)
   transport_proto_vft_t *vft;
   session_observability_terminal_t *terminal = 0;
   session_observability_terminal_sink_t sink;
+  session_observability_terminal_action_t terminal_action = { 0 };
   u32 expected;
   int rv = -1;
+  u8 drop_registry_ref = 0;
 
   if (!rpc->owner || !rpc->owner->segment || !rpc->owner->queue ||
       rpc->event.attachment_slot >= SESSION_OBSERVABILITY_SLOT_COUNT)
@@ -782,44 +919,79 @@ session_observability_dispatch_rpc (void *arg)
       terminal->event = rpc->event;
       terminal->arm_pending = 1;
       terminal->pins_held = 1;
+      /* Registry membership and this owner-VFT invocation each retain one
+       * object reference.  The transport receives an opaque value only. */
+      terminal->references = 2;
+      terminal->registered = 1;
       sink = (session_observability_terminal_sink_t){
 	.opaque = terminal->opaque,
 	.complete = session_observability_terminal_complete,
       };
       clib_spinlock_lock (&session_observability_terminals_lock);
+      if (session_observability_terminal_find_owner (rpc->owner, request.request_id, 0))
+	{
+	  clib_spinlock_unlock (&session_observability_terminals_lock);
+	  session_observability_terminal_put (terminal);
+	  session_observability_terminal_put (terminal);
+	  terminal = 0;
+	  session_observability_cell_complete (cell,
+					       SESSION_OBSERVABILITY_RESULT_DISPATCH_REJECTED);
+	  goto done;
+	}
       vec_add1 (session_observability_terminals, terminal);
       clib_spinlock_unlock (&session_observability_terminals_lock);
       rv = vft->observability_terminal_arm (s->connection_index, s->thread_index, &request, &sink);
+      clib_spinlock_lock (&session_observability_terminals_lock);
       terminal->arm_pending = 0;
-      if (!rv)
+      if (rv || terminal->retired)
+	{
+	  /* A failed arm never transfers a sink to the caller.  A producer may
+	   * already have frozen its one receipt before returning failure, but it
+	   * remains private: retire it after releasing the original pins. */
+	  terminal->retired = 1;
+	  (void) session_observability_terminal_result_locked (
+	    terminal, SESSION_OBSERVABILITY_RESULT_DISPATCH_REJECTED, &terminal_action);
+	  session_observability_terminal_action_prepare (terminal, &terminal_action);
+	  reply = session_observability_terminal_result (
+	    terminal, SESSION_OBSERVABILITY_RESULT_DISPATCH_REJECTED);
+	  if (terminal->registered)
+	    {
+	      uword terminal_index;
+
+	      terminal_index = ~0;
+	      if (session_observability_terminal_find (terminal->opaque, &terminal_index) ==
+		  terminal)
+		drop_registry_ref =
+		  session_observability_terminal_remove (terminal, terminal_index);
+	    }
+	}
+      else
 	{
 	  reply = (session_observability_reply_t){
 	    .request_id = request.request_id,
 	    .status = 1,
 	    .detail = SESSION_OBSERVABILITY_RESULT_OK,
 	  };
-	  if (rpc->completion)
-	    rpc->completion (rpc->completion_context, &reply);
 	  if (terminal->completed)
-	    {
-	      session_observability_reply_t frozen = terminal->reply;
-	      session_observability_terminal_finish (terminal, &frozen);
-	    }
-	  rpc->completion = 0;
-	  rpc->completion_context = 0;
-	  terminal = 0;
-	  goto terminal_done;
+	    session_observability_terminal_action_prepare (terminal, &terminal_action);
 	}
-      clib_spinlock_lock (&session_observability_terminals_lock);
-      {
-	uword terminal_index;
-	if (session_observability_terminal_find (terminal->opaque, &terminal_index) == terminal)
-	  session_observability_terminal_remove (terminal_index);
-      }
+      if (terminal_action.completion && terminal->registered)
+	{
+	  uword terminal_index;
+
+	  terminal_index = ~0;
+	  if (session_observability_terminal_find (terminal->opaque, &terminal_index) == terminal)
+	    drop_registry_ref = session_observability_terminal_remove (terminal, terminal_index);
+	}
       clib_spinlock_unlock (&session_observability_terminals_lock);
-      clib_mem_free (terminal);
+      session_observability_terminal_action_run (&terminal_action);
+      if (rpc->completion)
+	rpc->completion (rpc->completion_context, &reply);
+      if (drop_registry_ref)
+	session_observability_terminal_put (terminal);
+      session_observability_terminal_put (terminal);
       terminal = 0;
-      goto done;
+      goto terminal_done;
     }
   if (cell->sampling_point == SESSION_OBSERVABILITY_SAMPLING_TERMINAL)
     {

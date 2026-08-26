@@ -4,8 +4,10 @@
  */
 
 #include <arpa/inet.h>
+#include <errno.h>
 #include <vnet/session/application.h>
 #include <vnet/session/application_crypto.h>
+#include <vnet/session/application_namespace.h>
 #include <vnet/session/session.h>
 #include <vnet/session/session_sdl.h>
 #include <vnet/session/session.api_types.h>
@@ -82,6 +84,8 @@ STATIC_ASSERT (sizeof (app_sapi_observability_request_v2_reply_msg_t) == 156,
 extern int session_observability_test_attachment_create (u32 app_wrk_index);
 extern int session_observability_test_socket_control (clib_socket_t *cs, app_sapi_msg_t *msg,
 						      u32 app_wrk_index);
+extern int session_observability_test_socket_request (clib_socket_t *cs, app_sapi_msg_t *msg,
+						      u32 app_wrk_index);
 extern void session_observability_test_bapi_request (vl_api_app_observability_request_v2_t *mp);
 extern int session_observability_test_owner_gate_interleaving (u32 app_wrk_index);
 extern void session_observability_test_peer_dead (u32 app_wrk_index);
@@ -91,6 +95,11 @@ static const u8 session_test_observability_receipt[] = "p17b1o-owner-vft";
 static const u8 session_test_observability_terminal_receipt[] = "p17b1p-terminal-vft";
 static volatile u32 session_test_observability_vft_invocations;
 static volatile u32 session_test_observability_terminal_invocations;
+
+#define SESSION_TEST_TERMINAL_DEFERRED	0x5031374231501001ULL
+#define SESSION_TEST_TERMINAL_CANCELLED 0x5031374231501002ULL
+#define SESSION_TEST_TERMINAL_FROZEN	0x5031374231501003ULL
+#define SESSION_TEST_TERMINAL_FENCED	0x5031374231501004ULL
 
 typedef struct
 {
@@ -157,6 +166,14 @@ session_test_observability_terminal_vft (u32 conn_index, clib_thread_index_t thr
     .sink = *sink,
     .request_id = request->request_id,
   };
+  if (request->request_id == SESSION_TEST_TERMINAL_CANCELLED ||
+      request->request_id == SESSION_TEST_TERMINAL_FENCED)
+    return 0;
+  if (request->request_id == SESSION_TEST_TERMINAL_FROZEN)
+    {
+      session_test_observability_terminal_complete (&completion);
+      return 0;
+    }
   /* This is deferred to the main loop, after the owner VFT has returned and
    * the arm acknowledgement can be emitted. */
   vlib_rpc_call_main_thread (session_test_observability_terminal_complete, (u8 *) &completion,
@@ -330,6 +347,198 @@ session_test_crypto_async_cb (app_crypto_async_req_t *req)
 }
 
 static int
+session_test_observability_terminal_receive (vlib_main_t *vm, int fd, app_sapi_msg_t *response)
+{
+  u32 tries;
+  ssize_t n_read;
+
+  for (tries = 0; tries < 100; tries++)
+    {
+      n_read = recv (fd, response, sizeof (*response), MSG_DONTWAIT);
+      if (n_read == sizeof (*response))
+	return 0;
+      if (n_read >= 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
+	return -1;
+      vlib_process_suspend (vm, 10e-3);
+    }
+  return -1;
+}
+
+static int
+session_test_observability_terminal_frame (vlib_main_t *vm, clib_socket_t *socket, int peer_fd,
+					   u32 app_wrk_index, app_sapi_msg_t *request,
+					   app_sapi_msg_t *response)
+{
+  if (session_observability_test_socket_request (socket, request, app_wrk_index))
+    return -1;
+  return session_test_observability_terminal_receive (vm, peer_fd, response);
+}
+
+/* Drive the same fixed SAPI frames as VCL through the owner VFT.  The test
+ * intentionally retains no terminal internals: every receipt arrives through
+ * the original arm/await socket completion and cancellation frame. */
+static int
+session_test_observability_terminal_lifecycle (vlib_main_t *vm, application_t *app,
+					       app_worker_t *app_wrk)
+{
+  app_namespace_t *app_ns = app_namespace_get (app->ns_index);
+  app_ns_api_handle_t *handle;
+  app_sapi_msg_t request = { 0 }, response = { 0 };
+  clib_socket_t *socket = 0;
+  session_t *s = 0;
+  session_handle_t first_handle;
+  int fds[2] = { -1, -1 };
+  int rv = -1;
+
+  if (!app_ns || socketpair (AF_UNIX, SOCK_SEQPACKET, 0, fds) ||
+      fcntl (fds[1], F_SETFL, fcntl (fds[1], F_GETFL) | O_NONBLOCK))
+    goto done;
+  socket = appns_sapi_alloc_socket (app_ns);
+  clib_socket_init_fd (socket, fds[0]);
+  handle = (app_ns_api_handle_t *) &socket->private_data;
+  handle->aah_app_wrk_index = app_wrk->wrk_index;
+  s = session_alloc (0);
+  s->app_wrk_index = app_wrk->wrk_index;
+  first_handle = session_handle (s);
+
+  request.type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2;
+  request.observability_terminal_arm_v2 = (app_sapi_observability_request_v2_msg_t){
+    .session_handle = first_handle,
+    .request_id = SESSION_TEST_TERMINAL_DEFERRED,
+    .attachment_slot = 0,
+    .sampling_point = SESSION_OBSERVABILITY_SAMPLING_TERMINAL,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response) ||
+      response.type != APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2_REPLY ||
+      response.observability_terminal_arm_v2_reply.status != 1)
+    goto done;
+
+  request.observability_terminal_arm_v2.attachment_slot = 1;
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response) ||
+      response.type != APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2_REPLY ||
+      response.observability_terminal_arm_v2_reply.status != 2 ||
+      clib_atomic_load_acq_n (&session_test_observability_terminal_invocations) != 1)
+    goto done;
+
+  request = (app_sapi_msg_t){ .type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2 };
+  request.observability_terminal_await_v2 = (app_sapi_observability_terminal_wait_v2_msg_t){
+    .request_id = SESSION_TEST_TERMINAL_DEFERRED,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response) ||
+      response.type != APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2_REPLY ||
+      response.observability_terminal_await_v2_reply.status != 1 ||
+      response.observability_terminal_await_v2_reply.receipt_length !=
+	sizeof (session_test_observability_terminal_receipt) - 1 ||
+      memcmp (response.observability_terminal_await_v2_reply.receipt,
+	      session_test_observability_terminal_receipt,
+	      sizeof (session_test_observability_terminal_receipt) - 1))
+    goto done;
+
+  request = (app_sapi_msg_t){ .type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2 };
+  request.observability_terminal_arm_v2 = (app_sapi_observability_request_v2_msg_t){
+    .session_handle = first_handle,
+    .request_id = SESSION_TEST_TERMINAL_CANCELLED,
+    .attachment_slot = 0,
+    .sampling_point = SESSION_OBSERVABILITY_SAMPLING_TERMINAL,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response))
+    goto done;
+  request = (app_sapi_msg_t){ .type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2 };
+  request.observability_terminal_cancel_v2 = (app_sapi_observability_terminal_wait_v2_msg_t){
+    .request_id = SESSION_TEST_TERMINAL_CANCELLED,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response) ||
+      response.type != APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2_REPLY ||
+      response.observability_terminal_cancel_v2_reply.retval)
+    goto done;
+  request.type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2;
+  request.observability_terminal_await_v2 = (app_sapi_observability_terminal_wait_v2_msg_t){
+    .request_id = SESSION_TEST_TERMINAL_CANCELLED,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response) ||
+      response.observability_terminal_await_v2_reply.detail !=
+	SESSION_OBSERVABILITY_RESULT_CANCELLED)
+    goto done;
+
+  request = (app_sapi_msg_t){ .type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2 };
+  request.observability_terminal_arm_v2 = (app_sapi_observability_request_v2_msg_t){
+    .session_handle = first_handle,
+    .request_id = SESSION_TEST_TERMINAL_FROZEN,
+    .attachment_slot = 0,
+    .sampling_point = SESSION_OBSERVABILITY_SAMPLING_TERMINAL,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response))
+    goto done;
+  request = (app_sapi_msg_t){ .type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_CANCEL_V2 };
+  request.observability_terminal_cancel_v2 = (app_sapi_observability_terminal_wait_v2_msg_t){
+    .request_id = SESSION_TEST_TERMINAL_FROZEN,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response) ||
+      response.observability_terminal_cancel_v2_reply.retval)
+    goto done;
+  request.type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2;
+  request.observability_terminal_await_v2.request_id = SESSION_TEST_TERMINAL_FROZEN;
+  request.observability_terminal_await_v2.abi = SESSION_OBSERVABILITY_ABI_VERSION;
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response) ||
+      response.observability_terminal_await_v2_reply.detail != SESSION_OBSERVABILITY_RESULT_OK)
+    goto done;
+
+  request = (app_sapi_msg_t){ .type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_ARM_V2 };
+  request.observability_terminal_arm_v2 = (app_sapi_observability_request_v2_msg_t){
+    .session_handle = first_handle,
+    .request_id = SESSION_TEST_TERMINAL_FENCED,
+    .attachment_slot = 0,
+    .sampling_point = SESSION_OBSERVABILITY_SAMPLING_TERMINAL,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response))
+    goto done;
+  session_free (s);
+  s = 0;
+  request.type = APP_SAPI_MSG_TYPE_OBS_TERMINAL_AWAIT_V2;
+  request.observability_terminal_await_v2.request_id = SESSION_TEST_TERMINAL_FENCED;
+  request.observability_terminal_await_v2.abi = SESSION_OBSERVABILITY_ABI_VERSION;
+  if (session_test_observability_terminal_frame (vm, socket, fds[1], app_wrk->wrk_index, &request,
+						 &response) ||
+      response.observability_terminal_await_v2_reply.detail !=
+	SESSION_OBSERVABILITY_RESULT_ASSOCIATION_TOKEN_STALE)
+    goto done;
+  s = session_alloc (0);
+  s->app_wrk_index = app_wrk->wrk_index;
+  if (session_handle (s) != first_handle)
+    goto done;
+  rv = 0;
+
+done:
+  if (s)
+    session_free (s);
+  if (socket)
+    appns_sapi_free_socket (app_ns, socket);
+  if (fds[0] >= 0)
+    close (fds[0]);
+  if (fds[1] >= 0)
+    close (fds[1]);
+  return rv;
+}
+
+static int
 session_test_observability_lifecycle_once (vlib_main_t *vm)
 {
   u64 options[APP_OPTIONS_N_OPTIONS] = { 0 };
@@ -382,6 +591,8 @@ session_test_observability_lifecycle_once (vlib_main_t *vm)
   first_descriptor = app_wrk->observability_descriptor;
   SESSION_TEST (!session_observability_test_owner_gate_interleaving (app_wrk->wrk_index),
 		"fenced owner acquisition releases the directory admission gate");
+  SESSION_TEST (!session_test_observability_terminal_lifecycle (vm, app, app_wrk),
+		"terminal arm, await, cancel, fence, reuse, and exact-once delivery");
 
   /* Fill a real remote session-worker RPC queue while the worker is held at
    * the barrier. The BAPI handler must retain then terminally drain the
