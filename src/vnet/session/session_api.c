@@ -1245,6 +1245,18 @@ session_observability_owner_get (session_observability_owner_t *owner)
   return 0;
 }
 
+static int
+session_observability_admission_owner_get (session_observability_directory_t *directory,
+					   session_observability_owner_t *owner)
+{
+  if (session_observability_admission_gate_get (directory))
+    return -1;
+  if (!session_observability_owner_get (owner))
+    return 0;
+  clib_atomic_fetch_sub_rel (&directory->admission_gate, 1);
+  return -1;
+}
+
 static void
 session_observability_producer_release (session_observability_admission_t *a)
 {
@@ -1369,13 +1381,8 @@ vl_api_app_observability_request_v2_t_handler (vl_api_app_observability_request_
 	   directory->vcl_application_association != association)
     goto done;
   admission.event.directory_nonce = directory->entry_nonce;
-  if (session_observability_admission_gate_get (directory))
+  if (session_observability_admission_owner_get (directory, admission.owner))
     goto done;
-  if (session_observability_owner_get (admission.owner))
-    {
-      clib_atomic_fetch_sub_rel (&directory->admission_gate, 1);
-      goto done;
-    }
 
   expected = SESSION_OBSERVABILITY_CELL_FREE;
   if (!clib_atomic_cmp_and_swap_acq_relax_n (&admission.cell->cell_state, &expected,
@@ -2876,8 +2883,7 @@ sapi_observability_request_handler (app_namespace_t *app_ns, clib_socket_t *cs, 
       goto direct;
     }
   admission.event.directory_nonce = directory->entry_nonce;
-  if (session_observability_admission_gate_get (directory) ||
-      session_observability_owner_get (admission.owner))
+  if (session_observability_admission_owner_get (directory, admission.owner))
     {
       result = SESSION_OBSERVABILITY_RESULT_ASSOCIATION_MIGRATED;
       goto direct;
@@ -3013,6 +3019,30 @@ void
 session_observability_test_bapi_request (vl_api_app_observability_request_v2_t *mp)
 {
   vl_api_app_observability_request_v2_t_handler (mp);
+}
+
+int
+session_observability_test_owner_gate_interleaving (u32 app_wrk_index)
+{
+  app_worker_t *app_wrk = app_worker_get_if_valid (app_wrk_index);
+  session_observability_directory_t *directory;
+  sapi_observability_attachment_t *attachment;
+
+  attachment = app_wrk ? sapi_observability_attachment_find (app_wrk_index, 0) : 0;
+  if (!attachment || app_wrk->observability_owner != &attachment->owner)
+    return -1;
+  directory = &attachment->segment->directory[0];
+  if (clib_atomic_load_acq_n (&directory->admission_gate))
+    return -1;
+  clib_atomic_store_rel_n (&attachment->owner.fenced, 1);
+  if (!session_observability_admission_owner_get (directory, &attachment->owner) ||
+      clib_atomic_load_acq_n (&directory->admission_gate))
+    {
+      clib_atomic_store_rel_n (&attachment->owner.fenced, 0);
+      return -1;
+    }
+  clib_atomic_store_rel_n (&attachment->owner.fenced, 0);
+  return 0;
 }
 
 void
@@ -3422,8 +3452,13 @@ sapi_socket_detach (app_namespace_t *app_ns, clib_socket_t *cs)
       return;
     }
 
-  sapi_observability_attachment_destroy (
-    sapi_observability_attachment_find (app_wrk->wrk_index, 0));
+  /* The main-thread delete path owns attachment destruction. Clear this
+   * worker's borrowed mapping before it can run app_worker_free. */
+  app_wrk->observability_segment = 0;
+  app_wrk->observability_queue = 0;
+  app_wrk->observability_owner = 0;
+  app_wrk->observability_association = 0;
+  clib_memset (&app_wrk->observability_descriptor, 0, sizeof (app_wrk->observability_descriptor));
 
   vnet_app_worker_add_del_args_t args = { .app_index = app_wrk->app_index,
 					  .wrk_map_index = app_wrk->wrk_map_index,

@@ -7,12 +7,15 @@
  * callback while VCL synchronously waits for each protocol reply.
  */
 
+#include <arpa/inet.h>
 #include <fcntl.h>
 #include <poll.h>
+#include <signal.h>
 #include <stdio.h>
 #include <string.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include <vcl/vcl_private.h>
@@ -362,6 +365,126 @@ observability_sapi_reject_request (const char *socket_path)
 }
 
 static int
+observability_sapi_success (const char *socket_path)
+{
+  static const u8 expected_receipt[] = "p17b1o-owner-vft";
+  u8 loopback[] = { 127, 0, 0, 1 };
+  vppcom_session_observability_reply_t reply = { 0 };
+  vppcom_endpt_t endpoint = {
+    .is_ip4 = 1,
+    .ip = loopback,
+    .port = htons (40000 + getpid () % 10000),
+  };
+  struct pollfd pfd;
+  vppcom_cfg_t cfg;
+  vcl_worker_t *wrk = 0;
+  pid_t server = -1;
+  int child_status, client = INVALID_SESSION_ID;
+  int ready[2] = { -1, -1 }, done[2] = { -1, -1 };
+  int rv = 0, stage = 1, success = 0;
+  char child_result = 1;
+
+  if (pipe (ready) || pipe (done))
+    goto fail;
+  server = fork ();
+  if (server < 0)
+    goto fail;
+  if (!server)
+    {
+      int listener = INVALID_SESSION_ID, accepted = INVALID_SESSION_ID;
+      char result = 1;
+
+      close (ready[0]);
+      close (done[1]);
+      observability_sapi_config_init (&cfg, socket_path);
+      cfg.app_name = "observability_sapi_success_server";
+      if (!vppcom_app_create_with_config (&cfg) &&
+	  (listener = vppcom_session_create (VPPCOM_PROTO_TCP, 0)) != INVALID_SESSION_ID &&
+	  !vppcom_session_bind (listener, &endpoint) && !vppcom_session_listen (listener, 1))
+	result = 0;
+      if (write (ready[1], &result, sizeof (result)) != sizeof (result) || result)
+	_exit (1);
+      accepted = vppcom_session_accept (listener, 0, 0);
+      if (accepted == INVALID_SESSION_ID ||
+	  read (done[0], &result, sizeof (result)) != sizeof (result) ||
+	  vppcom_session_close (accepted) || vppcom_session_close (listener) ||
+	  vcl_sapi_detach (vcl_worker_get_current ()))
+	_exit (1);
+      _exit (0);
+    }
+
+  close (ready[1]);
+  ready[1] = -1;
+  close (done[0]);
+  done[0] = -1;
+  if (read (ready[0], &child_result, sizeof (child_result)) != sizeof (child_result) ||
+      child_result)
+    goto fail;
+  stage = 2;
+  observability_sapi_config_init (&cfg, socket_path);
+  cfg.app_name = "observability_sapi_success_client";
+  if (vppcom_app_create_with_config (&cfg))
+    goto fail;
+  wrk = vcl_worker_get_current ();
+  if (!observability_sapi_attached (wrk))
+    goto fail;
+  stage = 3;
+  client = vppcom_session_create (VPPCOM_PROTO_TCP, 0);
+  if (client == INVALID_SESSION_ID || (rv = vppcom_session_connect (client, &endpoint)))
+    goto fail;
+  stage = 4;
+  rv = vppcom_session_observability_request (client, 0x50313742314f0001ULL,
+					     VPPCOM_OBSERVABILITY_POST_HANDSHAKE, 0, &reply);
+  if (rv || reply.request_id != 0x50313742314f0001ULL || reply.status != 1 ||
+      reply.detail != SESSION_OBSERVABILITY_RESULT_OK || reply.reply_flags != 1 ||
+      reply.receipt_length != sizeof (expected_receipt) - 1 ||
+      memcmp (reply.receipt, expected_receipt, sizeof (expected_receipt) - 1))
+    goto fail;
+
+  /* The completed public operation consumed the sole socket completion. */
+  stage = 5;
+  pfd = (struct pollfd){ .fd = wrk->app_api_sock.fd, .events = POLLIN };
+  if (poll (&pfd, 1, 0))
+    goto fail;
+  stage = 6;
+  if (vppcom_session_close (client) || vcl_sapi_detach (wrk))
+    goto fail;
+  client = INVALID_SESSION_ID;
+  wrk = 0;
+  if (write (done[1], &success, sizeof (success)) != sizeof (success) ||
+      waitpid (server, &child_status, 0) != server || !WIFEXITED (child_status) ||
+      WEXITSTATUS (child_status))
+    goto fail;
+  server = -1;
+  printf ("REQUEST_SUCCESS_OK public-vcl-owner-vft-single-receipt\n");
+  fflush (stdout);
+  _exit (0);
+
+fail:
+  if (client != INVALID_SESSION_ID)
+    (void) vppcom_session_close (client);
+  if (wrk && observability_sapi_attached (wrk))
+    (void) vcl_sapi_detach (wrk);
+  if (server > 0)
+    {
+      (void) kill (server, SIGTERM);
+      (void) waitpid (server, 0, 0);
+    }
+  if (ready[0] >= 0)
+    close (ready[0]);
+  if (ready[1] >= 0)
+    close (ready[1]);
+  if (done[0] >= 0)
+    close (done[0]);
+  if (done[1] >= 0)
+    close (done[1]);
+  fprintf (stderr,
+	   "success test failed at stage %d (rv %d, status %u, detail %u, flags %u, length %u)\n",
+	   stage, rv, reply.status, reply.detail, reply.reply_flags, reply.receipt_length);
+  return -1;
+}
+
+static int
 observability_sapi_peer_death (const char *socket_path)
 {
   vppcom_cfg_t cfg;
@@ -396,7 +519,8 @@ main (int argc, char **argv)
     {
       fprintf (
 	stderr,
-	"usage: %s [--lifecycle|--app-destroy|--identity-reject|--request-reject|--peer-death] "
+	"usage: %s "
+	"[--lifecycle|--app-destroy|--identity-reject|--request-reject|--success|--peer-death] "
 	"<v2-socket>\n"
 	"       %s [--endpoint-reject|--v2-padded-legacy-reject|--v2-invalid-abi-reject|"
 	"--v2-recycled-reject] "
@@ -412,6 +536,8 @@ main (int argc, char **argv)
     rv = observability_sapi_reject_identity (argv[2]);
   else if (!strcmp (argv[1], "--request-reject"))
     rv = observability_sapi_reject_request (argv[2]);
+  else if (!strcmp (argv[1], "--success"))
+    rv = observability_sapi_success (argv[2]);
   else if (!strcmp (argv[1], "--peer-death"))
     rv = observability_sapi_peer_death (argv[2]);
   else

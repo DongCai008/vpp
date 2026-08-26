@@ -83,8 +83,60 @@ extern int session_observability_test_attachment_create (u32 app_wrk_index);
 extern int session_observability_test_socket_control (clib_socket_t *cs, app_sapi_msg_t *msg,
 						      u32 app_wrk_index);
 extern void session_observability_test_bapi_request (vl_api_app_observability_request_v2_t *mp);
+extern int session_observability_test_owner_gate_interleaving (u32 app_wrk_index);
 extern void session_observability_test_peer_dead (u32 app_wrk_index);
 extern void vl_api_memclnt_delete_t_handler (vl_api_memclnt_delete_t *mp);
+
+static const u8 session_test_observability_receipt[] = "p17b1o-owner-vft";
+static volatile u32 session_test_observability_vft_invocations;
+
+static int
+session_test_observability_vft (u32 conn_index, clib_thread_index_t thread_index,
+				const session_observability_request_t *request,
+				session_observability_reply_t *reply)
+{
+  u32 invocation;
+
+  (void) conn_index;
+  (void) thread_index;
+  if (!request || !reply)
+    return -1;
+  clib_atomic_fetch_add_rel (&session_test_observability_vft_invocations, 1);
+  invocation = clib_atomic_load_acq_n (&session_test_observability_vft_invocations);
+  *reply = (session_observability_reply_t){
+    .request_id = request->request_id,
+    .status = 1,
+    .detail = SESSION_OBSERVABILITY_RESULT_OK,
+    .receipt_length = sizeof (session_test_observability_receipt) - 1,
+    .reply_flags = invocation,
+  };
+  clib_memcpy_fast (reply->receipt, session_test_observability_receipt, reply->receipt_length);
+  return 0;
+}
+
+static int
+session_test_observability_vft_install (void)
+{
+  if (TRANSPORT_PROTO_TCP >= vec_len (tp_vfts) || TRANSPORT_PROTO_CT >= vec_len (tp_vfts))
+    return -1;
+  tp_vfts[TRANSPORT_PROTO_TCP].observability_request = session_test_observability_vft;
+  tp_vfts[TRANSPORT_PROTO_CT].observability_request = session_test_observability_vft;
+  clib_atomic_store_rel_n (&session_test_observability_vft_invocations, 0);
+  return 0;
+}
+
+static clib_error_t *
+session_test_observability_vft_init (vlib_main_t *vm)
+{
+  (void) vm;
+  if (session_test_observability_vft_install ())
+    return clib_error_return (0, "observability test transport VFT is not registered");
+  return 0;
+}
+
+VLIB_INIT_FUNCTION (session_test_observability_vft_init) = {
+  .runs_after = VLIB_INITS ("tcp_init"),
+};
 
 static void
 session_test_cli_input (vlib_main_t *vm, char *cmd)
@@ -275,6 +327,8 @@ session_test_observability_lifecycle_once (vlib_main_t *vm)
   if (!app_wrk || session_observability_test_attachment_create (app_wrk->wrk_index))
     goto detach;
   first_descriptor = app_wrk->observability_descriptor;
+  SESSION_TEST (!session_observability_test_owner_gate_interleaving (app_wrk->wrk_index),
+		"fenced owner acquisition releases the directory admission gate");
 
   /* Fill a real remote session-worker RPC queue while the worker is held at
    * the barrier. The BAPI handler must retain then terminally drain the
@@ -3648,6 +3702,8 @@ session_test (vlib_main_t *vm, unformat_input_t *input, vlib_cli_command_t *cmd_
 {
   int res = 0;
 
+  if (session_test_observability_vft_install ())
+    return clib_error_return (0, "observability test transport VFT is not registered");
   session_test_enable_rule_table_engine (vm);
 
   while (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
