@@ -4571,6 +4571,23 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op, void *buffer, uint32_
 }
 
 int
+vppcom_session_observability_request (uint32_t session_handle, uint64_t request_id,
+				      vppcom_observability_sampling_point_t sampling_point,
+				      uint32_t flags, vppcom_session_observability_reply_t *reply)
+{
+  vcl_worker_t *wrk = vcl_worker_get_current ();
+  vcl_session_t *session;
+
+  if (!reply || !request_id)
+    return VPPCOM_EINVAL;
+  session = vcl_session_get_w_handle (wrk, session_handle);
+  if (!session)
+    return VPPCOM_EBADFD;
+
+  return vcl_sapi_observability_request (session, request_id, sampling_point, flags, reply);
+}
+
+int
 vppcom_session_recvfrom (uint32_t session_handle, void *buffer, uint32_t buflen, int flags,
 			 vppcom_endpt_t *ep)
 {

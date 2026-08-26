@@ -17,6 +17,14 @@
 
 typedef enum
 {
+  SESSION_OBSERVABILITY_SAMPLING_POST_HANDSHAKE = 1,
+  SESSION_OBSERVABILITY_SAMPLING_POST_DATA,
+  SESSION_OBSERVABILITY_SAMPLING_POST_RECOVERY,
+  SESSION_OBSERVABILITY_SAMPLING_TERMINAL,
+} session_observability_sampling_point_t;
+
+typedef enum
+{
   SESSION_OBSERVABILITY_HEADER_CREATED = 1,
   SESSION_OBSERVABILITY_HEADER_MAP_VALID,
   SESSION_OBSERVABILITY_HEADER_DETACHING,
@@ -301,6 +309,11 @@ typedef struct
   u32 reply_flags;
   u8 receipt[SESSION_OBSERVABILITY_RECEIPT_MAX];
 } session_observability_reply_t;
+
+/* This is an internal completion sink.  It carries only the fixed redacted
+ * reply and is not an attachment mapping or a generic transport callback. */
+typedef void (*session_observability_completion_fn_t) (void *context,
+						       const session_observability_reply_t *reply);
 
 struct session_observability_segment_
 {

@@ -311,6 +311,7 @@ typedef struct vcl_worker_
   session_observability_segment_t *observability_segment;
   session_observability_descriptor_t observability_descriptor;
   u32 observability_association;
+  u32 observability_next_slot;
   socket_client_main_t bapi_sock_ctx;
   api_main_t bapi_api_ctx;
   memory_client_main_t bapi_mem_ctx;
@@ -840,6 +841,9 @@ void vcl_sapi_peer_dead (vcl_worker_t *wrk);
 int vcl_sapi_recv_fds (vcl_worker_t *wrk, int *fds, int n_fds);
 int vcl_sapi_add_cert_key_pair (vppcom_cert_key_pair_t *ckpair);
 int vcl_sapi_del_cert_key_pair (u32 ckpair_index);
+int vcl_sapi_observability_request (vcl_session_t *session, u64 request_id,
+				    vppcom_observability_sampling_point_t sampling_point, u32 flags,
+				    vppcom_session_observability_reply_t *reply);
 
 static inline int
 vcl_api_attach (void)

@@ -93,6 +93,26 @@ typedef struct vppcom_endpt_t_
 
 typedef uint32_t vcl_session_handle_t;
 
+#define VPPCOM_OBSERVABILITY_RECEIPT_MAX 128
+
+typedef enum
+{
+  VPPCOM_OBSERVABILITY_POST_HANDSHAKE = 1,
+  VPPCOM_OBSERVABILITY_POST_DATA,
+  VPPCOM_OBSERVABILITY_POST_RECOVERY,
+  VPPCOM_OBSERVABILITY_TERMINAL,
+} vppcom_observability_sampling_point_t;
+
+typedef struct
+{
+  uint64_t request_id;
+  uint32_t status;
+  uint32_t detail;
+  uint32_t receipt_length;
+  uint32_t reply_flags;
+  uint8_t receipt[VPPCOM_OBSERVABILITY_RECEIPT_MAX];
+} vppcom_session_observability_reply_t;
+
 typedef struct vppcom_cert_key_pair_
 {
   char *cert;
@@ -283,6 +303,10 @@ extern int vppcom_epoll_wait (uint32_t vep_handle, struct epoll_event *events,
 			      int maxevents, double wait_for_time);
 extern int vppcom_session_attr (uint32_t session_handle, uint32_t op,
 				void *buffer, uint32_t * buflen);
+extern int vppcom_session_observability_request (
+  uint32_t session_handle, uint64_t request_id,
+  vppcom_observability_sampling_point_t sampling_point, uint32_t flags,
+  vppcom_session_observability_reply_t *reply);
 extern int vppcom_session_recvfrom (uint32_t session_handle, void *buffer,
 				    uint32_t buflen, int flags,
 				    vppcom_endpt_t * ep);

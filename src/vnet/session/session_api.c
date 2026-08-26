@@ -723,6 +723,10 @@ static sapi_observability_attachment_t *
 sapi_observability_attachment_find (u32 association,
 				    const session_observability_descriptor_t *descriptor);
 static void sapi_observability_attachment_destroy (sapi_observability_attachment_t *attachment);
+int session_observability_dispatch_prepare_with_completion (
+  session_observability_owner_t *owner, const session_observability_event_t *event,
+  session_observability_dispatch_t *dispatch, session_observability_completion_fn_t completion,
+  void *completion_context);
 
 static void
 vl_api_app_attach_t_handler (vl_api_app_attach_t *mp)
@@ -2690,6 +2694,298 @@ done:
   return reply->retval;
 }
 
+typedef struct
+{
+  u32 app_ns_index;
+  u32 socket_index;
+  u32 app_wrk_index;
+  session_observability_descriptor_t descriptor;
+  session_observability_reply_t reply;
+} sapi_observability_completion_t;
+
+static void
+sapi_observability_completion_send (void *arg)
+{
+  sapi_observability_completion_t *completion = arg;
+  sapi_observability_attachment_t *attachment;
+  app_ns_api_handle_t *handle;
+  app_namespace_t *app_ns;
+  app_sapi_msg_t response = { 0 };
+  clib_socket_t *cs;
+
+  app_ns = app_namespace_get (completion->app_ns_index);
+  if (!app_ns)
+    return;
+  cs = appns_sapi_get_socket (app_ns, completion->socket_index);
+  if (!cs)
+    return;
+  handle = (app_ns_api_handle_t *) &cs->private_data;
+  attachment =
+    sapi_observability_attachment_find (completion->app_wrk_index, &completion->descriptor);
+  if (!attachment || handle->aah_app_wrk_index != completion->app_wrk_index ||
+      clib_atomic_load_acq_n (&attachment->segment->header.lifecycle) !=
+	SESSION_OBSERVABILITY_HEADER_MAP_VALID ||
+      completion->reply.receipt_length > SESSION_OBSERVABILITY_RECEIPT_MAX)
+    return;
+
+  response.type = APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY;
+  response.observability_request_v2_reply = (app_sapi_observability_request_v2_reply_msg_t){
+    .retval = 0,
+    .status = completion->reply.status,
+    .detail = completion->reply.detail,
+    .receipt_length = completion->reply.receipt_length,
+    .reply_flags = completion->reply.reply_flags,
+    .request_id = completion->reply.request_id,
+  };
+  clib_memcpy_fast (response.observability_request_v2_reply.receipt, completion->reply.receipt,
+		    completion->reply.receipt_length);
+  (void) clib_socket_sendmsg (cs, &response, sizeof (response), 0, 0);
+}
+
+static void
+sapi_observability_completion_notify (void *context, const session_observability_reply_t *reply)
+{
+  sapi_observability_completion_t *completion = context;
+
+  if (!completion)
+    return;
+  completion->reply = *reply;
+  vlib_rpc_call_main_thread (sapi_observability_completion_send, (u8 *) completion,
+			     sizeof (*completion));
+  clib_mem_free (completion);
+}
+
+static void
+sapi_observability_completion_direct (app_namespace_t *app_ns, clib_socket_t *cs,
+				      app_worker_t *app_wrk,
+				      sapi_observability_attachment_t *attachment, u64 request_id,
+				      session_observability_result_t result)
+{
+  sapi_observability_completion_t completion = {
+    .app_ns_index = app_namespace_index (app_ns),
+    .socket_index = appns_sapi_socket_index (app_ns, cs),
+    .app_wrk_index = app_wrk->wrk_index,
+    .descriptor = attachment->descriptor,
+    .reply = {
+      .request_id = request_id,
+      .status = 2,
+      .detail = result,
+    },
+  };
+
+  vlib_rpc_call_main_thread (sapi_observability_completion_send, (u8 *) &completion,
+			     sizeof (completion));
+}
+
+static int
+sapi_observability_request_handler (app_namespace_t *app_ns, clib_socket_t *cs, app_sapi_msg_t *msg,
+				    u32 app_wrk_index)
+{
+  app_sapi_observability_request_v2_msg_t *request = &msg->observability_request_v2;
+  sapi_observability_attachment_t *attachment;
+  session_observability_admission_t admission = { 0 };
+  session_observability_dispatch_t dispatch = { 0 };
+  sapi_observability_completion_t *completion = 0;
+  svm_msg_q_observability_ticket_t queue_ticket;
+  svm_msg_q_observability_reservation_result_t queue_rv;
+  session_observability_event_t event;
+  session_handle_tu_t handle;
+  session_observability_directory_t *directory;
+  session_observability_result_t result = SESSION_OBSERVABILITY_RESULT_SESSION_NOT_FOUND;
+  svm_msg_q_msg_t queue_msg;
+  app_worker_t *app_wrk;
+  session_t *session;
+  u64 ticket;
+  u32 expected, slot;
+
+  app_wrk = app_worker_get_if_valid (app_wrk_index);
+  attachment = app_wrk ? sapi_observability_attachment_find (app_wrk_index, 0) : 0;
+  if (!app_wrk || !attachment || app_wrk->observability_owner != &attachment->owner ||
+      clib_atomic_load_acq_n (&attachment->segment->header.lifecycle) !=
+	SESSION_OBSERVABILITY_HEADER_MAP_VALID)
+    return -1;
+  if (request->abi != SESSION_OBSERVABILITY_ABI_VERSION || request->request_flags ||
+      !request->request_id ||
+      request->sampling_point < SESSION_OBSERVABILITY_SAMPLING_POST_HANDSHAKE ||
+      request->sampling_point > SESSION_OBSERVABILITY_SAMPLING_TERMINAL)
+    {
+      result = SESSION_OBSERVABILITY_RESULT_DISPATCH_REJECTED;
+      goto direct;
+    }
+  slot = request->attachment_slot;
+  if (slot >= SESSION_OBSERVABILITY_SLOT_COUNT)
+    {
+      result = SESSION_OBSERVABILITY_RESULT_DISPATCH_REJECTED;
+      goto direct;
+    }
+  handle.handle = request->session_handle;
+  session = session_get_from_handle_if_valid (handle);
+  if (!session || session->app_wrk_index != app_wrk_index ||
+      session->observability_token_version != 1 || !session->observability_association_token)
+    goto direct;
+  ticket = clib_atomic_fetch_add_rel (&attachment->segment->header.ticket_sequence_next, 1);
+  if (!ticket)
+    {
+      result = SESSION_OBSERVABILITY_RESULT_QUEUE_BROKEN;
+      goto direct;
+    }
+  event = (session_observability_event_t){
+    .opcode = 1,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+    .attachment_slot = slot,
+    .allocation_nonce = ticket,
+    .association_token = session->observability_association_token,
+    .session_handle = request->session_handle,
+    .directory_nonce = ticket,
+    .attachment_instance = attachment->segment->header.attachment_instance,
+    .binding_generation = attachment->segment->header.attach_generation,
+    .request_id = request->request_id,
+    .owner_thread = handle.thread_index,
+    .vcl_application_association = app_wrk->observability_association,
+    .ticket_sequence = ticket,
+  };
+  admission.owner = &attachment->owner;
+  admission.directory = directory = &attachment->segment->directory[slot];
+  admission.cell = &attachment->segment->cell[slot];
+  admission.sidecar = &attachment->segment->sidecar[slot];
+  admission.event = event;
+
+  expected = SESSION_OBSERVABILITY_DIRECTORY_FREE;
+  if (clib_atomic_cmp_and_swap_acq_relax_n (&directory->lifecycle, &expected,
+					    SESSION_OBSERVABILITY_DIRECTORY_INITIALIZING, 0))
+    {
+      clib_memset (directory, 0, sizeof (*directory));
+      directory->entry_nonce = ticket;
+      directory->association_token = event.association_token;
+      directory->session_handle = event.session_handle;
+      directory->attachment_instance = event.attachment_instance;
+      directory->binding_generation = event.binding_generation;
+      directory->owner_thread = event.owner_thread;
+      directory->vcl_application_association = event.vcl_application_association;
+      clib_atomic_store_rel_n (&directory->lifecycle, SESSION_OBSERVABILITY_DIRECTORY_LIVE);
+    }
+  else if (expected != SESSION_OBSERVABILITY_DIRECTORY_LIVE ||
+	   directory->association_token != event.association_token ||
+	   directory->session_handle != event.session_handle ||
+	   directory->attachment_instance != event.attachment_instance ||
+	   directory->binding_generation != event.binding_generation ||
+	   directory->owner_thread != event.owner_thread ||
+	   directory->vcl_application_association != event.vcl_application_association)
+    {
+      result = SESSION_OBSERVABILITY_RESULT_ASSOCIATION_MISMATCH;
+      goto direct;
+    }
+  admission.event.directory_nonce = directory->entry_nonce;
+  if (session_observability_admission_gate_get (directory) ||
+      session_observability_owner_get (admission.owner))
+    {
+      result = SESSION_OBSERVABILITY_RESULT_ASSOCIATION_MIGRATED;
+      goto direct;
+    }
+  expected = SESSION_OBSERVABILITY_CELL_FREE;
+  if (!clib_atomic_cmp_and_swap_acq_relax_n (&admission.cell->cell_state, &expected,
+					     SESSION_OBSERVABILITY_CELL_INITIALIZING, 0) &&
+      (expected != SESSION_OBSERVABILITY_CELL_COMPLETED ||
+       clib_atomic_load_acq_n (&admission.cell->references) ||
+       clib_atomic_load_acq_n (&admission.sidecar->references) ||
+       clib_atomic_load_acq_n (&admission.sidecar->ticket_state) !=
+	 SESSION_OBSERVABILITY_TICKET_FREE))
+    {
+      clib_atomic_fetch_sub_rel (&directory->admission_gate, 1);
+      session_observability_owner_release (admission.owner);
+      result = SESSION_OBSERVABILITY_RESULT_QUEUE_BUSY;
+      goto direct;
+    }
+  clib_memset (admission.cell, 0, sizeof (*admission.cell));
+  clib_memset (admission.sidecar, 0, sizeof (*admission.sidecar));
+  admission.cell->allocation_nonce = ticket;
+  admission.cell->request_id = request->request_id;
+  admission.cell->sampling_point = request->sampling_point;
+  admission.cell->request_flags = request->request_flags;
+  admission.cell->directory_nonce = admission.event.directory_nonce;
+  admission.cell->attachment_instance = admission.event.attachment_instance;
+  admission.cell->binding_generation = admission.event.binding_generation;
+  admission.cell->association_token = event.association_token;
+  admission.cell->session_handle = event.session_handle;
+  admission.cell->owner_thread = event.owner_thread;
+  admission.cell->request_vcl_application_association = event.vcl_application_association;
+  admission.cell->ticket_sequence = ticket;
+  admission.sidecar->queue_identity = attachment->segment->header.queue_identity;
+  admission.sidecar->queue_generation = attachment->segment->header.queue_generation;
+  admission.sidecar->ticket_sequence = ticket;
+  admission.sidecar->allocation_nonce = ticket;
+  admission.sidecar->directory_nonce = admission.event.directory_nonce;
+  admission.sidecar->attachment_instance = admission.event.attachment_instance;
+  admission.sidecar->binding_generation = admission.event.binding_generation;
+  admission.sidecar->attachment_slot = slot;
+  clib_atomic_store_rel_n (&directory->admissions, 1);
+  clib_atomic_store_rel_n (&directory->reservations, 1);
+  clib_atomic_store_rel_n (&directory->references, 1);
+  clib_atomic_store_rel_n (&admission.cell->references, 1);
+  clib_atomic_store_rel_n (&admission.cell->cell_references, 1);
+  clib_atomic_store_rel_n (&admission.cell->admission_pin, 1);
+  clib_atomic_store_rel_n (&admission.cell->reservation_pin, 1);
+  clib_atomic_store_rel_n (&admission.sidecar->references, 1);
+  clib_atomic_store_rel_n (&admission.sidecar->ticket_state,
+			   SESSION_OBSERVABILITY_TICKET_LOCAL_RESERVED);
+  clib_atomic_store_rel_n (&admission.cell->cell_state, SESSION_OBSERVABILITY_CELL_RESERVED);
+  queue_ticket = (svm_msg_q_observability_ticket_t){
+    .state = &admission.sidecar->ticket_state,
+    .cancellation = &admission.cell->cancellation,
+    .ring_index = &admission.sidecar->ring_index,
+    .ring_element_index = &admission.sidecar->ring_element_index,
+    .descriptor_element_index = &admission.sidecar->descriptor_element_index,
+  };
+  completion = clib_mem_alloc (sizeof (*completion));
+  if (!completion)
+    {
+      result = SESSION_OBSERVABILITY_RESULT_QUEUE_BROKEN;
+      goto release;
+    }
+  *completion = (sapi_observability_completion_t){
+    .app_ns_index = app_namespace_index (app_ns),
+    .socket_index = appns_sapi_socket_index (app_ns, cs),
+    .app_wrk_index = app_wrk_index,
+    .descriptor = attachment->descriptor,
+  };
+  if (session_observability_dispatch_prepare_with_completion (
+	admission.owner, &admission.event, &dispatch, sapi_observability_completion_notify,
+	completion))
+    {
+      clib_mem_free (completion);
+      completion = 0;
+      result = SESSION_OBSERVABILITY_RESULT_QUEUE_BROKEN;
+      goto release;
+    }
+  queue_rv = svm_msg_q_observability_try_reserve_commit (admission.owner->queue, 0, &queue_ticket,
+							 &admission.event, sizeof (admission.event),
+							 &queue_msg);
+  if (queue_rv != SVM_MSG_Q_OBSERVABILITY_COMMITTED_NOTIFIED &&
+      queue_rv != SVM_MSG_Q_OBSERVABILITY_COMMITTED_NOTIFY_DEFERRED)
+    {
+      session_observability_dispatch_cancel (&dispatch);
+      clib_mem_free (completion);
+      completion = 0;
+      result = session_observability_queue_result (queue_rv);
+      goto release;
+    }
+  clib_atomic_store_rel_n (&admission.cell->cell_state, SESSION_OBSERVABILITY_CELL_QUEUED);
+  if (session_observability_dispatch_commit (&dispatch))
+    {
+      (void) svm_msg_q_observability_cancel (&queue_ticket);
+      session_observability_dispatch_retry (&dispatch);
+    }
+  return 0;
+
+release:
+  session_observability_cell_complete (admission.cell, result);
+  session_observability_producer_release (&admission);
+direct:
+  sapi_observability_completion_direct (app_ns, cs, app_wrk, attachment, request->request_id,
+					result);
+  return 0;
+}
+
 int
 session_observability_test_attachment_create (u32 app_wrk_index)
 {
@@ -3220,6 +3516,10 @@ sapi_sock_read_ready (clib_file_t *cf)
 	case APP_SAPI_MSG_TYPE_OBS_DETACH_V2:
 	case APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY:
 	  if (sapi_observability_control_handler (cs, &msg, handle->aah_app_wrk_index))
+	    sapi_socket_detach (app_ns, cs);
+	  break;
+	case APP_SAPI_MSG_TYPE_OBS_REQUEST_V2:
+	  if (sapi_observability_request_handler (app_ns, cs, &msg, handle->aah_app_wrk_index))
 	    sapi_socket_detach (app_ns, cs);
 	  break;
 	default:

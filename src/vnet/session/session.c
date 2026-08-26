@@ -281,7 +281,33 @@ typedef struct
   session_handle_t session_handle;
   session_observability_owner_t *owner;
   session_observability_event_t event;
+  session_observability_completion_fn_t completion;
+  void *completion_context;
 } session_observability_rpc_t;
+
+static void
+session_observability_dispatch_complete (session_observability_rpc_t *rpc,
+					 session_observability_cell_t *cell)
+{
+  session_observability_reply_t reply = {
+    .request_id = rpc->event.request_id,
+    .status = 2,
+    .detail = SESSION_OBSERVABILITY_RESULT_QUEUE_BROKEN,
+  };
+
+  if (!rpc->completion)
+    return;
+  if (cell && clib_atomic_load_acq_n (&cell->cell_state) == SESSION_OBSERVABILITY_CELL_COMPLETED)
+    {
+      reply.request_id = cell->reply_request_id;
+      reply.status = cell->reply_status;
+      reply.detail = cell->reply_detail;
+      reply.receipt_length = cell->receipt_length;
+      reply.reply_flags = cell->reply_flags;
+      clib_memcpy_fast (reply.receipt, cell->receipt, reply.receipt_length);
+    }
+  rpc->completion (rpc->completion_context, &reply);
+}
 
 static void
 session_observability_release_ticket (session_observability_sidecar_t *sidecar)
@@ -423,9 +449,9 @@ session_observability_dispatch_rpc (void *arg)
   session_observability_rpc_t *rpc = arg;
   session_handle_tu_t handle = { .handle = rpc->session_handle };
   session_observability_event_t queued_event;
-  session_observability_cell_t *cell;
-  session_observability_directory_t *directory;
-  session_observability_sidecar_t *sidecar;
+  session_observability_cell_t *cell = 0;
+  session_observability_directory_t *directory = 0;
+  session_observability_sidecar_t *sidecar = 0;
   session_observability_request_t request;
   session_observability_reply_t reply = { 0 };
   svm_msg_q_observability_ticket_t ticket;
@@ -520,6 +546,7 @@ mismatch:
 stale:
   session_observability_cell_complete (cell, SESSION_OBSERVABILITY_RESULT_ASSOCIATION_TOKEN_STALE);
 done:
+  session_observability_dispatch_complete (rpc, cell);
   if (rpc->event.attachment_slot < SESSION_OBSERVABILITY_SLOT_COUNT)
     session_observability_release_pins (rpc->owner,
 					&rpc->owner->segment->directory[rpc->event.attachment_slot],
@@ -549,7 +576,25 @@ session_observability_dispatch_prepare (session_observability_owner_t *owner,
   rpc->session_handle = event->session_handle;
   rpc->owner = owner;
   rpc->event = *event;
+  rpc->completion = 0;
+  rpc->completion_context = 0;
   dispatch->rpc = rpc;
+  return 0;
+}
+
+int
+session_observability_dispatch_prepare_with_completion (
+  session_observability_owner_t *owner, const session_observability_event_t *event,
+  session_observability_dispatch_t *dispatch, session_observability_completion_fn_t completion,
+  void *completion_context)
+{
+  session_observability_rpc_t *rpc;
+
+  if (session_observability_dispatch_prepare (owner, event, dispatch))
+    return -1;
+  rpc = dispatch->rpc;
+  rpc->completion = completion;
+  rpc->completion_context = completion_context;
   return 0;
 }
 

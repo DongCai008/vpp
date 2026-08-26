@@ -232,6 +232,7 @@ observability_sapi_reject_v2_recycled (const char *legacy_path)
     APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2, APP_SAPI_MSG_TYPE_OBS_ATTACH_ACK_V2_REPLY,
     APP_SAPI_MSG_TYPE_OBS_DETACH_V2,	 APP_SAPI_MSG_TYPE_OBS_DETACH_V2_REPLY,
     APP_SAPI_MSG_TYPE_OBS_DONE_V2,	 APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY,
+    APP_SAPI_MSG_TYPE_OBS_REQUEST_V2,	 APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY,
   };
   app_sapi_msg_t frame = { 0 };
   char v2_path[sizeof (((struct sockaddr_un *) 0)->sun_path)];
@@ -314,6 +315,53 @@ observability_sapi_reject_identity (const char *socket_path)
 }
 
 static int
+observability_sapi_reject_request (const char *socket_path)
+{
+  app_sapi_msg_t request = { .type = APP_SAPI_MSG_TYPE_OBS_REQUEST_V2 };
+  app_sapi_msg_t response = { 0 };
+  vppcom_session_observability_reply_t reply;
+  vppcom_cfg_t cfg;
+  vcl_worker_t *wrk;
+  int session_handle;
+
+  observability_sapi_config_init (&cfg, socket_path);
+  if (vppcom_app_create_with_config (&cfg))
+    return -1;
+  wrk = vcl_worker_get_current ();
+  if (!observability_sapi_attached (wrk))
+    return -1;
+  request.observability_request_v2 = (app_sapi_observability_request_v2_msg_t){
+    .request_id = 1,
+    .sampling_point = 0,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+  };
+  if (send (wrk->app_api_sock.fd, &request, sizeof (request), 0) != sizeof (request) ||
+      recv (wrk->app_api_sock.fd, &response, sizeof (response), 0) != sizeof (response) ||
+      response.type != APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY ||
+      response.observability_request_v2_reply.request_id != 1 ||
+      response.observability_request_v2_reply.status != 2 ||
+      response.observability_request_v2_reply.detail !=
+	SESSION_OBSERVABILITY_RESULT_DISPATCH_REJECTED)
+    return -1;
+
+  /* Exercise the public VCL call as a closed request/completion exchange.
+   * The unconnected VCL session has no VPP handle, so the only acceptable
+   * result is the server's typed SESSION_NOT_FOUND completion. */
+  session_handle = vppcom_session_create (VPPCOM_PROTO_TCP, 0);
+  if (session_handle == INVALID_SESSION_ID ||
+      vppcom_session_observability_request (session_handle, 2, VPPCOM_OBSERVABILITY_POST_HANDSHAKE,
+					    0, &reply) ||
+      reply.request_id != 2 || reply.status != 2 ||
+      reply.detail != SESSION_OBSERVABILITY_RESULT_SESSION_NOT_FOUND)
+    return -1;
+  if (vcl_sapi_detach (wrk))
+    return -1;
+  printf ("REQUEST_REJECTION_OK fixed-sapi-completion-public-vcl\n");
+  fflush (stdout);
+  _exit (0);
+}
+
+static int
 observability_sapi_peer_death (const char *socket_path)
 {
   vppcom_cfg_t cfg;
@@ -346,12 +394,14 @@ main (int argc, char **argv)
     return observability_sapi_reject_v2_recycled (argv[2]) ? 1 : 0;
   if (argc != 3)
     {
-      fprintf (stderr,
-	       "usage: %s [--lifecycle|--app-destroy|--identity-reject|--peer-death] <v2-socket>\n"
-	       "       %s [--endpoint-reject|--v2-padded-legacy-reject|--v2-invalid-abi-reject|"
-	       "--v2-recycled-reject] "
-	       "<legacy-socket>\n",
-	       argv[0], argv[0]);
+      fprintf (
+	stderr,
+	"usage: %s [--lifecycle|--app-destroy|--identity-reject|--request-reject|--peer-death] "
+	"<v2-socket>\n"
+	"       %s [--endpoint-reject|--v2-padded-legacy-reject|--v2-invalid-abi-reject|"
+	"--v2-recycled-reject] "
+	"<legacy-socket>\n",
+	argv[0], argv[0]);
       return 2;
     }
   if (!strcmp (argv[1], "--lifecycle"))
@@ -360,6 +410,8 @@ main (int argc, char **argv)
     rv = observability_sapi_app_destroy (argv[2]);
   else if (!strcmp (argv[1], "--identity-reject"))
     rv = observability_sapi_reject_identity (argv[2]);
+  else if (!strcmp (argv[1], "--request-reject"))
+    rv = observability_sapi_reject_request (argv[2]);
   else if (!strcmp (argv[1], "--peer-death"))
     rv = observability_sapi_peer_death (argv[2]);
   else

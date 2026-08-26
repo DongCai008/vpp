@@ -12,6 +12,8 @@ vcl_api_uses_app_socket_v2 (void)
   return vcm->cfg.vpp_app_socket_api_v2 != 0;
 }
 
+#define VCL_SAPI_OBSERVABILITY_TIMEOUT_MS 1000
+
 int vcl_sapi_detach (vcl_worker_t *wrk);
 
 static void
@@ -45,6 +47,7 @@ vcl_api_unmap_observability_attachment (vcl_worker_t *wrk)
   wrk->observability_fd = -1;
   clib_memset (&wrk->observability_descriptor, 0, sizeof (wrk->observability_descriptor));
   wrk->observability_association = 0;
+  wrk->observability_next_slot = 0;
 }
 
 static int
@@ -250,6 +253,72 @@ vcl_api_connect_app_socket (vcl_worker_t *wrk)
 done:
 
   return rv;
+}
+
+int
+vcl_sapi_observability_request (vcl_session_t *session, u64 request_id,
+				vppcom_observability_sampling_point_t sampling_point, u32 flags,
+				vppcom_session_observability_reply_t *reply)
+{
+  vcl_worker_t *wrk = vcl_worker_get_current ();
+  app_sapi_msg_t request = { 0 }, response = { 0 };
+  app_sapi_observability_request_v2_reply_msg_t *result;
+  clib_socket_t *cs;
+  clib_error_t *err;
+  struct pollfd pfd;
+  int fds[1], poll_rv;
+  u32 n_fds;
+
+  if (!session || !reply || !vcl_api_uses_app_socket_v2 () || !request_id || flags ||
+      sampling_point < VPPCOM_OBSERVABILITY_POST_HANDSHAKE ||
+      sampling_point > VPPCOM_OBSERVABILITY_TERMINAL || !wrk->observability_segment ||
+      wrk->observability_fd < 0 ||
+      !session_observability_descriptor_is_valid (&wrk->observability_descriptor))
+    return VPPCOM_EINVAL;
+
+  cs = &wrk->app_api_sock;
+  request.type = APP_SAPI_MSG_TYPE_OBS_REQUEST_V2;
+  request.observability_request_v2 = (app_sapi_observability_request_v2_msg_t){
+    .session_handle = session->vpp_handle,
+    .request_id = request_id,
+    .attachment_slot = wrk->observability_next_slot++ % SESSION_OBSERVABILITY_SLOT_COUNT,
+    .sampling_point = sampling_point,
+    .abi = SESSION_OBSERVABILITY_ABI_VERSION,
+    .request_flags = flags,
+  };
+  err = clib_socket_sendmsg (cs, &request, sizeof (request), 0, 0);
+  if (err)
+    {
+      clib_error_report (err);
+      return VPPCOM_ECONNRESET;
+    }
+  pfd = (struct pollfd){ .fd = cs->fd, .events = POLLIN };
+  poll_rv = poll (&pfd, 1, VCL_SAPI_OBSERVABILITY_TIMEOUT_MS);
+  if (poll_rv != 1 || !(pfd.revents & POLLIN))
+    {
+      vcl_api_close_app_socket (wrk);
+      vcl_sapi_peer_dead (wrk);
+      return poll_rv ? VPPCOM_ECONNRESET : VPPCOM_ETIMEDOUT;
+    }
+  if (vcl_api_recv_v2_frame (cs, &response, fds, ARRAY_LEN (fds), &n_fds) || n_fds ||
+      response.type != APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY)
+    {
+      vcl_api_close_fds (fds, ARRAY_LEN (fds));
+      return VPPCOM_ECONNRESET;
+    }
+  result = &response.observability_request_v2_reply;
+  if (result->retval || result->request_id != request_id ||
+      result->receipt_length > sizeof (result->receipt))
+    return VPPCOM_EINVAL;
+
+  reply->request_id = result->request_id;
+  reply->status = result->status;
+  reply->detail = result->detail;
+  reply->receipt_length = result->receipt_length;
+  reply->reply_flags = result->reply_flags;
+  clib_memset (reply->receipt, 0, sizeof (reply->receipt));
+  clib_memcpy_fast (reply->receipt, result->receipt, result->receipt_length);
+  return VPPCOM_OK;
 }
 
 static int

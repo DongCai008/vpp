@@ -839,6 +839,8 @@ typedef enum app_sapi_msg_type
   APP_SAPI_MSG_TYPE_OBS_DETACH_V2_REPLY,
   APP_SAPI_MSG_TYPE_OBS_DONE_V2,
   APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY,
+  APP_SAPI_MSG_TYPE_OBS_REQUEST_V2,
+  APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY,
 } __clib_packed app_sapi_msg_type_e;
 
 typedef struct app_sapi_attach_msg_
@@ -941,6 +943,30 @@ typedef struct
   session_observability_descriptor_t descriptor;
 } __clib_packed app_sapi_observability_control_v2_reply_msg_t;
 
+/* The public VCL operation never exposes the association, attachment, or
+ * token.  Those are derived from the bound v2 socket state before this
+ * private request is emitted. */
+typedef struct
+{
+  u64 session_handle;
+  u64 request_id;
+  u32 attachment_slot;
+  u16 sampling_point;
+  u16 abi;
+  u32 request_flags;
+} __clib_packed app_sapi_observability_request_v2_msg_t;
+
+typedef struct
+{
+  i32 retval;
+  u32 status;
+  u32 detail;
+  u32 receipt_length;
+  u32 reply_flags;
+  u64 request_id;
+  u8 receipt[SESSION_OBSERVABILITY_RECEIPT_MAX];
+} __clib_packed app_sapi_observability_request_v2_reply_msg_t;
+
 typedef struct app_sapi_legacy_msg_
 {
   app_sapi_msg_type_e type;
@@ -972,6 +998,8 @@ typedef struct app_sapi_msg_
     app_sapi_worker_add_del_v2_reply_msg_t worker_add_del_v2_reply;
     app_sapi_observability_control_v2_msg_t observability_control_v2;
     app_sapi_observability_control_v2_reply_msg_t observability_control_v2_reply;
+    app_sapi_observability_request_v2_msg_t observability_request_v2;
+    app_sapi_observability_request_v2_reply_msg_t observability_request_v2_reply;
   };
 } __clib_packed app_sapi_msg_t;
 
@@ -986,6 +1014,10 @@ STATIC_ASSERT (sizeof (app_sapi_observability_control_v2_msg_t) == 68,
 	       "socket v2 control request ABI changed");
 STATIC_ASSERT (sizeof (app_sapi_observability_control_v2_reply_msg_t) == 72,
 	       "socket v2 control reply ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_observability_request_v2_msg_t) == 28,
+	       "socket v2 observability request ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_observability_request_v2_reply_msg_t) == 156,
+	       "socket v2 observability reply ABI changed");
 STATIC_ASSERT (sizeof (app_sapi_legacy_msg_t) == 209, "legacy socket ABI changed");
 STATIC_ASSERT (sizeof (app_sapi_msg_t) == 213, "socket v2 fixed frame ABI changed");
 
@@ -1010,6 +1042,10 @@ app_sapi_msg_v2_active_bytes (app_sapi_msg_type_e type)
     case APP_SAPI_MSG_TYPE_OBS_DETACH_V2_REPLY:
     case APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY:
       return sizeof (app_sapi_observability_control_v2_reply_msg_t);
+    case APP_SAPI_MSG_TYPE_OBS_REQUEST_V2:
+      return sizeof (app_sapi_observability_request_v2_msg_t);
+    case APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY:
+      return sizeof (app_sapi_observability_request_v2_reply_msg_t);
     default:
       return -1;
     }

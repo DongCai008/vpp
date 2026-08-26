@@ -48,6 +48,10 @@ STATIC_ASSERT (sizeof (vl_api_app_observability_done_v2_t) == 78,
 	       "observability BAPI DONE ABI changed");
 STATIC_ASSERT (sizeof (vl_api_app_observability_done_v2_reply_t) == 14,
 	       "observability BAPI DONE reply ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_observability_request_v2_msg_t) == 28,
+	       "observability SAPI request ABI changed");
+STATIC_ASSERT (sizeof (app_sapi_observability_request_v2_reply_msg_t) == 156,
+	       "observability SAPI reply ABI changed");
 
 #define SESSION_TEST_I(_cond, _comment, _args...)                                                  \
   ({                                                                                               \
@@ -133,7 +137,7 @@ session_test_socket_frame_receive (vlib_main_t *vm, unformat_input_t *input)
       SESSION_TEST (app_sapi_msg_v2_validate (&frame),
 		    "legacy discriminator %u is rejected by v2 validation", type);
     }
-  for (type = APP_SAPI_MSG_TYPE_ATTACH_V2; type <= APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY; type++)
+  for (type = APP_SAPI_MSG_TYPE_ATTACH_V2; type <= APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY; type++)
     {
       clib_memset (&frame, 0, sizeof (frame));
       frame.type = type;
@@ -143,7 +147,7 @@ session_test_socket_frame_receive (vlib_main_t *vm, unformat_input_t *input)
   frame.type = APP_SAPI_MSG_TYPE_ADD_DEL_WORKER_V2;
   ((u8 *) &frame.worker_add_del_v2)[sizeof (frame.worker_add_del_v2)] = 1;
   SESSION_TEST (app_sapi_msg_v2_validate (&frame), "v2 nonzero inactive tail is rejected");
-  frame.type = APP_SAPI_MSG_TYPE_OBS_DONE_V2_REPLY + 1;
+  frame.type = APP_SAPI_MSG_TYPE_OBS_REQUEST_V2_REPLY + 1;
   SESSION_TEST (app_sapi_msg_v2_validate (&frame), "unknown v2 discriminator is rejected");
 
   bapi_request.application_association = clib_host_to_net_u32 (0x10203040);
