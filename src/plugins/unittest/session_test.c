@@ -234,6 +234,7 @@ session_test_observability_lifecycle_once (vlib_main_t *vm)
   app_sapi_msg_t control = { 0 }, response;
   session_observability_descriptor_t first_descriptor, second_descriptor;
   vl_api_app_observability_request_v2_reply_t *reply;
+  vl_api_memclnt_delete_reply_t *delete_reply;
   clib_socket_t control_socket = { 0 };
   app_worker_t *app_wrk;
   application_t *app;
@@ -405,15 +406,27 @@ detach:
 done:
   if (api_index != ~0 && vl_api_client_index_to_registration (api_index))
     {
-      vl_api_memclnt_delete_t *delete = vl_msg_api_alloc (sizeof (*delete));
+      vl_api_memclnt_delete_t *delete = vl_msg_api_alloc_or_null (sizeof (*delete));
 
-      *delete = (vl_api_memclnt_delete_t){ .index = api_index, .do_cleanup = 1 };
+      if (!delete)
+	{
+	  rv = -1;
+	  goto queue_cleanup;
+	}
+      *delete = (vl_api_memclnt_delete_t){ .index = api_index };
       vl_api_memclnt_delete_t_handler (delete);
-      api_queue = 0;
+      if (svm_queue_sub (api_queue, (u8 *) &delete_reply, SVM_Q_NOWAIT, 0))
+	rv = -1;
+      else
+	{
+	  VL_MSG_API_UNPOISON (delete_reply);
+	  vl_msg_api_free (delete_reply);
+	}
       if (!SESSION_TEST_I (!vl_api_client_index_to_registration (api_index),
 			   "lifecycle API registration and queue are retired"))
 	rv = -1;
     }
+queue_cleanup:
   if (api_queue)
     svm_queue_free (api_queue);
   vec_free (attach_args.name);
