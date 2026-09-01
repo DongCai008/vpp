@@ -436,6 +436,7 @@ typedef enum
   _ (ACCEPTED, accepted)                                                                           \
   _ (ACCEPTED_REPLY, accepted_reply)                                                               \
   _ (CONNECT, connect)                                                                             \
+  _ (CANCEL_CONNECT, connect)                                                                      \
   _ (CONNECT_URI, connect_uri)                                                                     \
   _ (CONNECTED, connected)                                                                         \
   _ (SHUTDOWN, shutdown)                                                                           \

@@ -341,7 +341,11 @@ session_mq_cancel_half_open (app_worker_t *app_wrk, u32 context)
   pool_foreach (sh, app_wrk->half_open_table)
     {
       ho = session_get_from_handle (*sh);
-      if (ho->app_wrk_index != app_wrk->wrk_index || ho->opaque != context)
+
+      /* Once transport cleanup takes ownership, it queues its own terminal
+       * completion and half-open cleanup. Do not race that lifecycle. */
+      if (ho->session_state != SESSION_STATE_CONNECTING ||
+	  ho->app_wrk_index != app_wrk->wrk_index || ho->opaque != context)
 	continue;
 
       app_worker_del_half_open (app_wrk, ho->ho_index);
@@ -356,10 +360,26 @@ static void
 session_mq_cancel_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt)
 {
   session_connect_msg_t *mp;
+  clib_thread_index_t thread_index;
+  session_evt_elt_t *he;
   app_worker_t *app_wrk;
   application_t *app;
 
   mp = session_evt_ctrl_data (wrk, elt);
+
+  /* Keep a cancellation ordered behind the CONNECT it is intended to
+   * suppress when both are waiting for main-thread handling. */
+  thread_index = wrk - session_main.wrk;
+  if (thread_index)
+    {
+      he = clib_llist_elt (wrk->event_elts, wrk->evts_pending_main);
+      if (!clib_llist_is_empty (wrk->event_elts, evt_list, he))
+	{
+	  session_wrk_send_evt_to_main (wrk, elt);
+	  return;
+	}
+    }
+
   app = application_lookup (mp->client_index);
   if (!app)
     return;
