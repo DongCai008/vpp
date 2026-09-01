@@ -7,6 +7,7 @@
 #include <vnet/session/application.h>
 #include <vnet/session/application_crypto.h>
 #include <vnet/session/session.h>
+#include <vnet/session/session_lookup.h>
 #include <vnet/session/session_sdl.h>
 #include <vnet/session/transport.h>
 #include <vnet/tcp/tcp_inlines.h>
@@ -26,6 +27,10 @@
   }								\
   _evald;							\
 })
+
+extern int vcl_test_preclosed_connected (svm_msg_q_t *mq, u32 client_index,
+					  session_handle_t vpp_handle);
+extern int vcl_test_preclosed_connect_error (void);
 
 #define SESSION_TEST(_cond, _comment, _args...)                               \
   do                                                                          \
@@ -93,6 +98,64 @@ static int session_test_endpoint_cfg (vlib_main_t *vm, unformat_input_t *input);
 static volatile u32 session_test_cancel_connect_notifications;
 static volatile u32 session_test_cancel_connect_context;
 static volatile u32 session_test_connect_completions;
+static volatile u32 session_test_connect_context;
+
+typedef struct
+{
+  session_handle_t half_open;
+  session_handle_t connected;
+  app_worker_t *app_wrk;
+  volatile u8 done;
+  int rv;
+} session_test_complete_connect_args_t;
+
+static session_test_complete_connect_args_t session_test_complete_connect_args;
+
+static void
+session_test_complete_connect_on_worker (void *arg)
+{
+  session_test_complete_connect_args_t *args = arg;
+  tcp_connection_t *tc, *new_tc;
+  session_t *ho;
+
+  ho = session_get_from_handle_if_valid (args->half_open);
+  if (!ho)
+    {
+      args->rv = -1;
+      goto done;
+    }
+
+  tc = tcp_ho_connection_get (ho->connection_index);
+  new_tc = tcp_connection_alloc_w_base (vlib_get_thread_index (), &tc);
+  new_tc->state = TCP_STATE_ESTABLISHED;
+  args->rv = session_stream_connect_notify (&new_tc->connection, SESSION_E_NONE);
+  if (!args->rv)
+    args->connected = session_handle (
+      session_get (new_tc->c_s_index, new_tc->c_thread_index));
+
+  if (!tcp_half_open_connection_cleanup (tc))
+    app_wrk_flush_wrk_events (args->app_wrk, vlib_get_thread_index ());
+done:
+  args->done = 1;
+}
+
+static void
+session_test_cleanup_connect_on_worker (void *arg)
+{
+  session_test_complete_connect_args_t *args = arg;
+  session_t *s;
+  transport_connection_t *tc;
+
+  s = session_get_from_handle_if_valid (args->connected);
+  if (!s)
+    goto done;
+  tc = session_get_transport (s);
+  session_lookup_del_connection (tc);
+  transport_cleanup (TRANSPORT_PROTO_TCP, s->connection_index, s->thread_index);
+  session_cleanup (s);
+done:
+  args->done = 1;
+}
 
 static int
 session_test_cancel_connect_callback (u32 app_index, u32 api_context, session_t *s,
@@ -105,7 +168,10 @@ session_test_cancel_connect_callback (u32 app_index, u32 api_context, session_t 
       session_test_cancel_connect_context = api_context;
     }
   else if (s && !err)
-    session_test_connect_completions++;
+    {
+      session_test_connect_completions++;
+      session_test_connect_context = api_context;
+    }
   return 0;
 }
 
@@ -133,7 +199,8 @@ session_test_send_connect_event (svm_msg_q_t *mq, session_evt_type_t event_type,
 static int
 session_test_preconnect_cancel (vlib_main_t *vm, unformat_input_t *input)
 {
-  const u32 pending_context = 0x101, half_open_context = 0x202;
+  const u32 pending_context = 0x101, half_open_context = 0x202,
+	    successful_context = 0x303;
   u64 options[APP_OPTIONS_N_OPTIONS] = { 0 };
   vnet_app_attach_args_t attach_args = {
     .namespace_id = 0,
@@ -152,6 +219,24 @@ session_test_preconnect_cancel (vlib_main_t *vm, unformat_input_t *input)
   session_worker_t *wrk;
   session_handle_t *sh = 0;
   session_t *ho;
+  session_test_complete_connect_args_t *complete_args =
+    &session_test_complete_connect_args;
+  svm_msg_q_shared_t *vcl_mq_shared = 0;
+  svm_msg_q_t vcl_mq = { 0 };
+  svm_msg_q_ring_cfg_t vcl_ring_cfg[SESSION_MQ_N_RINGS] = {
+    [SESSION_MQ_IO_EVT_RING] = { 4, sizeof (session_event_t), 0 },
+    [SESSION_MQ_CTRL_EVT_RING] = { 4,
+				   sizeof (session_event_t) + sizeof (session_terminate_msg_t), 0 },
+  };
+  svm_msg_q_cfg_t vcl_mq_cfg = {
+    .consumer_pid = getpid (),
+    .q_nitems = 4,
+    .n_rings = SESSION_MQ_N_RINGS,
+    .ring_cfgs = vcl_ring_cfg,
+  };
+  svm_msg_q_msg_t vcl_msg;
+  session_event_t *vcl_evt;
+  session_terminate_msg_t *vcl_terminate;
   ip4_address_t intf_addr[2];
   u32 api_index = ~0, app_index = APP_INVALID_INDEX, sw_if_index[2];
   u32 ext_config_free_chunks, ext_config_chunk_size, pending_connects;
@@ -188,6 +273,7 @@ session_test_preconnect_cancel (vlib_main_t *vm, unformat_input_t *input)
   session_test_cancel_connect_notifications = 0;
   session_test_cancel_connect_context = ~0;
   session_test_connect_completions = 0;
+  session_test_connect_context = ~0;
   pending_connects = wrk->n_pending_connects;
   rx_mqs_segment = application_get_rx_mqs_segment (app);
   ext_config_chunk = fifo_segment_alloc_chunk_w_slice (
@@ -279,9 +365,87 @@ session_test_preconnect_cancel (vlib_main_t *vm, unformat_input_t *input)
 		       "cancellation has not committed a successful connection"))
     goto routes;
 
+  connect_args.api_context = successful_context;
+  if (vnet_connect (&connect_args) || pool_elts (app_wrk->half_open_table) != 1)
+    goto routes;
+  pool_foreach (sh, app_wrk->half_open_table)
+    break;
+  if (!sh)
+    goto routes;
+  clib_memset (complete_args, 0, sizeof (*complete_args));
+  complete_args->half_open = *sh;
+  complete_args->app_wrk = app_wrk;
+  /* The half-open belongs to the transport control worker.  Hold the worker
+   * barrier while selecting that worker's VPP TLS context so this invokes the
+   * real completion function against its owner pools without a concurrent
+   * packet-path transition. */
+  vlib_worker_thread_barrier_sync (vm);
+  os_set_thread_index (transport_cl_thread ());
+  session_test_complete_connect_on_worker (complete_args);
+  os_set_thread_index (0);
+  vlib_worker_thread_barrier_release (vm);
+  if (!SESSION_TEST_I (complete_args->done && !complete_args->rv,
+		       "owning worker completes the real session_stream_connect_notify path") ||
+      !SESSION_TEST_I (session_test_connect_completions == 1 &&
+		       session_test_connect_context == successful_context,
+		       "ordinary successful completion is delivered exactly once"))
+    goto routes;
+
+  vlib_worker_thread_barrier_sync (vm);
+  session_test_send_connect_event (mq, SESSION_CTRL_EVT_CANCEL_CONNECT, api_index,
+				   successful_context, 0);
+  session_wrk_handle_mq (wrk, mq);
+  session_wrk_dispatch_ctrl_events (wrk);
+  vlib_worker_thread_barrier_release (vm);
+  if (!SESSION_TEST_I (session_test_connect_completions == 1 &&
+		       session_test_cancel_connect_notifications == 2,
+		       "late CANCEL cannot duplicate a successful completion or terminal cleanup"))
+    goto routes;
+
+  vcl_mq_shared = svm_msg_q_alloc (&vcl_mq_cfg);
+  if (!vcl_mq_shared)
+    goto routes;
+  svm_msg_q_attach (&vcl_mq, vcl_mq_shared);
+  if (!SESSION_TEST_I (!vcl_test_preclosed_connect_error (),
+		       "pre-closed VCL session retires on canceled CONNECTED completion") ||
+      !SESSION_TEST_I (!vcl_test_preclosed_connected (&vcl_mq, api_index,
+					      complete_args->connected),
+		       "late VCL CONNECTED takes the establishment-won terminate fallback"))
+    goto routes;
+  if (svm_msg_q_sub (&vcl_mq, &vcl_msg, SVM_Q_NOWAIT, 0))
+    goto routes;
+  vcl_evt = svm_msg_q_msg_data (&vcl_mq, &vcl_msg);
+  vcl_terminate = (session_terminate_msg_t *) vcl_evt->data;
+  if (!SESSION_TEST_I (vcl_evt->event_type == SESSION_CTRL_EVT_TERMINATE &&
+		       vcl_terminate->client_index == api_index &&
+		       vcl_terminate->handle == complete_args->connected,
+		       "VCL queues exactly one TERMINATE fallback for the established session") ||
+      !SESSION_TEST_I (!svm_msg_q_size (&vcl_mq),
+		       "late VCL CONNECTED leaves no duplicate terminate event"))
+    {
+      svm_msg_q_free_msg (&vcl_mq, &vcl_msg);
+      goto routes;
+    }
+  svm_msg_q_free_msg (&vcl_mq, &vcl_msg);
+
+  complete_args->done = 0;
+  vlib_worker_thread_barrier_sync (vm);
+  os_set_thread_index (transport_cl_thread ());
+  session_test_cleanup_connect_on_worker (complete_args);
+  os_set_thread_index (0);
+  vlib_worker_thread_barrier_release (vm);
+  if (!SESSION_TEST_I (complete_args->done,
+		       "owning worker reclaims the establishment-won test connection"))
+    goto routes;
+
   rv = 0;
 
 routes:
+  if (vcl_mq_shared)
+    {
+      svm_msg_q_cleanup (&vcl_mq);
+      clib_mem_free (vcl_mq_shared);
+    }
   session_add_del_route_via_lookup_in_table (0, 1, &intf_addr[1], 32, 0);
   session_add_del_route_via_lookup_in_table (1, 0, &intf_addr[0], 32, 0);
   session_delete_loopback (sw_if_index[0]);
