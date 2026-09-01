@@ -267,7 +267,8 @@ session_mq_handle_connects_rpc (void *arg)
 }
 
 static void
-session_mq_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt)
+session_mq_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt,
+			    u8 from_main_rpc)
 {
   clib_thread_index_t thread_index = wrk - session_main.wrk;
   session_evt_elt_t *he;
@@ -281,7 +282,7 @@ session_mq_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt)
   /* If on worker, check if main has any pending messages. Avoids reordering
    * with other control messages that need to be handled by main
    */
-  if (thread_index)
+  if (thread_index && !from_main_rpc)
     {
       he = clib_llist_elt (wrk->event_elts, wrk->evts_pending_main);
 
@@ -306,7 +307,8 @@ session_mq_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt)
 }
 
 static u8
-session_mq_cancel_pending_connect (session_worker_t *wrk, session_connect_msg_t *mp)
+session_mq_cancel_pending_connect (session_worker_t *wrk, application_t *app,
+				   session_connect_msg_t *mp)
 {
   session_connect_msg_t *pending_mp;
   session_evt_elt_t *he, *elt, *next;
@@ -321,6 +323,8 @@ session_mq_cancel_pending_connect (session_worker_t *wrk, session_connect_msg_t 
 	  pending_mp->context == mp->context)
 	{
 	  clib_llist_remove (wrk->event_elts, evt_list, elt);
+	  if (pending_mp->ext_config)
+	    session_mq_free_ext_config (app, pending_mp->ext_config);
 	  session_evt_ctrl_data_free (wrk, elt);
 	  clib_llist_put (wrk->event_elts, elt);
 	  wrk->n_pending_connects -= 1;
@@ -370,7 +374,7 @@ session_mq_cancel_connect (session_worker_t *wrk, session_connect_msg_t *mp)
   if (!app_wrk)
     return 0;
 
-  if (!session_mq_cancel_pending_connect (wrk, mp) &&
+  if (!session_mq_cancel_pending_connect (wrk, app, mp) &&
       !session_mq_cancel_half_open (app_wrk, mp->context))
     return 0;
 
@@ -378,20 +382,9 @@ session_mq_cancel_connect (session_worker_t *wrk, session_connect_msg_t *mp)
   return 1;
 }
 
-u8
-session_test_cancel_connect (session_worker_t *wrk, u32 client_index, u32 wrk_index, u32 context)
-{
-  session_connect_msg_t mp = {
-    .client_index = client_index,
-    .wrk_index = wrk_index,
-    .context = context,
-  };
-
-  return session_mq_cancel_connect (wrk, &mp);
-}
-
 static void
-session_mq_cancel_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt)
+session_mq_cancel_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt,
+				   u8 from_main_rpc)
 {
   session_connect_msg_t *mp;
   clib_thread_index_t thread_index;
@@ -402,7 +395,7 @@ session_mq_cancel_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt
   /* Keep a cancellation ordered behind the CONNECT it is intended to
    * suppress when both are waiting for main-thread handling. */
   thread_index = wrk - session_main.wrk;
-  if (thread_index)
+  if (thread_index && !from_main_rpc)
     {
       he = clib_llist_elt (wrk->event_elts, wrk->evts_pending_main);
       if (!clib_llist_is_empty (wrk->event_elts, evt_list, he))
@@ -413,61 +406,6 @@ session_mq_cancel_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt
     }
 
   session_mq_cancel_connect (wrk, mp);
-}
-
-static session_evt_elt_t *
-session_test_alloc_connect_evt (session_worker_t *wrk, session_evt_type_t event_type)
-{
-  session_evt_ctrl_data_t *data;
-  session_evt_elt_t *elt;
-
-  clib_llist_get (wrk->event_elts, elt);
-  clib_memset (elt, 0, sizeof (*elt));
-  elt->evt.event_type = event_type;
-  elt->evt_list.next = CLIB_LLIST_INVALID_INDEX;
-  elt->evt_list.prev = CLIB_LLIST_INVALID_INDEX;
-  pool_get_zero (wrk->ctrl_evts_data, data);
-  elt->evt.ctrl_data_index = data - wrk->ctrl_evts_data;
-  return elt;
-}
-
-u8
-session_test_deferred_cancel_connect (void)
-{
-  session_evt_elt_t *sentinel, *connect, *cancel, *he;
-  session_worker_t *wrk;
-  u32 thread_index;
-  u8 rv;
-
-  thread_index = transport_cl_thread ();
-  if (!thread_index)
-    return 0;
-
-  wrk = session_main_get_worker (thread_index);
-  he = clib_llist_elt (wrk->event_elts, wrk->evts_pending_main);
-  sentinel = session_test_alloc_connect_evt (wrk, SESSION_CTRL_EVT_RPC);
-  clib_llist_add_tail (wrk->event_elts, evt_list, sentinel, he);
-
-  connect = session_test_alloc_connect_evt (wrk, SESSION_CTRL_EVT_CONNECT);
-  session_mq_connect_handler (wrk, connect);
-  cancel = session_test_alloc_connect_evt (wrk, SESSION_CTRL_EVT_CANCEL_CONNECT);
-  session_mq_cancel_connect_handler (wrk, cancel);
-
-  rv = clib_llist_next (wrk->event_elts, evt_list, he) == sentinel &&
-       clib_llist_next (wrk->event_elts, evt_list, sentinel) == connect &&
-       clib_llist_next (wrk->event_elts, evt_list, connect) == cancel;
-
-  clib_llist_remove (wrk->event_elts, evt_list, sentinel);
-  session_evt_ctrl_data_free (wrk, sentinel);
-  clib_llist_put (wrk->event_elts, sentinel);
-  clib_llist_remove (wrk->event_elts, evt_list, connect);
-  session_evt_ctrl_data_free (wrk, connect);
-  clib_llist_put (wrk->event_elts, connect);
-  clib_llist_remove (wrk->event_elts, evt_list, cancel);
-  session_evt_ctrl_data_free (wrk, cancel);
-  clib_llist_put (wrk->event_elts, cancel);
-
-  return rv;
 }
 
 static void
@@ -1028,10 +966,10 @@ session_wrk_handle_evts_main_rpc (void *args)
 	  session_mq_accepted_reply_handler (fwrk, elt);
 	  break;
 	case SESSION_CTRL_EVT_CONNECT:
-	  session_mq_connect_handler (fwrk, elt);
+	  session_mq_connect_handler (fwrk, elt, 1 /* from_main_rpc */);
 	  break;
 	case SESSION_CTRL_EVT_CANCEL_CONNECT:
-	  session_mq_cancel_connect_handler (fwrk, elt);
+	  session_mq_cancel_connect_handler (fwrk, elt, 1 /* from_main_rpc */);
 	  break;
 	default:
 	  clib_warning ("unhandled %u", elt->evt.event_type);
@@ -1908,10 +1846,10 @@ session_event_dispatch_ctrl (session_worker_t *wrk, session_evt_elt_t *elt)
       session_mq_unlisten_handler (wrk, elt);
       break;
     case SESSION_CTRL_EVT_CONNECT:
-      session_mq_connect_handler (wrk, elt);
+      session_mq_connect_handler (wrk, elt, 0 /* from_main_rpc */);
       break;
     case SESSION_CTRL_EVT_CANCEL_CONNECT:
-      session_mq_cancel_connect_handler (wrk, elt);
+      session_mq_cancel_connect_handler (wrk, elt, 0 /* from_main_rpc */);
       break;
     case SESSION_CTRL_EVT_CONNECT_STREAM:
       session_mq_connect_stream_handler (wrk, elt);
@@ -2034,14 +1972,6 @@ static const u32 session_evt_msg_sizes[] = {
 #undef _
 };
 
-u32
-session_test_ctrl_evt_msg_size (session_evt_type_t event_type)
-{
-  if (event_type >= ARRAY_LEN (session_evt_msg_sizes))
-    return 0;
-  return session_evt_msg_sizes[event_type];
-}
-
 always_inline void
 session_update_time_subscribers (session_worker_t *wrk, clib_time_type_t now,
 				 clib_thread_index_t thread_index)
@@ -2108,6 +2038,26 @@ session_wrk_handle_mq (session_worker_t *wrk, svm_msg_q_t *mq)
   return n_to_dequeue;
 }
 
+void
+session_wrk_dispatch_ctrl_events (session_worker_t *wrk)
+{
+  clib_llist_index_t ei, next_ei, last_ei;
+  session_evt_elt_t *ctrl_he, *elt;
+
+  ei = wrk->ctrl_head;
+  ctrl_he = clib_llist_elt (wrk->event_elts, ei);
+  next_ei = clib_llist_next_index (ctrl_he, evt_list);
+  last_ei = clib_llist_prev_index (ctrl_he, evt_list);
+  while (ei != last_ei)
+    {
+      ei = next_ei;
+      elt = clib_llist_elt (wrk->event_elts, ei);
+      next_ei = clib_llist_next_index (elt, evt_list);
+      clib_llist_remove (wrk->event_elts, evt_list, elt);
+      session_event_dispatch_ctrl (wrk, elt);
+    }
+}
+
 static void
 session_wrk_update_state (session_worker_t *wrk)
 {
@@ -2146,7 +2096,7 @@ static uword
 session_queue_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t *frame)
 {
   clib_thread_index_t thread_index = vm->thread_index, __clib_unused n_evts;
-  session_evt_elt_t *elt, *ctrl_he, *new_he, *old_he;
+  session_evt_elt_t *elt, *new_he, *old_he;
   session_main_t *smm = vnet_get_session_main ();
   session_worker_t *wrk = &smm->wrk[thread_index];
   clib_llist_index_t ei, next_ei, old_ti;
@@ -2183,18 +2133,7 @@ session_queue_node_fn (vlib_main_t *vm, vlib_node_runtime_t *node, vlib_frame_t 
    * Handle control events
    */
 
-  ei = wrk->ctrl_head;
-  ctrl_he = clib_llist_elt (wrk->event_elts, ei);
-  next_ei = clib_llist_next_index (ctrl_he, evt_list);
-  old_ti = clib_llist_prev_index (ctrl_he, evt_list);
-  while (ei != old_ti)
-    {
-      ei = next_ei;
-      elt = clib_llist_elt (wrk->event_elts, next_ei);
-      next_ei = clib_llist_next_index (elt, evt_list);
-      clib_llist_remove (wrk->event_elts, evt_list, elt);
-      session_event_dispatch_ctrl (wrk, elt);
-    }
+  session_wrk_dispatch_ctrl_events (wrk);
 
   /* A full owner event queue cannot strand a committed attachment ticket.
    * Drain its cancelled fallback only after all prior owner RPCs. */
