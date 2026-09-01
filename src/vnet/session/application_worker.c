@@ -642,6 +642,13 @@ app_worker_add_half_open (app_worker_t *app_wrk, session_handle_t sh)
   return (shp - app_wrk->half_open_table);
 }
 
+void
+app_worker_del_half_open (app_worker_t *app_wrk, u32 ho_index)
+{
+  ASSERT (session_vlib_thread_is_cl_thread ());
+  pool_put_index (app_wrk->half_open_table, ho_index);
+}
+
 int
 app_worker_cleanup_ho_notify (app_worker_t *app_wrk, session_t *s,
 			      transport_cleanup_cb_fn cleanup_cb)
