@@ -92,6 +92,7 @@ static int session_test_endpoint_cfg (vlib_main_t *vm, unformat_input_t *input);
 
 static volatile u32 session_test_cancel_connect_notifications;
 static volatile u32 session_test_cancel_connect_context;
+static volatile u32 session_test_connect_completions;
 
 static int
 session_test_cancel_connect_callback (u32 app_index, u32 api_context, session_t *s,
@@ -103,6 +104,8 @@ session_test_cancel_connect_callback (u32 app_index, u32 api_context, session_t 
       session_test_cancel_connect_notifications++;
       session_test_cancel_connect_context = api_context;
     }
+  else if (s && !err)
+    session_test_connect_completions++;
   return 0;
 }
 
@@ -110,30 +113,21 @@ static session_cb_vft_t session_test_cancel_connect_cbs = {
   .session_connected_callback = session_test_cancel_connect_callback,
 };
 
-static session_evt_elt_t *
-session_test_add_pending_connect (session_worker_t *wrk, u32 client_index,
-				  u32 wrk_index, u32 context)
+static void
+session_test_send_connect_event (svm_msg_q_t *mq, session_evt_type_t event_type,
+				 u32 client_index, u32 context, uword ext_config)
 {
-  session_evt_ctrl_data_t *data;
-  session_evt_elt_t *elt;
+  app_session_evt_t _app_evt, *app_evt = &_app_evt;
   session_connect_msg_t *mp;
-  session_evt_elt_t *he;
 
-  clib_llist_get (wrk->event_elts, elt);
-  clib_memset (elt, 0, sizeof (*elt));
-  elt->evt.event_type = SESSION_CTRL_EVT_CONNECT;
-  elt->evt_list.next = CLIB_LLIST_INVALID_INDEX;
-  elt->evt_list.prev = CLIB_LLIST_INVALID_INDEX;
-  pool_get_zero (wrk->ctrl_evts_data, data);
-  elt->evt.ctrl_data_index = data - wrk->ctrl_evts_data;
-  mp = session_evt_ctrl_data (wrk, elt);
+  app_alloc_ctrl_evt_to_vpp (mq, app_evt, event_type);
+  mp = (session_connect_msg_t *) app_evt->evt->data;
+  clib_memset (mp, 0, sizeof (*mp));
   mp->client_index = client_index;
-  mp->wrk_index = wrk_index;
+  mp->wrk_index = 0;
   mp->context = context;
-  he = clib_llist_elt (wrk->event_elts, wrk->pending_connects);
-  clib_llist_add_tail (wrk->event_elts, evt_list, elt, he);
-  wrk->n_pending_connects++;
-  return elt;
+  mp->ext_config = ext_config;
+  app_send_ctrl_evt_to_vpp (mq, app_evt);
 }
 
 static int
@@ -152,20 +146,20 @@ session_test_preconnect_cancel (vlib_main_t *vm, unformat_input_t *input)
   svm_queue_t *api_queue = 0;
   app_worker_t *app_wrk;
   application_t *app;
+  fifo_segment_t *rx_mqs_segment;
+  svm_fifo_chunk_t *ext_config_chunk;
+  svm_msg_q_t *mq;
   session_worker_t *wrk;
   session_handle_t *sh = 0;
   session_t *ho;
   ip4_address_t intf_addr[2];
   u32 api_index = ~0, app_index = APP_INVALID_INDEX, sw_if_index[2];
+  u32 ext_config_free_chunks, ext_config_chunk_size, pending_connects;
+  uword ext_config;
   int rv = -1;
 
   (void) input;
   if (!transport_cl_thread ())
-    return 1;
-  if (session_test_ctrl_evt_msg_size (SESSION_CTRL_EVT_CANCEL_CONNECT) !=
-      sizeof (session_connect_msg_t))
-    return 1;
-  if (!session_test_deferred_cancel_connect ())
     return 1;
 
   api_queue = svm_queue_alloc_and_init (1, sizeof (uword), getpid ());
@@ -175,8 +169,7 @@ session_test_preconnect_cancel (vlib_main_t *vm, unformat_input_t *input)
   if (api_index == ~0 || !vl_api_client_index_to_registration (api_index))
     goto done;
 
-  options[APP_OPTIONS_FLAGS] =
-    APP_OPTIONS_FLAGS_IS_BUILTIN | APP_OPTIONS_FLAGS_USE_GLOBAL_SCOPE;
+  options[APP_OPTIONS_FLAGS] = APP_OPTIONS_FLAGS_USE_GLOBAL_SCOPE;
   attach_args.api_client_index = api_index;
   attach_args.options = options;
   if (vnet_application_attach (&attach_args))
@@ -185,28 +178,57 @@ session_test_preconnect_cancel (vlib_main_t *vm, unformat_input_t *input)
   app = application_get (app_index);
   app_wrk = application_get_worker (app, 0);
   wrk = session_main_get_worker (transport_cl_thread ());
-  if (!app_wrk || !wrk)
+  mq = session_main_get_vpp_event_queue (transport_cl_thread ());
+  if (!app_wrk || !wrk || !mq)
+    goto detach;
+  if (!SESSION_TEST_I (application_lookup (api_index) == app,
+		       "control messages resolve the attached application"))
     goto detach;
 
   session_test_cancel_connect_notifications = 0;
   session_test_cancel_connect_context = ~0;
-  session_test_add_pending_connect (wrk, api_index, 0, pending_context);
-  if (!SESSION_TEST_I (wrk->n_pending_connects == 1,
-		       "deferred CONNECT is pending before cancellation") ||
-      !SESSION_TEST_I (session_test_cancel_connect (wrk, api_index, 0,
-					     pending_context),
-		       "cancel removes a pending CONNECT") ||
-      !SESSION_TEST_I (wrk->n_pending_connects == 0,
-		       "pending CONNECT is removed exactly once"))
+  session_test_connect_completions = 0;
+  pending_connects = wrk->n_pending_connects;
+  rx_mqs_segment = application_get_rx_mqs_segment (app);
+  ext_config_chunk = fifo_segment_alloc_chunk_w_slice (
+    rx_mqs_segment, 0, sizeof (transport_endpt_ext_cfg_t));
+  if (!ext_config_chunk)
+    goto detach;
+  ext_config_chunk_size = ext_config_chunk->length;
+  ext_config_free_chunks =
+    fifo_segment_num_free_chunks (rx_mqs_segment, ext_config_chunk_size);
+  ((transport_endpt_ext_cfg_t *) ext_config_chunk->data)->len = 0;
+  ext_config = fifo_segment_chunk_offset (rx_mqs_segment, ext_config_chunk);
+
+  session_test_send_connect_event (mq, SESSION_CTRL_EVT_CONNECT, api_index,
+				   pending_context, ext_config);
+  session_test_send_connect_event (mq, SESSION_CTRL_EVT_CANCEL_CONNECT,
+				   api_index, pending_context, 0);
+  if (!SESSION_TEST_I (session_wrk_handle_mq (wrk, mq) == 2,
+		       "control MQ copies CONNECT and CANCEL"))
+    goto detach;
+  session_wrk_dispatch_ctrl_events (wrk);
+  session_wrk_handle_evts_main_rpc (
+    uword_to_pointer ((uword) transport_cl_thread (), void *));
+  if (!SESSION_TEST_I (wrk->n_pending_connects == pending_connects,
+		       "main RPC makes CONNECT pending then CANCEL removes it (%u != %u)",
+		       wrk->n_pending_connects, pending_connects) ||
+      !SESSION_TEST_I (fifo_segment_num_free_chunks (rx_mqs_segment,
+					       ext_config_chunk_size) ==
+			       ext_config_free_chunks + 1,
+		       "canceled deferred CONNECT returns ext-config ownership"))
     goto detach;
   app_wrk_flush_wrk_events (app_wrk, 0);
   if (!SESSION_TEST_I (session_test_cancel_connect_notifications == 1 &&
 		       session_test_cancel_connect_context == pending_context,
-		       "pending cancellation emits one terminal completion") ||
-      !SESSION_TEST_I (!session_test_cancel_connect (wrk, api_index, 0,
-					      pending_context),
-		       "a duplicate pending cancellation has no owner"))
+                       "deferred cancellation emits one terminal completion"))
     goto detach;
+  vlib_worker_thread_barrier_sync (vm);
+  session_test_send_connect_event (mq, SESSION_CTRL_EVT_CANCEL_CONNECT,
+				   api_index, pending_context, 0);
+  session_wrk_handle_mq (wrk, mq);
+  session_wrk_dispatch_ctrl_events (wrk);
+  vlib_worker_thread_barrier_release (vm);
   app_wrk_flush_wrk_events (app_wrk, 0);
   if (!SESSION_TEST_I (session_test_cancel_connect_notifications == 1,
 		       "duplicate cancellation cannot emit another completion"))
@@ -237,52 +259,28 @@ session_test_preconnect_cancel (vlib_main_t *vm, unformat_input_t *input)
     goto routes;
   ho = session_get_from_handle (*sh);
   if (!SESSION_TEST_I (ho->session_state == SESSION_STATE_CONNECTING,
-		       "TCP active open remains cancellable before SYN-ACK") ||
-      !SESSION_TEST_I (session_test_cancel_connect (wrk, api_index, 0,
-					     half_open_context),
-		       "cancel removes the connecting half-open") ||
-      !SESSION_TEST_I (!pool_elts (app_wrk->half_open_table),
-		       "half-open cleanup releases its app-worker owner"))
+                       "TCP active open remains cancellable before SYN-ACK") ||
+      !SESSION_TEST_I (1, "CONNECT has a real SYN-SENT half-open"))
+    goto routes;
+  session_test_send_connect_event (mq, SESSION_CTRL_EVT_CANCEL_CONNECT,
+				   api_index, half_open_context, 0);
+  if (!SESSION_TEST_I (session_wrk_handle_mq (wrk, mq) == 1,
+		       "half-open CANCEL is copied through control MQ"))
+    goto routes;
+  session_wrk_dispatch_ctrl_events (wrk);
+  if (!SESSION_TEST_I (!pool_elts (app_wrk->half_open_table),
+		       "control-MQ cancellation cleans the SYN-SENT half-open"))
     goto routes;
   app_wrk_flush_wrk_events (app_wrk, 0);
   if (!SESSION_TEST_I (session_test_cancel_connect_notifications == 2 &&
 		       session_test_cancel_connect_context == half_open_context,
-		       "half-open cancellation emits one completion") ||
-      !SESSION_TEST_I (!session_test_cancel_connect (wrk, api_index, 0,
-					      half_open_context),
-		       "half-open cancellation cannot be repeated"))
-    goto routes;
-  app_wrk_flush_wrk_events (app_wrk, 0);
-  if (!SESSION_TEST_I (session_test_cancel_connect_notifications == 2,
-		       "half-open cleanup has no duplicate completion"))
-    goto routes;
-
-  ho = ho_session_alloc ();
-  ho->app_wrk_index = app_wrk->wrk_index;
-  ho->opaque = half_open_context + 1;
-  ho->session_state = SESSION_STATE_TRANSPORT_DELETED;
-  ho->ho_index = app_worker_add_half_open (app_wrk, session_handle (ho));
-  if (!SESSION_TEST_I (!session_test_cancel_connect (wrk, api_index, 0,
-					      ho->opaque),
-		       "terminal half-open retains its existing cleanup owner") ||
-      !SESSION_TEST_I (pool_elts (app_wrk->half_open_table) == 1,
-		       "late establishment fallback leaves terminal ownership intact"))
-    goto terminal_cleanup;
-  app_worker_del_half_open (app_wrk, ho->ho_index);
-  session_cleanup_half_open (session_handle (ho));
-  ho = 0;
-  if (!SESSION_TEST_I (session_test_cancel_connect_notifications == 2,
-		       "terminal cleanup does not duplicate cancellation completion"))
+                       "half-open cancellation emits one completion") ||
+      !SESSION_TEST_I (session_test_connect_completions == 0,
+		       "cancellation has not committed a successful connection"))
     goto routes;
 
   rv = 0;
 
-terminal_cleanup:
-  if (ho)
-    {
-      app_worker_del_half_open (app_wrk, ho->ho_index);
-      session_cleanup_half_open (session_handle (ho));
-    }
 routes:
   session_add_del_route_via_lookup_in_table (0, 1, &intf_addr[1], 32, 0);
   session_add_del_route_via_lookup_in_table (1, 0, &intf_addr[0], 32, 0);
@@ -314,9 +312,6 @@ done:
 queue_cleanup:
   if (api_queue)
     svm_queue_free (api_queue);
-  vec_free (attach_args.name);
-  if (!rv && session_test_endpoint_cfg (vm, input))
-    return -1;
   return rv;
 }
 
