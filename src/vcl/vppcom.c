@@ -106,6 +106,23 @@ vcl_send_session_connect (vcl_worker_t *wrk, vcl_session_t *s)
 }
 
 static void
+vcl_send_session_cancel_connect (vcl_worker_t *wrk, vcl_session_t *s)
+{
+  app_session_evt_t _app_evt, *app_evt = &_app_evt;
+  session_connect_msg_t *mp;
+  svm_msg_q_t *mq;
+
+  mq = vcl_worker_ctrl_mq (wrk);
+  app_alloc_ctrl_evt_to_vpp (mq, app_evt, SESSION_CTRL_EVT_CANCEL_CONNECT);
+  mp = (session_connect_msg_t *) app_evt->evt->data;
+  memset (mp, 0, sizeof (*mp));
+  mp->client_index = wrk->api_client_handle;
+  mp->context = s->session_index;
+  mp->wrk_index = wrk->vpp_wrk_index;
+  app_send_ctrl_evt_to_vpp (mq, app_evt);
+}
+
+static void
 vcl_send_session_connect_stream (vcl_worker_t *wrk, vcl_session_t *s)
 {
   app_session_evt_t _app_evt, *app_evt = &_app_evt;
@@ -446,6 +463,11 @@ vcl_session_connected_handler (vcl_worker_t *wrk, session_connected_msg_t *mp)
   if (mp->retval)
     {
       VDBG (0, "session %u: connect failed! %U", session_index, format_session_error, mp->retval);
+      if (session->session_state == VCL_STATE_CLOSED)
+	{
+	  vcl_session_free (wrk, session);
+	  return VCL_INVALID_SESSION_INDEX;
+	}
       session->session_state = VCL_STATE_DETACHED;
       session->vpp_handle = VCL_INVALID_SESSION_HANDLE;
       session->vpp_error = mp->retval;
@@ -489,7 +511,7 @@ vcl_session_connected_handler (vcl_worker_t *wrk, session_connected_msg_t *mp)
   /* Application closed session before connect reply */
   if (vcl_session_has_attr (session, VCL_SESS_ATTR_NONBLOCK) &&
       session->session_state == VCL_STATE_CLOSED)
-    vcl_send_session_disconnect (wrk, session);
+    vcl_send_session_terminate (wrk, session);
   else
     session->session_state = VCL_STATE_READY;
 
@@ -1793,6 +1815,11 @@ vcl_session_cleanup (vcl_worker_t *wrk, vcl_session_t *s, vcl_session_handle_t s
 	      "ERROR: session %u [0x%llx]: disconnect failed!"
 	      " rv %d (%s)",
 	      s->session_index, s->vpp_handle, rv, vppcom_retval_str (rv));
+    }
+  else if (s->session_state == VCL_STATE_UPDATED &&
+	   !vcl_session_has_vpp_flag (s, VCL_SESSION_VPP_F_STREAM))
+    {
+      vcl_send_session_cancel_connect (wrk, s);
     }
   else if (s->session_state == VCL_STATE_DISCONNECT)
     {
@@ -3417,6 +3444,8 @@ vcl_epoll_wait_handle_mq_event (vcl_worker_t *wrk, session_event_t *e, struct ep
 	}
       else
 	sid = e->session_index;
+      if (sid == VCL_INVALID_SESSION_INDEX)
+	break;
       s = vcl_session_get (wrk, sid);
       if (vcl_session_is_closed (s) || !vcl_ep_session_needs_evt (s, EPOLLOUT))
 	break;

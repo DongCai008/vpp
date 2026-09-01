@@ -424,6 +424,7 @@ typedef enum
   SESSION_CTRL_EVT_HALF_CLEANUP,
   SESSION_CTRL_EVT_CONNECT_STREAM,
   SESSION_CTRL_EVT_TERMINATE,
+  SESSION_CTRL_EVT_CANCEL_CONNECT,
 } session_evt_type_t;
 
 #define foreach_session_ctrl_evt                                                                   \
