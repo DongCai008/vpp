@@ -10,6 +10,9 @@
 
 __thread uword __vcl_worker_index = ~0;
 
+static u32 vcl_session_connected_handler (vcl_worker_t *wrk,
+					  session_connected_msg_t *mp);
+
 static inline int
 vcl_mq_dequeue_batch (vcl_worker_t * wrk, svm_msg_q_t * mq, u32 n_max_msg)
 {
@@ -223,6 +226,75 @@ vcl_send_session_terminate (vcl_worker_t *wrk, vcl_session_t *s)
   mp->client_index = wrk->api_client_handle;
   mp->handle = s->vpp_handle;
   app_send_ctrl_evt_to_vpp (mq, app_evt);
+}
+
+static void
+vcl_session_connect_complete (vcl_worker_t *wrk, vcl_session_t *session)
+{
+  /* Application closed session before connect reply */
+  if (vcl_session_has_attr (session, VCL_SESS_ATTR_NONBLOCK) &&
+      session->session_state == VCL_STATE_CLOSED)
+    vcl_send_session_terminate (wrk, session);
+  else
+    session->session_state = VCL_STATE_READY;
+}
+
+/* Exercise the same late-CONNECTED completion path with a pre-closed VCL
+ * session.  The session unittest resolves this symbol from libvppcom and
+ * verifies the TERMINATE event it queues. */
+int
+vcl_test_preclosed_connected (svm_msg_q_t *mq, u32 client_index,
+			      session_handle_t vpp_handle)
+{
+  vcl_worker_t wrk = {
+    .api_client_handle = client_index,
+  };
+  vcl_session_t session = {
+    .attributes = 1 << VCL_SESS_ATTR_NONBLOCK,
+    .session_state = VCL_STATE_CLOSED,
+    .vpp_evt_q = mq,
+    .vpp_handle = vpp_handle,
+  };
+
+  vcl_session_connect_complete (&wrk, &session);
+  return session.session_state == VCL_STATE_CLOSED ? 0 : -1;
+}
+
+/* The error completion owns and retires a VCL client already closed before
+ * its CONNECT reply.  Keep this paired with the establishment-won helper
+ * above so the session unittest covers both terminal ownership outcomes. */
+int
+vcl_test_preclosed_connect_error (void)
+{
+  vcl_worker_t wrk;
+  u32 debug;
+  session_connected_msg_t mp = {
+    .retval = SESSION_E_INVALID,
+  };
+  vcl_session_t *session;
+  u32 session_index;
+
+  clib_memset (&wrk, 0, sizeof (wrk));
+  /* This isolated worker has no VCL registration, so suppress diagnostic
+   * formatting that would otherwise dereference the global worker pool. */
+  debug = vcm->debug;
+  vcm->debug = 0;
+  session = vcl_session_alloc (&wrk);
+  session_index = session->session_index;
+  session->session_state = VCL_STATE_CLOSED;
+  mp.context = session_index;
+
+  if (vcl_session_connected_handler (&wrk, &mp) != VCL_INVALID_SESSION_INDEX ||
+      vcl_session_get (&wrk, session_index))
+    {
+      vcm->debug = debug;
+      return -1;
+    }
+
+  vcm->debug = debug;
+  /* vcl_session_free returned the session to its pool.  Keep the isolated
+   * pool backing allocation until process exit, like a normal VCL worker. */
+  return 0;
 }
 
 static void
@@ -531,12 +603,7 @@ vcl_session_connected_handler (vcl_worker_t * wrk,
 		    sizeof (session->transport.lcl_ip));
   session->transport.lcl_port = mp->lcl.port;
   VDBG (0, "%U connected", vcl_format_connected_session, session);
-  /* Application closed session before connect reply */
-  if (vcl_session_has_attr (session, VCL_SESS_ATTR_NONBLOCK)
-      && session->session_state == VCL_STATE_CLOSED)
-    vcl_send_session_terminate (wrk, session);
-  else
-    session->session_state = VCL_STATE_READY;
+  vcl_session_connect_complete (wrk, session);
 
   return session_index;
 }

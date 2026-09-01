@@ -92,5 +92,5 @@ add_vpp_plugin(unittest
 
   COMPONENT
   vpp-plugin-devtools
-  LINK_LIBRARIES vapiclient
+  LINK_LIBRARIES vapiclient vppcom
 )
