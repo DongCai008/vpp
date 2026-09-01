@@ -311,6 +311,76 @@ session_mq_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt)
     }
 }
 
+static u8
+session_mq_cancel_pending_connect (session_worker_t *wrk, session_connect_msg_t *mp)
+{
+  session_connect_msg_t *pending_mp;
+  session_evt_elt_t *he, *elt, *next;
+
+  he = clib_llist_elt (wrk->event_elts, wrk->pending_connects);
+  elt = clib_llist_next (wrk->event_elts, evt_list, he);
+  while (elt != he)
+    {
+      next = clib_llist_next (wrk->event_elts, evt_list, elt);
+      pending_mp = session_evt_ctrl_data (wrk, elt);
+      if (pending_mp->client_index == mp->client_index && pending_mp->wrk_index == mp->wrk_index &&
+	  pending_mp->context == mp->context)
+	{
+	  clib_llist_remove (wrk->event_elts, evt_list, elt);
+	  session_evt_ctrl_data_free (wrk, elt);
+	  clib_llist_put (wrk->event_elts, elt);
+	  wrk->n_pending_connects -= 1;
+	  return 1;
+	}
+      elt = next;
+    }
+
+  return 0;
+}
+
+static u8
+session_mq_cancel_half_open (app_worker_t *app_wrk, u32 context)
+{
+  session_handle_t *sh;
+  session_t *ho;
+
+  pool_foreach (sh, app_wrk->half_open_table)
+    {
+      ho = session_get_from_handle (*sh);
+      if (ho->app_wrk_index != app_wrk->wrk_index || ho->opaque != context)
+	continue;
+
+      app_worker_del_half_open (app_wrk, ho->ho_index);
+      session_cleanup_half_open (session_handle (ho));
+      return 1;
+    }
+
+  return 0;
+}
+
+static void
+session_mq_cancel_connect_handler (session_worker_t *wrk, session_evt_elt_t *elt)
+{
+  session_connect_msg_t *mp;
+  app_worker_t *app_wrk;
+  application_t *app;
+
+  mp = session_evt_ctrl_data (wrk, elt);
+  app = application_lookup (mp->client_index);
+  if (!app)
+    return;
+
+  app_wrk = application_get_worker (app, mp->wrk_index);
+  if (!app_wrk)
+    return;
+
+  if (!session_mq_cancel_pending_connect (wrk, mp) &&
+      !session_mq_cancel_half_open (app_wrk, mp->context))
+    return;
+
+  app_worker_connect_notify (app_wrk, 0, SESSION_E_INVALID, mp->context);
+}
+
 static void
 session_mq_connect_stream_handler (session_worker_t *wrk,
 				   session_evt_elt_t *elt)
@@ -883,6 +953,9 @@ session_wrk_handle_evts_main_rpc (void *args)
 	  break;
 	case SESSION_CTRL_EVT_CONNECT:
 	  session_mq_connect_handler (fwrk, elt);
+	  break;
+	case SESSION_CTRL_EVT_CANCEL_CONNECT:
+	  session_mq_cancel_connect_handler (fwrk, elt);
 	  break;
 	default:
 	  clib_warning ("unhandled %u", elt->evt.event_type);
@@ -1798,6 +1871,9 @@ session_event_dispatch_ctrl (session_worker_t * wrk, session_evt_elt_t * elt)
       break;
     case SESSION_CTRL_EVT_CONNECT:
       session_mq_connect_handler (wrk, elt);
+      break;
+    case SESSION_CTRL_EVT_CANCEL_CONNECT:
+      session_mq_cancel_connect_handler (wrk, elt);
       break;
     case SESSION_CTRL_EVT_CONNECT_STREAM:
       session_mq_connect_stream_handler (wrk, elt);
