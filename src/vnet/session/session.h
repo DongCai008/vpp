@@ -457,12 +457,7 @@ session_evt_alloc_old (session_worker_t * wrk)
 }
 
 int session_wrk_handle_mq (session_worker_t *wrk, svm_msg_q_t *mq);
-
-/* Internal unittest hooks for pre-connect cancellation. */
-u32 session_test_ctrl_evt_msg_size (session_evt_type_t event_type);
-u8 session_test_cancel_connect (session_worker_t *wrk, u32 client_index,
-				u32 wrk_index, u32 context);
-u8 session_test_deferred_cancel_connect (void);
+void session_wrk_dispatch_ctrl_events (session_worker_t *wrk);
 
 session_t *session_alloc (clib_thread_index_t thread_index);
 void session_free (session_t * s);
