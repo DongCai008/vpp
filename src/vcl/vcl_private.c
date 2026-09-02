@@ -223,6 +223,7 @@ vcl_worker_detach_sessions (vcl_worker_t *wrk)
 	  e->postponed = 1;
 	}
 
+      s->flags &= ~VCL_SESSION_F_PENDING_CONNECT;
       s->session_state = VCL_STATE_DETACHED;
       s->flags |= VCL_SESSION_F_APP_CLOSING;
     }

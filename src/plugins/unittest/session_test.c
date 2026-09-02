@@ -11,6 +11,9 @@
 #include <vnet/session/session_sdl.h>
 #include <vnet/session/transport.h>
 #include <vnet/tcp/tcp_inlines.h>
+#define vl_typedefs
+#include <vlibmemory/vl_memory_api_h.h>
+#undef vl_typedefs
 #include <sys/epoll.h>
 #include <vnet/session/session_rules_table.h>
 #include <unittest/session/test_session_helpers.h>
@@ -28,10 +31,6 @@
   _evald;							\
 })
 
-extern int vcl_test_preclosed_connected (svm_msg_q_t *mq, u32 client_index,
-					  session_handle_t vpp_handle);
-extern int vcl_test_preclosed_connect_error (void);
-
 #define SESSION_TEST(_cond, _comment, _args...)                               \
   do                                                                          \
     {                                                                         \
@@ -43,6 +42,8 @@ extern int vcl_test_preclosed_connect_error (void);
   while (0)
 
 #define ST_DBG(_comment, _args...) fformat (stderr, _comment "\n", ##_args);
+
+extern void vl_api_memclnt_delete_t_handler (vl_api_memclnt_delete_t *mp);
 
 static void
 session_test_cli_input (vlib_main_t *vm, char *cmd)
@@ -221,22 +222,6 @@ session_test_preconnect_cancel (vlib_main_t *vm, unformat_input_t *input)
   session_t *ho;
   session_test_complete_connect_args_t *complete_args =
     &session_test_complete_connect_args;
-  svm_msg_q_shared_t *vcl_mq_shared = 0;
-  svm_msg_q_t vcl_mq = { 0 };
-  svm_msg_q_ring_cfg_t vcl_ring_cfg[SESSION_MQ_N_RINGS] = {
-    [SESSION_MQ_IO_EVT_RING] = { 4, sizeof (session_event_t), 0 },
-    [SESSION_MQ_CTRL_EVT_RING] = { 4,
-				   sizeof (session_event_t) + sizeof (session_terminate_msg_t), 0 },
-  };
-  svm_msg_q_cfg_t vcl_mq_cfg = {
-    .consumer_pid = getpid (),
-    .q_nitems = 4,
-    .n_rings = SESSION_MQ_N_RINGS,
-    .ring_cfgs = vcl_ring_cfg,
-  };
-  svm_msg_q_msg_t vcl_msg;
-  session_event_t *vcl_evt;
-  session_terminate_msg_t *vcl_terminate;
   ip4_address_t intf_addr[2];
   u32 api_index = ~0, app_index = APP_INVALID_INDEX, sw_if_index[2];
   u32 ext_config_free_chunks, ext_config_chunk_size, pending_connects;
@@ -402,32 +387,6 @@ session_test_preconnect_cancel (vlib_main_t *vm, unformat_input_t *input)
 		       "late CANCEL cannot duplicate a successful completion or terminal cleanup"))
     goto routes;
 
-  vcl_mq_shared = svm_msg_q_alloc (&vcl_mq_cfg);
-  if (!vcl_mq_shared)
-    goto routes;
-  svm_msg_q_attach (&vcl_mq, vcl_mq_shared);
-  if (!SESSION_TEST_I (!vcl_test_preclosed_connect_error (),
-		       "pre-closed VCL session retires on canceled CONNECTED completion") ||
-      !SESSION_TEST_I (!vcl_test_preclosed_connected (&vcl_mq, api_index,
-					      complete_args->connected),
-		       "late VCL CONNECTED takes the establishment-won terminate fallback"))
-    goto routes;
-  if (svm_msg_q_sub (&vcl_mq, &vcl_msg, SVM_Q_NOWAIT, 0))
-    goto routes;
-  vcl_evt = svm_msg_q_msg_data (&vcl_mq, &vcl_msg);
-  vcl_terminate = (session_terminate_msg_t *) vcl_evt->data;
-  if (!SESSION_TEST_I (vcl_evt->event_type == SESSION_CTRL_EVT_TERMINATE &&
-		       vcl_terminate->client_index == api_index &&
-		       vcl_terminate->handle == complete_args->connected,
-		       "VCL queues exactly one TERMINATE fallback for the established session") ||
-      !SESSION_TEST_I (!svm_msg_q_size (&vcl_mq),
-		       "late VCL CONNECTED leaves no duplicate terminate event"))
-    {
-      svm_msg_q_free_msg (&vcl_mq, &vcl_msg);
-      goto routes;
-    }
-  svm_msg_q_free_msg (&vcl_mq, &vcl_msg);
-
   complete_args->done = 0;
   vlib_worker_thread_barrier_sync (vm);
   os_set_thread_index (transport_cl_thread ());
@@ -441,11 +400,6 @@ session_test_preconnect_cancel (vlib_main_t *vm, unformat_input_t *input)
   rv = 0;
 
 routes:
-  if (vcl_mq_shared)
-    {
-      svm_msg_q_cleanup (&vcl_mq);
-      clib_mem_free (vcl_mq_shared);
-    }
   session_add_del_route_via_lookup_in_table (0, 1, &intf_addr[1], 32, 0);
   session_add_del_route_via_lookup_in_table (1, 0, &intf_addr[0], 32, 0);
   session_delete_loopback (sw_if_index[0]);

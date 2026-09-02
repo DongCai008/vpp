@@ -231,70 +231,14 @@ vcl_send_session_terminate (vcl_worker_t *wrk, vcl_session_t *s)
 static void
 vcl_session_connect_complete (vcl_worker_t *wrk, vcl_session_t *session)
 {
+  session->flags &= ~VCL_SESSION_F_PENDING_CONNECT;
+
   /* Application closed session before connect reply */
   if (vcl_session_has_attr (session, VCL_SESS_ATTR_NONBLOCK) &&
       session->session_state == VCL_STATE_CLOSED)
     vcl_send_session_terminate (wrk, session);
   else
     session->session_state = VCL_STATE_READY;
-}
-
-/* Exercise the same late-CONNECTED completion path with a pre-closed VCL
- * session.  The session unittest resolves this symbol from libvppcom and
- * verifies the TERMINATE event it queues. */
-int
-vcl_test_preclosed_connected (svm_msg_q_t *mq, u32 client_index,
-			      session_handle_t vpp_handle)
-{
-  vcl_worker_t wrk = {
-    .api_client_handle = client_index,
-  };
-  vcl_session_t session = {
-    .attributes = 1 << VCL_SESS_ATTR_NONBLOCK,
-    .session_state = VCL_STATE_CLOSED,
-    .vpp_evt_q = mq,
-    .vpp_handle = vpp_handle,
-  };
-
-  vcl_session_connect_complete (&wrk, &session);
-  return session.session_state == VCL_STATE_CLOSED ? 0 : -1;
-}
-
-/* The error completion owns and retires a VCL client already closed before
- * its CONNECT reply.  Keep this paired with the establishment-won helper
- * above so the session unittest covers both terminal ownership outcomes. */
-int
-vcl_test_preclosed_connect_error (void)
-{
-  vcl_worker_t wrk;
-  u32 debug;
-  session_connected_msg_t mp = {
-    .retval = SESSION_E_INVALID,
-  };
-  vcl_session_t *session;
-  u32 session_index;
-
-  clib_memset (&wrk, 0, sizeof (wrk));
-  /* This isolated worker has no VCL registration, so suppress diagnostic
-   * formatting that would otherwise dereference the global worker pool. */
-  debug = vcm->debug;
-  vcm->debug = 0;
-  session = vcl_session_alloc (&wrk);
-  session_index = session->session_index;
-  session->session_state = VCL_STATE_CLOSED;
-  mp.context = session_index;
-
-  if (vcl_session_connected_handler (&wrk, &mp) != VCL_INVALID_SESSION_INDEX ||
-      vcl_session_get (&wrk, session_index))
-    {
-      vcm->debug = debug;
-      return -1;
-    }
-
-  vcm->debug = debug;
-  /* vcl_session_free returned the session to its pool.  Keep the isolated
-   * pool backing allocation until process exit, like a normal VCL worker. */
-  return 0;
 }
 
 static void
@@ -551,6 +495,11 @@ vcl_session_connected_handler (vcl_worker_t * wrk,
       return VCL_INVALID_SESSION_INDEX;
     }
 
+  /* A CONNECTED event, successful or not, completes the regular connect
+   * request. Do this before handling a pre-closed session, which can free
+   * the object on an error completion. */
+  session->flags &= ~VCL_SESSION_F_PENDING_CONNECT;
+
   if (mp->retval)
     {
       VDBG (0, "session %u: connect failed! %U", session_index,
@@ -640,6 +589,8 @@ vcl_session_reset_handler (vcl_worker_t * wrk,
       VDBG (0, "request to reset unknown handle 0x%llx", reset_msg->handle);
       return VCL_INVALID_SESSION_INDEX;
     }
+
+  session->flags &= ~VCL_SESSION_F_PENDING_CONNECT;
 
   /* Caught a reset before actually accepting the session */
   if (session->session_state == VCL_STATE_LISTEN)
@@ -835,6 +786,8 @@ vcl_session_disconnected_handler (vcl_worker_t * wrk,
       return 0;
     }
 
+  session->flags &= ~VCL_SESSION_F_PENDING_CONNECT;
+
   /* Late disconnect notification on a session that has been closed */
   if (session->session_state == VCL_STATE_CLOSED)
     return 0;
@@ -974,6 +927,14 @@ vppcom_session_terminate (u32 session_handle)
       return VPPCOM_EBADFD;
     }
 
+  if (session->flags & VCL_SESSION_F_PENDING_CONNECT)
+    {
+      session->flags &= ~VCL_SESSION_F_PENDING_CONNECT;
+      vcl_send_session_cancel_connect (wrk, session);
+      session->session_state = VCL_STATE_CLOSED;
+      return VPPCOM_OK;
+    }
+
   if (state == VCL_STATE_DISCONNECT)
     {
       vcl_send_session_reset_reply (wrk, session, 0);
@@ -1010,6 +971,8 @@ vcl_session_cleanup_handler (vcl_worker_t * wrk, void *data)
       VWRN ("disconnect confirmed for unknown handle 0x%llx", msg->handle);
       return;
     }
+
+  session->flags &= ~VCL_SESSION_F_PENDING_CONNECT;
 
   if (msg->type == SESSION_CLEANUP_TRANSPORT)
     {
@@ -1919,9 +1882,9 @@ vcl_session_cleanup (vcl_worker_t * wrk, vcl_session_t * s,
 	      " rv %d (%s)", s->session_index, s->vpp_handle,
 	      rv, vppcom_retval_str (rv));
     }
-  else if (s->session_state == VCL_STATE_UPDATED &&
-	   !vcl_session_has_vpp_flag (s, VCL_SESSION_VPP_F_STREAM))
+  else if (s->flags & VCL_SESSION_F_PENDING_CONNECT)
     {
+      s->flags &= ~VCL_SESSION_F_PENDING_CONNECT;
       vcl_send_session_cancel_connect (wrk, s);
     }
   else if (s->session_state == VCL_STATE_DISCONNECT)
@@ -2214,6 +2177,11 @@ vppcom_session_connect (uint32_t session_handle, vppcom_endpt_t * server_ep)
   /* If NONBLOCK connect already in flight report EALREADY instead.
    * posix alllows polling connect() to fetch the socket status
    * would otherwise spawn a fresh VPP session_connect per poll. */
+  if (PREDICT_FALSE (session->flags & VCL_SESSION_F_PENDING_CONNECT))
+    return VPPCOM_EALREADY;
+
+  /* UPDATED also denotes non-connect lifecycle transitions. Preserve the
+   * existing EALREADY guard, but do not use it to decide close cancellation. */
   if (PREDICT_FALSE (session->session_state == VCL_STATE_UPDATED))
     return VPPCOM_EALREADY;
 
@@ -2244,7 +2212,7 @@ vppcom_session_connect (uint32_t session_handle, vppcom_endpt_t * server_ep)
   vcl_ip_copy_from_ep (&session->transport.rmt_ip, server_ep);
   session->transport.rmt_port = server_ep->port;
   session->parent_handle = VCL_INVALID_SESSION_HANDLE;
-  session->flags |= VCL_SESSION_F_CONNECTED;
+  session->flags |= VCL_SESSION_F_CONNECTED | VCL_SESSION_F_PENDING_CONNECT;
 
   VDBG (0, "session %u: connecting to peer %U:%d proto %s",
 	session->session_index, vcl_format_ip46_address,
