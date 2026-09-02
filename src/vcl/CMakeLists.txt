@@ -78,3 +78,11 @@ add_vpp_headers(vcl
   vcl_locked.h
   ldp_socket_wrapper.h
 )
+
+if(VPP_BUILD_TESTS)
+  add_vpp_test(vcl_api_surface_test
+    SOURCES tests/vcl_api_surface_test.c
+    LINK_LIBRARIES vppcom
+    NO_INSTALL
+  )
+endif()
