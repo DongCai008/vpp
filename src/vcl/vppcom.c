@@ -4,6 +4,7 @@
 
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/socket.h>
 #include <vcl/vppcom.h>
 #include <vcl/vcl_private.h>
 #include <svm/fifo_segment.h>
@@ -2528,7 +2529,7 @@ vcl_fifo_is_writeable (svm_fifo_t *f, u32 len, u8 is_dgram)
 
 always_inline int
 vppcom_session_write_inline (vcl_worker_t *wrk, vcl_session_t *s, void *buf, size_t n, u8 is_flush,
-			     u8 is_dgram)
+			     u8 is_dontwait, u8 is_dgram)
 {
   int n_write, is_nonblocking;
   session_evt_type_t et;
@@ -2566,7 +2567,7 @@ vppcom_session_write_inline (vcl_worker_t *wrk, vcl_session_t *s, void *buf, siz
     }
 
   tx_fifo = s->tx_fifo;
-  is_nonblocking = vcl_session_has_attr (s, VCL_SESS_ATTR_NONBLOCK);
+  is_nonblocking = vcl_session_has_attr (s, VCL_SESS_ATTR_NONBLOCK) || is_dontwait;
 
   if (!vcl_fifo_is_writeable (tx_fifo, n, is_dgram))
     {
@@ -2690,7 +2691,8 @@ vppcom_session_write (uint32_t session_handle, void *buf, size_t n)
   if (PREDICT_FALSE (!s))
     return VPPCOM_EBADFD;
 
-  return vppcom_session_write_inline (wrk, s, buf, n, 0 /* is_flush */, s->is_dgram ? 1 : 0);
+  return vppcom_session_write_inline (wrk, s, buf, n, 0 /* is_flush */, 0 /* is_dontwait */,
+				      s->is_dgram ? 1 : 0);
 }
 
 int
@@ -2703,7 +2705,8 @@ vppcom_session_write_msg (uint32_t session_handle, void *buf, size_t n)
   if (PREDICT_FALSE (!s))
     return VPPCOM_EBADFD;
 
-  return vppcom_session_write_inline (wrk, s, buf, n, 1 /* is_flush */, s->is_dgram ? 1 : 0);
+  return vppcom_session_write_inline (wrk, s, buf, n, 1 /* is_flush */, 0 /* is_dontwait */,
+				      s->is_dgram ? 1 : 0);
 }
 
 #define vcl_fifo_rx_evt_valid_or_break(_s)                                                         \
@@ -3912,6 +3915,74 @@ vppcom_epoll_wait (uint32_t vep_handle, struct epoll_event *events, int maxevent
   return n_evts;
 }
 
+static u32
+vcl_session_socket_error (vcl_session_t *session)
+{
+  if (session->session_state == VCL_STATE_DISCONNECT)
+    return ECONNRESET;
+
+  switch (session->vpp_error)
+    {
+    case SESSION_E_NONE:
+      return 0;
+    case SESSION_E_PORTINUSE:
+      return EADDRINUSE;
+    case SESSION_E_REFUSED:
+      return ECONNREFUSED;
+    case SESSION_E_TIMEDOUT:
+      return ETIMEDOUT;
+    default:
+      return EFAULT;
+    }
+}
+
+static vppcom_tcp_state_t
+vcl_session_tcp_state (vcl_session_t *session)
+{
+  if (session->vpp_error != SESSION_E_NONE)
+    return VPPCOM_TCP_STATE_ERROR;
+
+  switch (session->session_state)
+    {
+    case VCL_STATE_CLOSED:
+      return VPPCOM_TCP_STATE_CLOSED;
+    case VCL_STATE_LISTEN:
+      return VPPCOM_TCP_STATE_LISTEN;
+    case VCL_STATE_READY:
+      return VPPCOM_TCP_STATE_ESTABLISHED;
+    case VCL_STATE_VPP_CLOSING:
+    case VCL_STATE_DISCONNECT:
+      return VPPCOM_TCP_STATE_CLOSING;
+    default:
+      return VPPCOM_TCP_STATE_UNKNOWN;
+    }
+}
+
+static void
+vcl_session_tcp_info (vcl_session_t *session, vppcom_tcp_info_t *info)
+{
+  memset (info, 0, sizeof (*info));
+  info->version = VPPCOM_TCP_INFO_VERSION;
+  info->length = sizeof (*info);
+  info->state = vcl_session_tcp_state (session);
+  info->tcp_user_timeout = session->tcp_user_timeout;
+  info->sndbuf_bytes = session->sndbuf_size ? session->sndbuf_size :
+		       session->tx_fifo	    ? svm_fifo_size (session->tx_fifo) :
+					      vcm->cfg.tx_fifo_size;
+  info->rcvbuf_bytes = session->rcvbuf_size ? session->rcvbuf_size :
+		       session->rx_fifo	    ? svm_fifo_size (session->rx_fifo) :
+					      vcm->cfg.rx_fifo_size;
+  info->socket_error = vcl_session_socket_error (session);
+
+  if (session->tx_fifo && vcl_session_is_open (session))
+    {
+      info->writable_bytes = vcl_session_write_ready (session);
+      info->write_queue_bytes = svm_fifo_max_dequeue (session->tx_fifo);
+    }
+  if (session->rx_fifo && vcl_session_is_open (session))
+    info->readable_bytes = vcl_session_read_ready (session);
+}
+
 int
 vppcom_session_attr (uint32_t session_handle, uint32_t op, void *buffer, uint32_t *buflen)
 {
@@ -4113,10 +4184,11 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op, void *buffer, uint32_
     case VPPCOM_ATTR_GET_ERROR:
       if (buffer && buflen && (*buflen >= sizeof (int)))
 	{
-	  *(int *) buffer = 0;
+	  *(int *) buffer = vcl_session_socket_error (session);
+	  session->vpp_error = SESSION_E_NONE;
 	  *buflen = sizeof (int);
 
-	  VDBG (2, "VPPCOM_ATTR_GET_ERROR: %d, buflen %d, #VPP-TBD#", *(int *) buffer, *buflen);
+	  VDBG (2, "VPPCOM_ATTR_GET_ERROR: %d, buflen %d", *(int *) buffer, *buflen);
 	}
       else
 	rv = VPPCOM_EINVAL;
@@ -4457,6 +4529,50 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op, void *buffer, uint32_
 	rv = VPPCOM_EINVAL;
       break;
 
+    case VPPCOM_ATTR_GET_TCP_USER_TIMEOUT:
+      if (PREDICT_FALSE (session->session_type != VPPCOM_PROTO_TCP))
+	{
+	  rv = VPPCOM_ENOPROTOOPT;
+	  break;
+	}
+      if (PREDICT_FALSE (!buffer || !buflen || *buflen < sizeof (u32)))
+	{
+	  rv = VPPCOM_EINVAL;
+	  break;
+	}
+      *(u32 *) buffer = session->tcp_user_timeout;
+      *buflen = sizeof (u32);
+      break;
+
+    case VPPCOM_ATTR_SET_TCP_USER_TIMEOUT:
+      if (PREDICT_FALSE (session->session_type != VPPCOM_PROTO_TCP))
+	{
+	  rv = VPPCOM_ENOPROTOOPT;
+	  break;
+	}
+      if (PREDICT_FALSE (!buffer || !buflen || *buflen != sizeof (u32)))
+	{
+	  rv = VPPCOM_EINVAL;
+	  break;
+	}
+      session->tcp_user_timeout = *(u32 *) buffer;
+      break;
+
+    case VPPCOM_ATTR_GET_TCP_INFO:
+      if (PREDICT_FALSE (session->session_type != VPPCOM_PROTO_TCP))
+	{
+	  rv = VPPCOM_ENOPROTOOPT;
+	  break;
+	}
+      if (PREDICT_FALSE (!buffer || !buflen || *buflen < sizeof (vppcom_tcp_info_t)))
+	{
+	  rv = VPPCOM_EINVAL;
+	  break;
+	}
+      vcl_session_tcp_info (session, buffer);
+      *buflen = sizeof (vppcom_tcp_info_t);
+      break;
+
     case VPPCOM_ATTR_GET_TCP_USER_MSS:
       if (!(buffer && buflen && (*buflen >= sizeof (u32))))
 	{
@@ -4779,6 +4895,7 @@ vppcom_session_sendto (uint32_t session_handle, void *buffer, uint32_t buflen, i
 {
   vcl_worker_t *wrk = vcl_worker_get_current ();
   vcl_session_t *s;
+  u8 is_flush, is_dontwait;
 
   s = vcl_session_get_w_handle (wrk, session_handle);
   if (PREDICT_FALSE (!s))
@@ -4824,13 +4941,14 @@ vppcom_session_sendto (uint32_t session_handle, void *buffer, uint32_t buflen, i
 	}
     }
 
-  if (flags)
-    {
-      // TBD check the flags and do the right thing
-      VDBG (2, "handling flags 0x%u (%d) not implemented yet.", flags, flags);
-    }
+  if (flags & ~(MSG_DONTWAIT | MSG_EOR | MSG_MORE | MSG_NOSIGNAL))
+    return VPPCOM_ENOTSUP;
 
-  return (vppcom_session_write_inline (wrk, s, buffer, buflen, 1, s->is_dgram ? 1 : 0));
+  is_dontwait = flags & MSG_DONTWAIT;
+  is_flush = !(flags & MSG_MORE) || (flags & MSG_EOR);
+
+  return vppcom_session_write_inline (wrk, s, buffer, buflen, is_flush, is_dontwait,
+				      s->is_dgram ? 1 : 0);
 }
 
 int

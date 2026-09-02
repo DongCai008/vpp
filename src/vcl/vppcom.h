@@ -204,7 +204,60 @@ typedef enum
   VPPCOM_ATTR_SET_STREAM_FLAGS,
   VPPCOM_ATTR_GET_APP_PROTO_ERR_CODE,
   VPPCOM_ATTR_SET_APP_PROTO_ERR_CODE,
+  /*
+   * TCP stream only. GET/SET use u32 milliseconds. Zero disables the VCL
+   * requested-timeout value. SET is valid before or after connect; this VCL
+   * API retains the request for observability but does not promise a kernel
+   * transport-loss timer. Invalid buffers return VPPCOM_EINVAL and non-TCP
+   * sessions return VPPCOM_ENOPROTOOPT.
+   */
+  VPPCOM_ATTR_GET_TCP_USER_TIMEOUT,
+  VPPCOM_ATTR_SET_TCP_USER_TIMEOUT,
+  /* TCP stream only. vppcom_tcp_info_t is a copied, read-only snapshot. */
+  VPPCOM_ATTR_GET_TCP_INFO,
 } vppcom_attr_op_t;
+
+/* Keep the established attribute values stable for existing VCL clients. */
+typedef char vppcom_attr_op_stability_check[
+  VPPCOM_ATTR_SET_APP_PROTO_ERR_CODE == 51 ? 1 : -1];
+
+typedef enum vppcom_tcp_state_
+{
+  VPPCOM_TCP_STATE_UNKNOWN = 0,
+  VPPCOM_TCP_STATE_CLOSED,
+  VPPCOM_TCP_STATE_LISTEN,
+  VPPCOM_TCP_STATE_SYN_SENT,
+  VPPCOM_TCP_STATE_ESTABLISHED,
+  VPPCOM_TCP_STATE_CLOSING,
+  VPPCOM_TCP_STATE_ERROR,
+} vppcom_tcp_state_t;
+
+#define VPPCOM_TCP_INFO_VERSION 1
+
+/*
+ * Stable VCL TCP state snapshot. All byte counts are in bytes and
+ * tcp_user_timeout is in milliseconds. GET_TCP_INFO requires buffer to point
+ * to this complete structure and returns VPPCOM_EINVAL for a shorter buffer,
+ * VPPCOM_ENOPROTOOPT for a non-TCP session, and VPPCOM_EBADFD for an invalid
+ * session. The snapshot contains no internal pointers and is valid in every
+ * TCP session phase; unavailable FIFO-derived counts are reported as zero.
+ */
+typedef struct vppcom_tcp_info_
+{
+  uint32_t version;
+  uint32_t length;
+  uint32_t state;
+  uint32_t tcp_user_timeout;
+  uint32_t sndbuf_bytes;
+  uint32_t rcvbuf_bytes;
+  uint32_t readable_bytes;
+  uint32_t writable_bytes;
+  uint32_t write_queue_bytes;
+  uint32_t socket_error;
+} vppcom_tcp_info_t;
+
+typedef char vppcom_tcp_info_size_check[
+  sizeof (vppcom_tcp_info_t) == 40 ? 1 : -1];
 
 typedef enum {
   VPPCOM_STREAM_F_UNIDIRECTIONAL = 1 << 0,
@@ -290,6 +343,15 @@ extern int vppcom_session_write (uint32_t session_handle, void *buf,
 				 size_t n);
 extern int vppcom_session_write_msg (uint32_t session_handle, void *buf,
 				     size_t n);
+
+/*
+ * vppcom_session_write_msg always requests a transport flush after accepting
+ * bytes. vppcom_session_sendto accepts MSG_MORE and MSG_EOR as flush control:
+ * MSG_MORE suppresses the flush, while MSG_EOR forces it. MSG_DONTWAIT uses a
+ * nonblocking enqueue for that call and MSG_NOSIGNAL is a VCL-safe no-op; any
+ * other send flag returns VPPCOM_ENOTSUP. Successful calls return the
+ * number of bytes accepted.
+ */
 
 extern int vppcom_select (int n_bits, vcl_si_set * read_map,
 			  vcl_si_set * write_map, vcl_si_set * except_map,
