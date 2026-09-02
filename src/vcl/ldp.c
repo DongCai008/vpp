@@ -1798,8 +1798,10 @@ sendmsg (int fd, const struct msghdr * msg, int flags)
 
       for (i = 0; i < msg->msg_iovlen; ++i)
 	{
+	  int iov_flags = vls_sendmsg_iov_flags (flags, i == msg->msg_iovlen - 1);
+
 	  rv = ldp_vls_sendo (vlsh, iov[i].iov_base, iov[i].iov_len, app_tlvs,
-			      flags, msg->msg_name, msg->msg_namelen);
+			      iov_flags, msg->msg_name, msg->msg_namelen);
 	  if (rv < 0)
 	    break;
 	  else

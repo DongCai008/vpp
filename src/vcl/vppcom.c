@@ -564,6 +564,7 @@ vcl_session_connected_handler (vcl_worker_t * wrk,
       session->session_state = VCL_STATE_DETACHED;
       session->vpp_handle = VCL_INVALID_SESSION_HANDLE;
       session->vpp_error = mp->retval;
+      session->socket_error = vcl_session_socket_error_from_vpp_error (mp->retval);
       return session_index;
     }
 
@@ -654,6 +655,7 @@ vcl_session_reset_handler (vcl_worker_t * wrk,
   if (session->session_state != VCL_STATE_CLOSED)
     session->session_state = VCL_STATE_DISCONNECT;
 
+  session->socket_error = ECONNRESET;
   session->flags |= (VCL_SESSION_F_RD_SHUTDOWN | VCL_SESSION_F_WR_SHUTDOWN);
   VDBG (0, "session %u [0x%llx]: reset", sid, reset_msg->handle);
   return sid;
@@ -675,6 +677,7 @@ vcl_session_bound_handler (vcl_worker_t * wrk, session_bound_msg_t * mp)
 	  session->session_state = VCL_STATE_DETACHED;
 	  session->vpp_handle = mp->handle;
 	  session->vpp_error = mp->retval;
+	  session->socket_error = vcl_session_socket_error_from_vpp_error (mp->retval);
 	  return sid;
 	}
       else
@@ -1798,6 +1801,7 @@ vppcom_session_create (u8 proto, u8 is_nonblocking)
   session->vpp_handle = SESSION_INVALID_HANDLE;
   session->is_dgram = vcl_proto_is_dgram (proto);
   session->vpp_error = SESSION_E_NONE;
+  session->socket_error = 0;
 
   if (is_nonblocking)
     vcl_session_set_attr (session, VCL_SESS_ATTR_NONBLOCK);
@@ -4007,13 +4011,10 @@ vppcom_epoll_wait (uint32_t vep_handle, struct epoll_event *events,
   return n_evts;
 }
 
-static u32
-vcl_session_socket_error (vcl_session_t *session)
+u32
+vcl_session_socket_error_from_vpp_error (i32 vpp_error)
 {
-  if (session->session_state == VCL_STATE_DISCONNECT)
-    return ECONNRESET;
-
-  switch (session->vpp_error)
+  switch (vpp_error)
     {
     case SESSION_E_NONE:
       return 0;
@@ -4026,6 +4027,21 @@ vcl_session_socket_error (vcl_session_t *session)
     default:
       return EFAULT;
     }
+}
+
+static u32
+vcl_session_socket_error (vcl_session_t *session)
+{
+  return session->socket_error;
+}
+
+u32
+vcl_session_socket_error_take (vcl_session_t *session)
+{
+  u32 socket_error = vcl_session_socket_error (session);
+
+  session->socket_error = 0;
+  return socket_error;
 }
 
 static vppcom_tcp_state_t
@@ -4300,8 +4316,7 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
     case VPPCOM_ATTR_GET_ERROR:
       if (buffer && buflen && (*buflen >= sizeof (int)))
 	{
-	  *(int *) buffer = vcl_session_socket_error (session);
-	  session->vpp_error = SESSION_E_NONE;
+	  *(int *) buffer = vcl_session_socket_error_take (session);
 	  *buflen = sizeof (int);
 
 	  VDBG (2, "VPPCOM_ATTR_GET_ERROR: %d, buflen %d",

@@ -31,6 +31,7 @@ ssize_t vls_recvfrom (vls_handle_t vlsh, void *buffer, uint32_t buflen,
 		      int flags, vppcom_endpt_t * ep);
 int vls_write (vls_handle_t vlsh, void *buf, size_t nbytes);
 int vls_write_msg (vls_handle_t vlsh, void *buf, size_t nbytes);
+int vls_sendmsg_iov_flags (int flags, int is_final_iov);
 int vls_sendto (vls_handle_t vlsh, void *buf, int buflen, int flags,
 		vppcom_endpt_t * ep);
 int vls_attr (vls_handle_t vlsh, uint32_t op, void *buffer,

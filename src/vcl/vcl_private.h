@@ -182,6 +182,7 @@ typedef struct vcl_session_
   u8 vpp_flags;
 
   i32 vpp_error;
+  u32 socket_error; /* Pending POSIX socket error, consumed by SO_ERROR */
 
 #if (VCL_ELOG > 0)
   elog_track_t elog_track;
@@ -405,6 +406,9 @@ typedef struct vppcom_main_t_
 
 extern vppcom_main_t *vcm;
 extern vppcom_main_t _vppcom_main;
+
+u32 vcl_session_socket_error_take (vcl_session_t *session);
+u32 vcl_session_socket_error_from_vpp_error (i32 vpp_error);
 
 #define VCL_INVALID_SESSION_INDEX ((u32)~0)
 #define VCL_INVALID_SESSION_HANDLE ((u64)~0)
