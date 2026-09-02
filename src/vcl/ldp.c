@@ -1987,6 +1987,47 @@ recvmmsg (int fd, struct mmsghdr *vmessages,
 }
 #endif
 
+static u8
+ldp_vppcom_tcp_state_to_linux (u32 state)
+{
+  switch (state)
+    {
+    case VPPCOM_TCP_STATE_LISTEN:
+      return TCP_LISTEN;
+    case VPPCOM_TCP_STATE_SYN_SENT:
+      return TCP_SYN_SENT;
+    case VPPCOM_TCP_STATE_ESTABLISHED:
+      return TCP_ESTABLISHED;
+    case VPPCOM_TCP_STATE_CLOSING:
+      return TCP_CLOSING;
+    default:
+      return TCP_CLOSE;
+    }
+}
+
+static int
+ldp_vls_tcp_info (vls_handle_t vlsh, void *optval, socklen_t *optlen)
+{
+  vppcom_tcp_info_t vpp_info;
+  struct tcp_info info = {};
+  u32 vpp_info_len = sizeof (vpp_info);
+  socklen_t copy_len;
+  int rv;
+
+  if (!optval || !optlen)
+    return VPPCOM_EFAULT;
+
+  rv = vls_attr (vlsh, VPPCOM_ATTR_GET_TCP_INFO, &vpp_info, &vpp_info_len);
+  if (rv)
+    return rv;
+
+  info.tcpi_state = ldp_vppcom_tcp_state_to_linux (vpp_info.state);
+  copy_len = *optlen < sizeof (info) ? *optlen : sizeof (info);
+  clib_memcpy (optval, &info, copy_len);
+  *optlen = copy_len;
+  return VPPCOM_OK;
+}
+
 int
 getsockopt (int fd, int level, int optname,
 	    void *__restrict optval, socklen_t * __restrict optlen)
@@ -2022,20 +2063,12 @@ getsockopt (int fd, int level, int optname,
 	      rv = vls_attr (vlsh, VPPCOM_ATTR_GET_TCP_KEEPINTVL,
 			     optval, optlen);
 	      break;
+	    case TCP_USER_TIMEOUT:
+	      rv = vls_attr (vlsh, VPPCOM_ATTR_GET_TCP_USER_TIMEOUT,
+			     optval, optlen);
+	      break;
 	    case TCP_INFO:
-	      /* Note: tcp_info in netinet/tcp.h and linux/tcp.h have
-	       * different lenghts but overlap. Accept both for now */
-	      if (optval && optlen)
-		{
-		  LDBG (1,
-			"fd %d: vlsh %u SOL_TCP, TCP_INFO, optval %p, "
-			"optlen %d: #LDP-NOP#",
-			fd, vlsh, optval, *optlen);
-		  memset (optval, 0, *optlen);
-		  rv = VPPCOM_OK;
-		}
-	      else
-		rv = -EFAULT;
+	      rv = ldp_vls_tcp_info (vlsh, optval, optlen);
 	      break;
 	    case TCP_CONGESTION:
 	      *optlen = strlen ("cubic");
@@ -2174,6 +2207,10 @@ setsockopt (int fd, int level, int optname,
 	      break;
 	    case TCP_KEEPINTVL:
 	      rv = vls_attr (vlsh, VPPCOM_ATTR_SET_TCP_KEEPINTVL,
+			     (void *) optval, &optlen);
+	      break;
+	    case TCP_USER_TIMEOUT:
+	      rv = vls_attr (vlsh, VPPCOM_ATTR_SET_TCP_USER_TIMEOUT,
 			     (void *) optval, &optlen);
 	      break;
 	    case TCP_CONGESTION:

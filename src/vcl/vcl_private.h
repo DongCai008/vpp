@@ -175,6 +175,7 @@ typedef struct vcl_session_
 
   u32 sndbuf_size;		// VPP-TBD: Hack until support setsockopt(SO_SNDBUF)
   u32 rcvbuf_size;		// VPP-TBD: Hack until support setsockopt(SO_RCVBUF)
+  u32 tcp_user_timeout;		/* Requested TCP_USER_TIMEOUT in milliseconds */
 
   transport_endpt_ext_cfg_t *ext_config;
   u8 dscp;
