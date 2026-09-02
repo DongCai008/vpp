@@ -1285,6 +1285,7 @@ vcl_handle_mq_event (vcl_worker_t * wrk, session_event_t * e)
 	{
 	  s->flags |= VCL_SESSION_F_PENDING_DISCONNECT;
 	  s->session_state = VCL_STATE_DISCONNECT;
+	  s->socket_error = ECONNRESET;
 	  s->flags |= (VCL_SESSION_F_RD_SHUTDOWN | VCL_SESSION_F_WR_SHUTDOWN);
 	  vec_add2 (wrk->unhandled_evts_vector, ecpy, 1);
 	  *ecpy = *e;
@@ -2891,6 +2892,7 @@ vcl_select_handle_mq_event (vcl_worker_t * wrk, session_event_t * e,
 	{
 	  sid = e->session_index;
 	  s = vcl_session_get (wrk, sid);
+	  s->socket_error = ECONNRESET;
 	  s->flags &= ~VCL_SESSION_F_PENDING_DISCONNECT;
 	}
       if (vcl_session_is_closed (s))
@@ -3669,6 +3671,7 @@ vcl_epoll_wait_handle_mq_event (vcl_worker_t * wrk, session_event_t * e,
 	{
 	  sid = e->session_index;
 	  s = vcl_session_get (wrk, sid);
+	  s->socket_error = ECONNRESET;
 	  s->flags &= ~VCL_SESSION_F_PENDING_DISCONNECT;
 	}
       if (vcl_session_is_closed (s) || !vcl_ep_session_needs_evt (s, EPOLLHUP))
