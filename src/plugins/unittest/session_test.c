@@ -15,9 +15,14 @@
 #include <vnet/session/session_rules_table.h>
 #include <unittest/session/test_session_helpers.h>
 
+#define vl_typedefs
+#include <vlibmemory/vl_memory_api_h.h>
+#undef vl_typedefs
+
 extern int vcl_test_preclosed_connected (svm_msg_q_t *mq, u32 client_index,
 					  session_handle_t vpp_handle);
 extern int vcl_test_preclosed_connect_error (void);
+extern void vl_api_memclnt_delete_t_handler (vl_api_memclnt_delete_t *mp);
 
 #define SESSION_TEST_I(_cond, _comment, _args...)		\
 ({								\
