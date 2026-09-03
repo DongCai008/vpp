@@ -1972,6 +1972,65 @@ listen_session_get_transport (session_t * s)
 				 s->connection_index);
 }
 
+int
+session_table_iteration (clib_thread_index_t thread_index,
+			  u32 start_session_index, u32 max_count,
+			  session_table_iter_fn_t iter_fn, void *iter_arg,
+			  u32 *visited, u32 *next_session_index)
+{
+  u32 n_visited = 0, end_index, index, next_index;
+  session_table_iter_result_t rv;
+  session_worker_t *wrk;
+  session_t *sessions, *s;
+  int result = 0;
+
+  ASSERT (vlib_get_thread_index () == 0);
+  ASSERT (vlib_worker_thread_barrier_held ());
+
+  next_index = start_session_index;
+
+  if (thread_index >= vec_len (session_main.wrk) || !iter_fn ||
+      max_count == 0)
+    {
+      result = -1;
+      goto done;
+    }
+
+  wrk = session_main_get_worker (thread_index);
+  sessions = wrk->sessions;
+  end_index = vec_len (sessions);
+
+  if (start_session_index >= end_index)
+    goto done;
+
+  pool_foreach_stepping_index (index, start_session_index, end_index,
+				sessions)
+    {
+      s = pool_elt_at_index (sessions, index);
+      rv = iter_fn (s, thread_index, iter_arg);
+      next_index = index + 1;
+
+      if (rv == SESSION_TABLE_ITER_ERROR)
+	{
+	  result = -2;
+	  break;
+	}
+
+      n_visited++;
+
+      if (rv == SESSION_TABLE_ITER_STOP || n_visited >= max_count)
+	break;
+    }
+
+done:
+  if (visited)
+    *visited = n_visited;
+  if (next_session_index)
+    *next_session_index = next_index;
+
+  return result;
+}
+
 void
 session_queue_run_on_main_thread (vlib_main_t * vm)
 {

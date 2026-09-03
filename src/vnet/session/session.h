@@ -466,6 +466,120 @@ void session_program_cleanup (session_t *s);
 void session_cleanup_half_open (session_handle_t ho_handle);
 u8 session_is_valid (u32 si, u8 thread_index);
 
+/**
+ * Session table iteration result
+ *
+ * Returned by a session_table_iter_fn_t callback to tell
+ * session_table_iteration () whether to keep walking the pool, stop the
+ * walk successfully, or stop the walk and report an iteration failure.
+ */
+typedef enum session_table_iter_result_
+{
+  SESSION_TABLE_ITER_CONTINUE,
+  SESSION_TABLE_ITER_STOP,
+  SESSION_TABLE_ITER_ERROR,
+} session_table_iter_result_t;
+
+/**
+ * Session table iteration callback
+ *
+ * Invoked once per allocated pool entry accepted by session_table_iteration
+ * (), synchronously, on the main thread, while the worker barrier is held.
+ *
+ * Callback contract: the callback must be synchronous, read-only,
+ * allocation-free, nonblocking, safe to run on the main thread while other
+ * workers are stopped, and it must complete before session_table_iteration
+ * () returns. It must not:
+ *  - retain @c session, or any session, transport, TCP socket, FIFO, pool or
+ *    vector pointer reachable from it, beyond the call;
+ *  - invoke a worker-local execution API or send an RPC or session event;
+ *  - acquire the worker barrier, recursively or otherwise;
+ *  - send a binary API message;
+ *  - wait on a queue, mutex, condition variable or file descriptor;
+ *  - format unbounded text;
+ *  - update lazily maintained transport state; or
+ *  - close, migrate, reset or otherwise mutate @c session or its transport.
+ *
+ * @param session       session found at the visited pool index. The pointer,
+ *                       and everything reachable from it, is valid only for
+ *                       the duration of the call.
+ * @param thread_index  index of the worker owning @c session's pool. May
+ *                       differ from vlib_get_thread_index (): the barrier is
+ *                       what makes it safe to inspect any selected worker
+ *                       from the main thread.
+ * @param ctx           caller-supplied opaque context.
+ *
+ * @return SESSION_TABLE_ITER_CONTINUE to keep walking,
+ *         SESSION_TABLE_ITER_STOP to stop the walk successfully, or
+ *         SESSION_TABLE_ITER_ERROR to stop the walk and report an
+ *         iteration failure.
+ */
+typedef session_table_iter_result_t (*session_table_iter_fn_t) (
+  const session_t *session, clib_thread_index_t thread_index, void *ctx);
+
+/**
+ * Iterate allocated sessions in one worker's session pool
+ *
+ * Walks allocated entries of session_main.wrk[thread_index].sessions,
+ * starting at the first allocated index >= start_session_index, invoking
+ * @c iter_fn for each. Pool holes are skipped: they are never passed to
+ * @c iter_fn and never consume @c max_count. The walk stops after
+ * @c max_count accepted entries, when @c iter_fn returns
+ * SESSION_TABLE_ITER_STOP or SESSION_TABLE_ITER_ERROR, or when the pool is
+ * exhausted, whichever happens first.
+ *
+ * This is a low-level, synchronous, barrier-owned primitive: it never
+ * acquires or releases the worker barrier itself. The caller must already
+ * hold it for the duration of the call, typically across several calls that
+ * together cover several workers, e.g.:
+ *
+ *   vlib_worker_thread_barrier_sync (vm);
+ *   for (thread_index = first; thread_index <= last; thread_index++)
+ *     session_table_iteration (thread_index, 0, remaining, callback, ctx,
+ *                              &visited, &next_index);
+ *   vlib_worker_thread_barrier_release (vm);
+ *
+ * Preconditions, asserted in debug builds and otherwise trusted (undefined
+ * behavior if violated in a release build):
+ *  - called on the main thread;
+ *  - the worker barrier is held (vlib_worker_thread_barrier_held ()).
+ *
+ * Ordinary argument validity, checked in every build: an error is returned
+ * and @c iter_fn is never invoked when any of these do not hold:
+ *  - thread_index names an allocated session worker;
+ *  - iter_fn is non-null; and
+ *  - max_count is nonzero.
+ *
+ * @param thread_index          session worker to walk.
+ * @param start_session_index   first pool index to consider.
+ * @param max_count             maximum number of accepted (non-hole)
+ *                               entries to pass to @c iter_fn.
+ * @param iter_fn               callback invoked once per accepted entry.
+ *                               See session_table_iter_fn_t for its
+ *                               contract.
+ * @param iter_arg              opaque context passed through to @c iter_fn.
+ * @param visited [out]         optional (may be NULL); set to the number of
+ *                               entries for which @c iter_fn was invoked and
+ *                               returned SESSION_TABLE_ITER_CONTINUE or
+ *                               SESSION_TABLE_ITER_STOP.
+ * @param next_session_index [out] optional (may be NULL); set to the pool
+ *                               index that would be examined next were the
+ *                               walk continued. This is not a stable
+ *                               cross-call cursor: once the barrier is
+ *                               released, pool indexes may be freed and
+ *                               reused.
+ *
+ * @return 0 on success, including a successful STOP or pool exhaustion;
+ *         -1 if a precondition above the barrier/thread asserts was
+ *         violated -- @c iter_fn is never invoked, @c visited is set to 0
+ *         and @c next_session_index is left equal to @c start_session_index;
+ *         -2 if @c iter_fn returned SESSION_TABLE_ITER_ERROR.
+ */
+int session_table_iteration (clib_thread_index_t thread_index,
+			      u32 start_session_index, u32 max_count,
+			      session_table_iter_fn_t iter_fn, void *iter_arg,
+			      u32 *visited, u32 *next_session_index);
+
 always_inline session_t *
 session_get (u32 si, clib_thread_index_t thread_index)
 {

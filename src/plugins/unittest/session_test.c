@@ -3517,6 +3517,270 @@ session_test_reconn_while_closed (vlib_main_t *vm, unformat_input_t *input)
   return 0;
 }
 
+typedef struct
+{
+  u32 session_index;
+  clib_thread_index_t thread_index;
+  u32 opaque;
+} session_test_iter_record_t;
+
+typedef struct
+{
+  /* value copies of every session the callback was invoked for, in visit
+   * order; never a pointer into the live session pool */
+  session_test_iter_record_t *records;
+  u32 n_calls;
+  u32 stop_after;
+  u32 error_after;
+  u8 saw_wrong_pointer;
+} session_test_iter_ctx_t;
+
+static session_table_iter_result_t
+session_test_iter_cb (const session_t *s, clib_thread_index_t thread_index, void *arg)
+{
+  session_test_iter_ctx_t *ctx = arg;
+  session_test_iter_record_t rec;
+  const session_t *expected;
+
+  ctx->n_calls++;
+
+  /* the session handed to the callback must be the live pool entry for the
+   * requested worker, addressable only for the duration of this call */
+  expected = pool_elt_at_index (session_main.wrk[thread_index].sessions, s->session_index);
+  if (expected != s || s->thread_index != thread_index)
+    ctx->saw_wrong_pointer = 1;
+
+  rec.session_index = s->session_index;
+  rec.thread_index = s->thread_index;
+  rec.opaque = s->opaque;
+  vec_add1 (ctx->records, rec);
+
+  if (ctx->error_after && ctx->n_calls == ctx->error_after)
+    return SESSION_TABLE_ITER_ERROR;
+  if (ctx->stop_after && ctx->n_calls == ctx->stop_after)
+    return SESSION_TABLE_ITER_STOP;
+  return SESSION_TABLE_ITER_CONTINUE;
+}
+
+static int
+session_test_table_iteration (vlib_main_t *vm, unformat_input_t *input)
+{
+  clib_thread_index_t wrk_a = vlib_num_workers () + 41;
+  clib_thread_index_t wrk_b = vlib_num_workers () + 42;
+  clib_thread_index_t wrk_c = vlib_num_workers () + 43;
+  clib_thread_index_t wrk_empty = vlib_num_workers () + 44;
+  u32 idx[6], idx_b[2], idx_c[3], saved_opaque_c[3];
+  session_test_iter_ctx_t ctx;
+  session_t *s;
+  u32 visited, next;
+  int rv, i;
+
+  if (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    return -1;
+
+  /* a fresh, private set of worker pools nothing else in this binary
+   * touches, so every scenario below is self-contained and order-independent */
+  vec_validate (session_main.wrk, wrk_empty);
+
+  /* empty pool: nothing allocated, callback must never run */
+  clib_memset (&ctx, 0, sizeof (ctx));
+  visited = next = ~0;
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_empty, 0, 1, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == 0 && visited == 0 && next == 0 && ctx.n_calls == 0),
+		"table-iteration: empty pool visits nothing");
+
+  /* allocate six sessions, then free two of them to leave holes both before
+   * (index 0) and between (index 3) the remaining allocated entries {1,2,4,5} */
+  for (i = 0; i < 6; i++)
+    {
+      s = session_alloc (wrk_a);
+      s->opaque = 1000 + i;
+      idx[i] = s->session_index;
+      SESSION_TEST ((idx[i] == (u32) i),
+		    "table-iteration: fresh pool allocates index %d in order", i);
+    }
+  session_free (pool_elt_at_index (session_main.wrk[wrk_a].sessions, idx[0]));
+  session_free (pool_elt_at_index (session_main.wrk[wrk_a].sessions, idx[3]));
+
+  /* full walk from 0: holes are skipped and do not consume max_count */
+  clib_memset (&ctx, 0, sizeof (ctx));
+  visited = next = ~0;
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_a, 0, 10, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == 0 && visited == 4 && next == 6 && ctx.n_calls == 4 &&
+		 vec_len (ctx.records) == 4 && !ctx.saw_wrong_pointer),
+		"table-iteration: holes are skipped and not counted");
+  SESSION_TEST ((ctx.records[0].session_index == idx[1] && ctx.records[0].opaque == 1001 &&
+		 ctx.records[1].session_index == idx[2] && ctx.records[1].opaque == 1002 &&
+		 ctx.records[2].session_index == idx[4] && ctx.records[2].opaque == 1004 &&
+		 ctx.records[3].session_index == idx[5] && ctx.records[3].opaque == 1005 &&
+		 ctx.records[0].thread_index == wrk_a && ctx.records[3].thread_index == wrk_a),
+		"table-iteration: walk visits allocated entries in index order on the right worker");
+  vec_free (ctx.records);
+
+  /* nonzero start on an allocated entry */
+  clib_memset (&ctx, 0, sizeof (ctx));
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_a, 2, 10, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == 0 && visited == 3 && next == 6 && vec_len (ctx.records) == 3 &&
+		 ctx.records[0].session_index == idx[2] && ctx.records[2].session_index == idx[5]),
+		"table-iteration: nonzero start skips earlier entries");
+  vec_free (ctx.records);
+
+  /* start index that lands exactly on a hole must resume at the next
+   * allocated entry, not skip an extra one */
+  clib_memset (&ctx, 0, sizeof (ctx));
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_a, 3, 10, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == 0 && visited == 2 && next == 6 && vec_len (ctx.records) == 2 &&
+		 ctx.records[0].session_index == idx[4] && ctx.records[1].session_index == idx[5]),
+		"table-iteration: a start index on a hole resumes at the next allocated entry");
+  vec_free (ctx.records);
+
+  /* start past the pool end visits nothing and leaves next_session_index
+   * equal to the requested start */
+  clib_memset (&ctx, 0, sizeof (ctx));
+  visited = next = ~0;
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_a, 1000, 10, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == 0 && visited == 0 && next == 1000 && ctx.n_calls == 0),
+		"table-iteration: a start past the pool end visits nothing");
+
+  /* exact max_count bounds: 1, a partial 2, and the exact remaining count 4 */
+  clib_memset (&ctx, 0, sizeof (ctx));
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_a, 0, 1, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == 0 && visited == 1 && next == 2 && ctx.records[0].session_index == idx[1]),
+		"table-iteration: max_count 1 stops after the first accepted entry");
+  vec_free (ctx.records);
+
+  clib_memset (&ctx, 0, sizeof (ctx));
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_a, 0, 2, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == 0 && visited == 2 && next == 3),
+		"table-iteration: max_count 2 stops exactly there");
+  vec_free (ctx.records);
+
+  clib_memset (&ctx, 0, sizeof (ctx));
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_a, 0, 4, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == 0 && visited == 4 && next == 6),
+		"table-iteration: max_count exactly matching the available count visits all of them");
+  vec_free (ctx.records);
+
+  /* callback-requested stop: a successful, deterministic early exit */
+  clib_memset (&ctx, 0, sizeof (ctx));
+  ctx.stop_after = 2;
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_a, 0, 10, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == 0 && visited == 2 && next == 3 && ctx.n_calls == 2),
+		"table-iteration: callback stop ends the walk successfully");
+  vec_free (ctx.records);
+
+  /* callback-requested error: the erroring entry is not counted as visited,
+   * the walk stops immediately, and the failure is reported distinctly
+   * from a successful stop or an invalid precondition */
+  clib_memset (&ctx, 0, sizeof (ctx));
+  ctx.error_after = 2;
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_a, 0, 10, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == -2 && visited == 1 && next == 3 && ctx.n_calls == 2 &&
+		 vec_len (ctx.records) == 2),
+		"table-iteration: callback error stops the walk and is not counted as visited");
+  vec_free (ctx.records);
+
+  /* invalid preconditions: iter_fn is never invoked and the walk reports
+   * a distinct failure from a callback-reported error */
+  clib_memset (&ctx, 0, sizeof (ctx));
+  visited = next = ~0;
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (vec_len (session_main.wrk), 0, 10, session_test_iter_cb, &ctx,
+				&visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == -1 && visited == 0 && next == 0 && ctx.n_calls == 0),
+		"table-iteration: an out-of-range worker index is rejected without calling back");
+
+  visited = next = ~0;
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_a, 5, 10, 0, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == -1 && visited == 0 && next == 5),
+		"table-iteration: a null callback is rejected without a crash");
+
+  clib_memset (&ctx, 0, sizeof (ctx));
+  visited = next = ~0;
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_a, 0, 0, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == -1 && visited == 0 && next == 0 && ctx.n_calls == 0),
+		"table-iteration: a zero max_count is rejected without calling back");
+
+  /* multi-worker selection: a second, independent worker pool must be read
+   * on its own, never mixing in another worker's sessions */
+  s = session_alloc (wrk_b);
+  s->opaque = 2000;
+  idx_b[0] = s->session_index;
+  s = session_alloc (wrk_b);
+  s->opaque = 2001;
+  idx_b[1] = s->session_index;
+
+  clib_memset (&ctx, 0, sizeof (ctx));
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_b, 0, 10, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == 0 && visited == 2 && vec_len (ctx.records) == 2 && !ctx.saw_wrong_pointer &&
+		 ctx.records[0].thread_index == wrk_b && ctx.records[1].thread_index == wrk_b &&
+		 ctx.records[0].session_index == idx_b[0] && ctx.records[1].session_index == idx_b[1] &&
+		 ctx.records[0].opaque == 2000 && ctx.records[1].opaque == 2001),
+		"table-iteration: worker selection reads only the requested worker's own pool");
+  vec_free (ctx.records);
+  session_free (pool_elt_at_index (session_main.wrk[wrk_b].sessions, idx_b[0]));
+  session_free (pool_elt_at_index (session_main.wrk[wrk_b].sessions, idx_b[1]));
+
+  /* no pointer is used after the iterator returns: the callback below only
+   * ever copies session_index/thread_index/opaque by value into ctx.records.
+   * Free (and, under CLIB_DEBUG, poison with 0xFA) every visited session
+   * right after the barrier-protected call returns; the previously copied
+   * values must be unaffected, proving they are independent copies and not
+   * live pointers or cached state carried across the call boundary. */
+  for (i = 0; i < 3; i++)
+    {
+      s = session_alloc (wrk_c);
+      s->opaque = 9000 + i;
+      idx_c[i] = s->session_index;
+      saved_opaque_c[i] = s->opaque;
+    }
+
+  clib_memset (&ctx, 0, sizeof (ctx));
+  vlib_worker_thread_barrier_sync (vm);
+  rv = session_table_iteration (wrk_c, 0, 10, session_test_iter_cb, &ctx, &visited, &next);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST ((rv == 0 && visited == 3 && vec_len (ctx.records) == 3 && !ctx.saw_wrong_pointer),
+		"table-iteration: pointer-proof setup collects three live records");
+
+  for (i = 0; i < 3; i++)
+    session_free (pool_elt_at_index (session_main.wrk[wrk_c].sessions, idx_c[i]));
+
+  for (i = 0; i < 3; i++)
+    SESSION_TEST ((ctx.records[i].session_index == idx_c[i] &&
+		   ctx.records[i].opaque == saved_opaque_c[i]),
+		  "table-iteration: copied record %d survives freeing the live session", i);
+  vec_free (ctx.records);
+
+  return 0;
+}
+
 static clib_error_t *
 session_test (vlib_main_t * vm,
 	      unformat_input_t * input, vlib_cli_command_t * cmd_arg)
@@ -3539,6 +3803,8 @@ session_test (vlib_main_t * vm,
 	res = session_test_rules (vm, input);
       else if (unformat (input, "tuple-result"))
 	res = session_test_tuple_result (vm, input);
+      else if (unformat (input, "table-iteration"))
+	res = session_test_table_iteration (vm, input);
       else if (unformat (input, "proxy"))
 	res = session_test_proxy (vm, input);
       else if (unformat (input, "endpt-cfg"))
@@ -3568,6 +3834,8 @@ session_test (vlib_main_t * vm,
 	  if ((res = session_test_rules (vm, input)))
 	    goto done;
 	  if ((res = session_test_tuple_result (vm, input)))
+	    goto done;
+	  if ((res = session_test_table_iteration (vm, input)))
 	    goto done;
 	  if ((res = session_test_proxy (vm, input)))
 	    goto done;
