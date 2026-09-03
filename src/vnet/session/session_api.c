@@ -12,6 +12,7 @@
 #include <vnet/session/session_table.h>
 #include <vnet/session/session_rules_table.h>
 #include <vnet/session/session_sdl.h>
+#include <vnet/session/transport.h>
 #include <vnet/ip/ip_types_api.h>
 
 #include <vnet/format_fns.h>
@@ -1733,6 +1734,367 @@ vl_api_session_sdl_dump_t_handler (vl_api_session_sdl_dump_t *mp)
     }));
 }
 
+/*
+ * Bounded, barrier-owned session table dump
+ *
+ * See docs/vpp-session-table-iteration-design.md sections 7-12. One
+ * session_table_dump request causes exactly one worker-barrier interval:
+ * results are collected into a preallocated, fixed-capacity array while the
+ * barrier is held, then encoded and sent only after it is released. No API
+ * send or growing allocation happens under the barrier.
+ */
+
+/* Server-enforced record-count bounds. Chosen conservatively for a first
+ * implementation with no real transport information provider registered
+ * yet (the TCP provider is added by a later task): small enough that even
+ * the hard maximum keeps a single-worker barrier interval short, large
+ * enough to cover realistic diagnostic and Packetdrill dump sizes. Not
+ * derived from barrier-duration measurements -- see design section 11. */
+#define SESSION_TABLE_DUMP_DEFAULT_RECORDS 256
+#define SESSION_TABLE_DUMP_MAX_RECORDS 4096
+
+/* One collected, value-only session table record: the envelope labels the
+ * iterator and session layer already know, plus the transport-provided
+ * connection information. Never holds a live pointer. */
+typedef struct session_table_dump_record_
+{
+  clib_thread_index_t thread_index;
+  u32 session_index;
+  u32 connection_index;
+  u32 app_wrk_index;
+  session_state_t session_state;
+  session_connection_info_t info;
+} session_table_dump_record_t;
+
+/* Collection context threaded through session_table_iteration () callbacks
+ * for one session_table_dump request. records is preallocated to capacity
+ * before the worker barrier is taken and never grown while it is held;
+ * count tracks how many of those slots are actually filled. */
+typedef struct session_table_dump_collect_ctx_
+{
+  session_table_dump_record_t *records;
+  u32 capacity;
+  u32 count;
+  u32 scanned_count;
+  u8 tcp_only;
+  u8 truncated;
+} session_table_dump_collect_ctx_t;
+
+static vl_api_session_connection_info_status_t
+session_connection_info_status_encode (session_connection_info_status_t status)
+{
+  switch (status)
+    {
+    case SESSION_CONNECTION_INFO_OK:
+      return SESSION_CONNECTION_INFO_STATUS_API_OK;
+    case SESSION_CONNECTION_INFO_NOT_SUPPORTED:
+      return SESSION_CONNECTION_INFO_STATUS_API_NOT_SUPPORTED;
+    case SESSION_CONNECTION_INFO_NOT_FOUND:
+      return SESSION_CONNECTION_INFO_STATUS_API_NOT_FOUND;
+    case SESSION_CONNECTION_INFO_LINK_MISMATCH:
+      return SESSION_CONNECTION_INFO_STATUS_API_LINK_MISMATCH;
+    case SESSION_CONNECTION_INFO_STATE_UNAVAILABLE:
+      return SESSION_CONNECTION_INFO_STATUS_API_STATE_UNAVAILABLE;
+    case SESSION_CONNECTION_INFO_INVALID_DATA:
+      return SESSION_CONNECTION_INFO_STATUS_API_INVALID_DATA;
+    case SESSION_CONNECTION_INFO_INTERNAL_ERROR:
+    default:
+      return SESSION_CONNECTION_INFO_STATUS_API_INTERNAL_ERROR;
+    }
+}
+
+/* Reject a connection-information provider result the collector cannot
+ * safely trust, per design section 7.3: validate version, bytes, protocol,
+ * status and reserved bytes before accepting provider data. A provider
+ * that fails this check is reported as SESSION_CONNECTION_INFO_INVALID_DATA,
+ * never encoded as a successful record. */
+static u8
+session_table_dump_validate_info (session_connection_info_t *info,
+				  transport_proto_t expected_proto)
+{
+  if (info->version == 0 || info->version > SESSION_CONNECTION_INFO_VERSION)
+    return 0;
+  if (info->bytes == 0 || info->bytes > sizeof (*info))
+    return 0;
+  if (info->transport_proto != expected_proto)
+    return 0;
+  if (info->status < SESSION_CONNECTION_INFO_OK ||
+      info->status > SESSION_CONNECTION_INFO_INTERNAL_ERROR)
+    return 0;
+  if (info->reserved != 0)
+    return 0;
+  return 1;
+}
+
+/* session_table_iter_fn_t callback for one session_table_dump request.
+ * Invoked only while the worker barrier is held (see session.h). Filters by
+ * the request's transport_proto, then either copies a value-only record
+ * into ctx->records or, once ctx->records is full, detects truncation by
+ * finding one additional matching entry without storing it (design section
+ * 11). Never returns SESSION_TABLE_ITER_ERROR: an unsupported or malformed
+ * transport result is a per-record status, not an iteration failure. */
+static session_table_iter_result_t
+session_table_dump_collect_cb (const session_t *s,
+			       clib_thread_index_t thread_index, void *arg)
+{
+  session_table_dump_collect_ctx_t *ctx = arg;
+  transport_proto_t proto;
+  session_table_dump_record_t *rec;
+  int prv;
+
+  ctx->scanned_count++;
+
+  proto = session_get_transport_proto ((session_t *) s);
+  if (ctx->tcp_only && proto != TRANSPORT_PROTO_TCP)
+    return SESSION_TABLE_ITER_CONTINUE;
+
+  if (ctx->count >= ctx->capacity)
+    {
+      ctx->truncated = 1;
+      return SESSION_TABLE_ITER_STOP;
+    }
+
+  rec = &ctx->records[ctx->count];
+  clib_memset (rec, 0, sizeof (*rec));
+  rec->thread_index = thread_index;
+  rec->session_index = s->session_index;
+  rec->connection_index = s->connection_index;
+  rec->app_wrk_index = s->app_wrk_index;
+  rec->session_state = s->session_state;
+
+  rec->info.version = SESSION_CONNECTION_INFO_VERSION;
+  rec->info.bytes = sizeof (rec->info);
+  rec->info.transport_proto = proto;
+  rec->info.status = SESSION_CONNECTION_INFO_NOT_SUPPORTED;
+
+  if (proto < vec_len (tp_vfts) && tp_vfts[proto].get_connection_info)
+    {
+      prv = tp_vfts[proto].get_connection_info (
+	s->connection_index, thread_index, s->session_index, &rec->info);
+      if (prv < 0)
+	{
+	  rec->info.status = SESSION_CONNECTION_INFO_INTERNAL_ERROR;
+	  rec->info.valid_fields = 0;
+	}
+      else if (!session_table_dump_validate_info (&rec->info, proto))
+	{
+	  rec->info.status = SESSION_CONNECTION_INFO_INVALID_DATA;
+	  rec->info.valid_fields = 0;
+	}
+    }
+
+  ctx->count++;
+  return SESSION_TABLE_ITER_CONTINUE;
+}
+
+static void
+session_table_send_details (session_table_dump_record_t *rec,
+			    vl_api_registration_t *reg, u32 context)
+{
+  session_connection_info_t *info = &rec->info;
+  vl_api_session_table_details_t *rmp;
+
+  rmp = vl_msg_api_alloc (sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
+  rmp->_vl_msg_id = ntohs (REPLY_MSG_ID_BASE + VL_API_SESSION_TABLE_DETAILS);
+  rmp->context = context;
+
+  rmp->thread_index = clib_host_to_net_u32 (rec->thread_index);
+  rmp->session_index = clib_host_to_net_u32 (rec->session_index);
+  rmp->connection_index = clib_host_to_net_u32 (rec->connection_index);
+  rmp->app_wrk_index = clib_host_to_net_u32 (rec->app_wrk_index);
+  rmp->session_state = rec->session_state;
+
+  rmp->transport_proto = api_session_transport_proto_encode (info->transport_proto);
+
+  if (info->valid_fields & SESSION_CONNECTION_INFO_F_ENDPOINTS)
+    {
+      ip46_type_t lcl_type = info->lcl.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6;
+      ip46_type_t rmt_type = info->rmt.is_ip4 ? IP46_TYPE_IP4 : IP46_TYPE_IP6;
+
+      ip_address_encode (&info->lcl.ip, lcl_type, &rmp->lcl_ip);
+      ip_address_encode (&info->rmt.ip, rmt_type, &rmp->rmt_ip);
+      /* transport_endpoint_t ports are already net order; do not re-swap. */
+      rmp->lcl_port = info->lcl.port;
+      rmp->rmt_port = info->rmt.port;
+    }
+
+  if (info->transport_proto == TRANSPORT_PROTO_TCP)
+    {
+      session_tcp_info_t *tcp = &info->data.tcp;
+
+      if (info->valid_fields & SESSION_CONNECTION_INFO_F_TCP_STATE)
+	rmp->tcp_state = tcp->tcp_state;
+      if (info->valid_fields & SESSION_CONNECTION_INFO_F_TCP_RECOVERY)
+	rmp->tcp_recovery_state = tcp->recovery_state;
+      if (info->valid_fields & SESSION_CONNECTION_INFO_F_TCP_TIMESTAMPS)
+	rmp->timestamp_negotiated = tcp->timestamp_negotiated;
+      if (info->valid_fields & SESSION_CONNECTION_INFO_F_TCP_SEQUENCES)
+	{
+	  rmp->snd_una = clib_host_to_net_u32 (tcp->snd_una);
+	  rmp->snd_nxt = clib_host_to_net_u32 (tcp->snd_nxt);
+	  rmp->rcv_nxt = clib_host_to_net_u32 (tcp->rcv_nxt);
+	}
+      if (info->valid_fields & SESSION_CONNECTION_INFO_F_TCP_CONGESTION)
+	{
+	  rmp->cwnd = clib_host_to_net_u32 (tcp->cwnd);
+	  rmp->ssthresh = clib_host_to_net_u32 (tcp->ssthresh);
+	}
+      if (info->valid_fields & SESSION_CONNECTION_INFO_F_TCP_TIMING)
+	{
+	  rmp->rto_usecs = clib_host_to_net_u32 (tcp->rto_usecs);
+	  rmp->receive_rtt_usecs = clib_host_to_net_u32 (tcp->receive_rtt_usecs);
+	}
+      if (info->valid_fields & SESSION_CONNECTION_INFO_F_TCP_RECOVERY_DATA)
+	{
+	  rmp->retransmits = clib_host_to_net_u32 (tcp->retransmits);
+	  rmp->high_seq = clib_host_to_net_u32 (tcp->high_seq);
+	  rmp->recovery_point = clib_host_to_net_u32 (tcp->recovery_point);
+	}
+    }
+
+  rmp->info_version = clib_host_to_net_u16 (info->version);
+  rmp->info_status = session_connection_info_status_encode (info->status);
+  rmp->valid_fields = (vl_api_session_connection_info_field_t) clib_host_to_net_u32 (
+    (u32) info->valid_fields);
+
+  vl_api_send_msg (reg, (u8 *) rmp);
+}
+
+static void
+session_table_send_dump_summary (vl_api_registration_t *reg, u32 context,
+				 int retval, u32 returned_count,
+				 u32 scanned_count, u8 truncated)
+{
+  vl_api_session_table_dump_reply_t *rmp;
+
+  rmp = vl_msg_api_alloc (sizeof (*rmp));
+  clib_memset (rmp, 0, sizeof (*rmp));
+  rmp->_vl_msg_id =
+    ntohs (REPLY_MSG_ID_BASE + VL_API_SESSION_TABLE_DUMP_REPLY);
+  rmp->context = context;
+  rmp->retval = ntohl (retval);
+  rmp->returned_count = clib_host_to_net_u32 (returned_count);
+  rmp->scanned_count = clib_host_to_net_u32 (scanned_count);
+  rmp->truncated = truncated;
+
+  vl_api_send_msg (reg, (u8 *) rmp);
+}
+
+/* MP-safe: marked as such in session_api_hookup () below, because it
+ * explicitly owns a bounded worker-barrier interval itself (see design
+ * section 10). Letting the API framework additionally wrap this whole
+ * handler in its own barrier would keep every worker stopped for message
+ * allocation, encoding and queueing too, not just the bounded copy this
+ * handler actually needs the barrier for.
+ *
+ * Deliberately not static: session_test.c calls it directly, the same way
+ * vl_api_memclnt_delete_t_handler () is already called directly by tests,
+ * to drive it with a real API client and a real message without needing a
+ * live binary API transport. */
+void
+vl_api_session_table_dump_t_handler (vl_api_session_table_dump_t *mp)
+{
+  session_table_dump_collect_ctx_t ctx;
+  vl_api_registration_t *reg;
+  clib_thread_index_t first_wrk, last_wrk, ti;
+  u32 req_thread_index, req_max_records, effective_limit, i;
+  int rv = 0;
+
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    return;
+
+  clib_memset (&ctx, 0, sizeof (ctx));
+
+  if (mp->reserved != 0 || mp->flags != 0)
+    {
+      rv = VNET_API_ERROR_INVALID_VALUE_3;
+      goto respond;
+    }
+
+  if (mp->transport_proto != TRANSPORT_PROTO_API_TCP &&
+      mp->transport_proto != TRANSPORT_PROTO_API_NONE)
+    {
+      rv = VNET_API_ERROR_INVALID_VALUE_2;
+      goto respond;
+    }
+
+  if (!session_main_is_enabled ())
+    {
+      rv = VNET_API_ERROR_FEATURE_DISABLED;
+      goto respond;
+    }
+
+  req_thread_index = clib_net_to_host_u32 (mp->thread_index);
+  req_max_records = clib_net_to_host_u32 (mp->max_records);
+
+  if (req_thread_index != (u32) ~0 &&
+      req_thread_index >= vec_len (session_main.wrk))
+    {
+      rv = VNET_API_ERROR_INVALID_VALUE;
+      goto respond;
+    }
+
+  effective_limit = req_max_records == 0 ?
+    SESSION_TABLE_DUMP_DEFAULT_RECORDS :
+    clib_min (req_max_records, SESSION_TABLE_DUMP_MAX_RECORDS);
+
+  ctx.tcp_only = (mp->transport_proto == TRANSPORT_PROTO_API_TCP);
+  ctx.capacity = effective_limit;
+  ctx.records = vec_new (session_table_dump_record_t, effective_limit);
+  if (!ctx.records)
+    {
+      rv = VNET_API_ERROR_UNSPECIFIED;
+      goto respond;
+    }
+
+  if (req_thread_index == (u32) ~0)
+    {
+      first_wrk = 0;
+      last_wrk = vec_len (session_main.wrk) - 1;
+    }
+  else
+    {
+      first_wrk = last_wrk = req_thread_index;
+    }
+
+  /* One cross-worker barrier interval covers every selected worker: the
+   * barrier is acquired once here and released once below, never per
+   * worker. No API send or growing allocation happens between these two
+   * calls -- session_table_dump_collect_cb () only writes into the fixed
+   * ctx.records array already allocated above. */
+  vlib_worker_thread_barrier_sync (vlib_get_main ());
+  for (ti = first_wrk; ti <= last_wrk; ti++)
+    {
+      session_table_iteration (ti, 0, ~0, session_table_dump_collect_cb, &ctx,
+			       0, 0);
+      if (ctx.truncated)
+	break;
+    }
+  vlib_worker_thread_barrier_release (vlib_get_main ());
+
+  /* The client may have disconnected while the barrier was held; re-check
+   * before sending anything collected above (design section 10). A missing
+   * registration here only frees the copied vector -- it does not affect
+   * any live session. */
+  reg = vl_api_client_index_to_registration (mp->client_index);
+  if (!reg)
+    {
+      vec_free (ctx.records);
+      return;
+    }
+
+  for (i = 0; i < ctx.count; i++)
+    session_table_send_details (&ctx.records[i], reg, mp->context);
+
+  vec_free (ctx.records);
+
+respond:
+  session_table_send_dump_summary (reg, mp->context, rv, ctx.count,
+				   ctx.scanned_count, ctx.truncated);
+}
+
 static void
 vl_api_app_add_cert_key_pair_t_handler (vl_api_app_add_cert_key_pair_t * mp)
 {
@@ -2450,6 +2812,12 @@ session_api_hookup (vlib_main_t *vm)
     am, REPLY_MSG_ID_BASE + VL_API_SESSION_SDL_V3_DUMP, 1);
   vl_api_set_msg_thread_safe (
     am, REPLY_MSG_ID_BASE + VL_API_SESSION_SDL_V3_DETAILS, 1);
+
+  /* session_table_dump explicitly owns its own bounded worker-barrier
+   * interval (see the handler above); it must not also be wrapped in the
+   * framework's automatic barrier. */
+  vl_api_set_msg_thread_safe (am, REPLY_MSG_ID_BASE + VL_API_SESSION_TABLE_DUMP,
+			      1);
   return 0;
 }
 

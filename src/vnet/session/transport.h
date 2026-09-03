@@ -54,6 +54,96 @@ typedef struct transport_send_params_
   transport_snd_flags_t flags;
 } transport_send_params_t;
 
+/**
+ * Session table iteration connection information
+ *
+ * session_connection_info_t is the value boundary the barrier-owned session
+ * table dump (session.api's session_table_dump) uses to pull
+ * transport-specific state out of a transport connection while the worker
+ * barrier is held. It is:
+ *
+ *  - an internal, short-lived, host-order C structure, valid only for the
+ *    duration of the call that fills it;
+ *  - value-only: every field is a copy, never a pointer into live session,
+ *    transport, or TCP socket state; and
+ *  - NOT a binary API message, a shared-memory layout, a SAPI/VCL/
+ *    application ABI, or a stable cross-version plugin ABI. session.api's
+ *    messages are the wire contract; this structure is only ever converted
+ *    into them, never sent as-is. It must not be assumed stable across
+ *    independently built plugins linked against different VPP headers.
+ *
+ * transport_endpoint_t rmt/lcl are the one exception to "host-order": their
+ * address and port fields keep transport_endpoint_t's own normal internal
+ * representation (see foreach_transport_endpoint_fields above), not a
+ * host-order reinterpretation of it. session_api.c is solely responsible for
+ * converting every field, including these, to the public API representation
+ * and byte order.
+ */
+
+#define SESSION_CONNECTION_INFO_VERSION 1
+
+typedef enum session_connection_info_status_
+{
+  SESSION_CONNECTION_INFO_OK = 0,
+  SESSION_CONNECTION_INFO_NOT_SUPPORTED,
+  SESSION_CONNECTION_INFO_NOT_FOUND,
+  SESSION_CONNECTION_INFO_LINK_MISMATCH,
+  SESSION_CONNECTION_INFO_STATE_UNAVAILABLE,
+  SESSION_CONNECTION_INFO_INVALID_DATA,
+  SESSION_CONNECTION_INFO_INTERNAL_ERROR,
+} session_connection_info_status_t;
+
+typedef enum session_connection_info_field_
+{
+  SESSION_CONNECTION_INFO_F_ENDPOINTS = 1ULL << 0,
+  SESSION_CONNECTION_INFO_F_TCP_STATE = 1ULL << 1,
+  SESSION_CONNECTION_INFO_F_TCP_RECOVERY = 1ULL << 2,
+  SESSION_CONNECTION_INFO_F_TCP_SEQUENCES = 1ULL << 3,
+  SESSION_CONNECTION_INFO_F_TCP_CONGESTION = 1ULL << 4,
+  SESSION_CONNECTION_INFO_F_TCP_TIMING = 1ULL << 5,
+  SESSION_CONNECTION_INFO_F_TCP_RECOVERY_DATA = 1ULL << 6,
+  SESSION_CONNECTION_INFO_F_TCP_TIMESTAMPS = 1ULL << 7,
+} session_connection_info_field_t;
+
+/**
+ * Copied, value-only TCP state. Populated only by a TCP
+ * get_connection_info () provider; see session_connection_info_field_t for
+ * which fields a given valid_fields bitmap actually covers.
+ */
+typedef struct session_tcp_info_
+{
+  u8 tcp_state;
+  u8 recovery_state;
+  u8 timestamp_negotiated;
+  u8 reserved;
+  u32 snd_una;
+  u32 snd_nxt;
+  u32 rcv_nxt;
+  u32 cwnd;
+  u32 ssthresh;
+  u32 rto_usecs;
+  u32 receive_rtt_usecs;
+  u32 retransmits;
+  u32 high_seq;
+  u32 recovery_point;
+} session_tcp_info_t;
+
+typedef struct session_connection_info_
+{
+  u16 version;
+  u16 bytes;
+  transport_proto_t transport_proto;
+  session_connection_info_status_t status;
+  u16 reserved;
+  u64 valid_fields;
+  transport_endpoint_t rmt;
+  transport_endpoint_t lcl;
+  union
+  {
+    session_tcp_info_t tcp;
+  } data;
+} session_connection_info_t;
+
 /*
  * Transport protocol virtual function table
  */
@@ -115,6 +205,67 @@ typedef struct _transport_proto_vft
 					   transport_endpoint_t *tep_lcl);
   int (*attribute) (u32 conn_index, clib_thread_index_t thread_index,
 		    u8 is_get, transport_endpt_attr_t *attr);
+
+  /*
+   * Session table iteration
+   */
+
+  /**
+   * Barrier-safe transport connection information provider (optional)
+   *
+   * Called only by the session layer's barrier-owned table dump collector,
+   * while the worker barrier is held and thread_index's workers are
+   * stopped. thread_index names the worker that owns connection_index and
+   * may differ from vlib_get_thread_index (): the barrier, not thread
+   * ownership, is what makes it safe to read that worker's state from the
+   * main thread. expected_session_index lets the provider verify the
+   * session-to-transport linkage before it copies anything.
+   *
+   * The callback must be synchronous, read-only, allocation-free,
+   * nonblocking, and complete before it returns. Like every
+   * session_table_iter_fn_t callback (session.h), it must not retain a
+   * session, transport, TCP socket, FIFO, pool or vector pointer beyond the
+   * call; invoke a worker-local execution API; send an RPC, session event,
+   * or binary API message; acquire the worker barrier, recursively or
+   * otherwise; wait on a queue, mutex, condition variable or file
+   * descriptor; format unbounded text; or close, migrate, reset or
+   * otherwise mutate the session or its transport.
+   *
+   * Before calling, the collector clears *info and sets its version, bytes,
+   * transport_proto and a default status of
+   * SESSION_CONNECTION_INFO_NOT_SUPPORTED, so a NULL get_connection_info is
+   * always safe and unambiguous: an absent provider is simply
+   * "not supported", not a missing session.
+   *
+   * On a normal (>= 0) return, the callback must have set every field of
+   * *info its declared version defines: version, bytes, transport_proto,
+   * status, valid_fields for every field group it populated, and every
+   * reserved byte zeroed. status == OK requires every field group this
+   * transport's initial API contract promises; anything else uses a
+   * defined non-OK status and sets valid_fields only for the groups it
+   * actually filled in.
+   *
+   * A negative return means the invocation itself failed (e.g. a broken
+   * provider invariant); the collector then discards *info entirely and
+   * substitutes SESSION_CONNECTION_INFO_INTERNAL_ERROR. An ordinary runtime
+   * outcome, such as connection_index no longer being present or a
+   * session/connection mismatch, must be reported through a successful
+   * return and the matching *info status, never a negative return.
+   *
+   * @param connection_index       transport connection index to inspect.
+   * @param thread_index           worker owning connection_index.
+   * @param expected_session_index session index the caller expects
+   *                                connection_index to still be linked to.
+   * @param info                   caller-owned output; written only for the
+   *                                duration of this call.
+   * @return 0 on a well-formed result (see info->status for the outcome),
+   *         negative only when the invocation itself could not produce a
+   *         usable result.
+   */
+  int (*get_connection_info) (u32 connection_index,
+			      clib_thread_index_t thread_index,
+			      u32 expected_session_index,
+			      session_connection_info_t *info);
 
   /*
    * Properties

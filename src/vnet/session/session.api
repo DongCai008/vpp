@@ -13,7 +13,7 @@
  * limitations under the License.
  */
 
-option version = "4.0.3";
+option version = "4.0.4";
 
 import "vnet/interface_types.api";
 import "vnet/ip/ip_types.api";
@@ -595,6 +595,219 @@ define session_sdl_v3_details
   string tag[64];
   u32 count;
   u32 appns_index[count];
+};
+
+/** \brief Session table connection information provider status
+    See session_connection_info_status_t in vnet/session/transport.h.
+    @param SESSION_CONNECTION_INFO_STATUS_API_OK - the record's transport
+           fields are complete and valid
+    @param SESSION_CONNECTION_INFO_STATUS_API_NOT_SUPPORTED - no barrier-safe
+           information provider is registered for this session's transport
+    @param SESSION_CONNECTION_INFO_STATUS_API_NOT_FOUND - the transport
+           connection the session referenced could not be located
+    @param SESSION_CONNECTION_INFO_STATUS_API_LINK_MISMATCH - the transport
+           connection found is no longer linked to this session
+    @param SESSION_CONNECTION_INFO_STATUS_API_STATE_UNAVAILABLE - the
+           connection exists but its state cannot be read right now
+    @param SESSION_CONNECTION_INFO_STATUS_API_INVALID_DATA - the provider
+           returned a malformed result; no transport fields are valid
+    @param SESSION_CONNECTION_INFO_STATUS_API_INTERNAL_ERROR - the provider
+           invocation itself failed
+ */
+enum session_connection_info_status : u8
+{
+  SESSION_CONNECTION_INFO_STATUS_API_OK = 0,
+  SESSION_CONNECTION_INFO_STATUS_API_NOT_SUPPORTED,
+  SESSION_CONNECTION_INFO_STATUS_API_NOT_FOUND,
+  SESSION_CONNECTION_INFO_STATUS_API_LINK_MISMATCH,
+  SESSION_CONNECTION_INFO_STATUS_API_STATE_UNAVAILABLE,
+  SESSION_CONNECTION_INFO_STATUS_API_INVALID_DATA,
+  SESSION_CONNECTION_INFO_STATUS_API_INTERNAL_ERROR,
+};
+
+/** \brief Session table connection-information field-validity flags
+    See session_connection_info_field_t in vnet/session/transport.h. Each bit
+    reports that one group of session_table_details fields was actually
+    populated by the transport's information provider; a numeric field being
+    nonzero never by itself means it is valid.
+ */
+enumflag session_connection_info_field : u32
+{
+  SESSION_CONNECTION_INFO_FIELD_API_ENDPOINTS = 0x01,
+  SESSION_CONNECTION_INFO_FIELD_API_TCP_STATE = 0x02,
+  SESSION_CONNECTION_INFO_FIELD_API_TCP_RECOVERY = 0x04,
+  SESSION_CONNECTION_INFO_FIELD_API_TCP_SEQUENCES = 0x08,
+  SESSION_CONNECTION_INFO_FIELD_API_TCP_CONGESTION = 0x10,
+  SESSION_CONNECTION_INFO_FIELD_API_TCP_TIMING = 0x20,
+  SESSION_CONNECTION_INFO_FIELD_API_TCP_RECOVERY_DATA = 0x40,
+  SESSION_CONNECTION_INFO_FIELD_API_TCP_TIMESTAMPS = 0x80,
+};
+
+/** \brief Dump a bounded, point-in-time view of the session table
+
+    One request causes exactly one worker-barrier-protected table walk: the
+    main thread stops the selected workers, copies value-only records from
+    their session/transport pools, then releases the barrier before encoding
+    or sending anything. The result is a consistent snapshot of the records
+    it returns, but it is never a durable handle: a session_index,
+    connection_index or thread_index in the reply is a diagnostic label, not
+    a capability for a later request, and repeating this dump later is not
+    guaranteed to see the same table.
+
+    @param client_index - opaque cookie to identify the sender
+    @param context - sender context, to match reply w/ request
+    @param thread_index - session worker to dump; ~0 selects every session
+           worker in one barrier interval
+    @param max_records - maximum number of session_table_details messages to
+           return; 0 selects the server's default limit. The server always
+           applies its own hard maximum regardless of the requested value
+    @param transport_proto - transport filter. TRANSPORT_PROTO_API_TCP
+           selects only TCP sessions; TRANSPORT_PROTO_API_NONE selects every
+           session regardless of transport. No other value is accepted by
+           this first version
+    @param flags - reserved for future request flags; must be zero
+    @param reserved - must be zero
+ */
+define session_table_dump
+{
+  u32 client_index;
+  u32 context;
+  u32 thread_index;
+  u32 max_records;
+  vl_api_transport_proto_t transport_proto;
+  u8 flags;
+  u16 reserved;
+};
+
+/** \brief One session table record
+
+    Sent once per record collected by a session_table_dump request, after
+    the collecting worker barrier has been released. Fields belonging to a
+    group session_connection_info_field does not report as valid for this
+    record (see valid_fields) are zero and must not be interpreted as real
+    values.
+
+    @param context - sender context, to match reply w/ request
+    @param thread_index - session worker the record was collected from
+    @param session_index - session pool index within thread_index
+    @param connection_index - transport connection pool index the session
+           referenced at collection time
+    @param app_wrk_index - application worker index that owns the session
+    @param transport_proto - the session's transport protocol
+    @param lcl_ip - local address; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_ENDPOINTS is set
+    @param rmt_ip - remote address; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_ENDPOINTS is set
+    @param lcl_port - local port; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_ENDPOINTS is set
+    @param rmt_port - remote port; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_ENDPOINTS is set
+    @param session_state - session layer state (session_state_t)
+    @param tcp_state - TCP state; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_TCP_STATE is set
+    @param tcp_recovery_state - congestion-control recovery state; valid
+           only if SESSION_CONNECTION_INFO_FIELD_API_TCP_RECOVERY is set
+    @param timestamp_negotiated - TCP timestamp option negotiated; valid
+           only if SESSION_CONNECTION_INFO_FIELD_API_TCP_TIMESTAMPS is set
+    @param snd_una - oldest unacknowledged sequence number; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_TCP_SEQUENCES is set
+    @param snd_nxt - next sequence number to send; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_TCP_SEQUENCES is set
+    @param rcv_nxt - next expected receive sequence number; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_TCP_SEQUENCES is set
+    @param cwnd - congestion window; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_TCP_CONGESTION is set
+    @param ssthresh - slow-start threshold; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_TCP_CONGESTION is set
+    @param rto_usecs - retransmit timeout, in microseconds; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_TCP_TIMING is set
+    @param receive_rtt_usecs - most recent receive RTT sample, in
+           microseconds; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_TCP_TIMING is set
+    @param retransmits - retransmit count; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_TCP_RECOVERY_DATA is set
+    @param high_seq - highest sequence number sent when loss was detected;
+           valid only if SESSION_CONNECTION_INFO_FIELD_API_TCP_RECOVERY_DATA
+           is set
+    @param recovery_point - sequence number that ends the current recovery
+           phase; valid only if
+           SESSION_CONNECTION_INFO_FIELD_API_TCP_RECOVERY_DATA is set
+    @param info_version - connection-information provider record version
+    @param info_status - connection-information provider status for this
+           record
+    @param valid_fields - bitmap of field groups this record actually
+           populated
+ */
+define session_table_details
+{
+  u32 context;
+
+  u32 thread_index;
+  u32 session_index;
+  u32 connection_index;
+  u32 app_wrk_index;
+
+  vl_api_transport_proto_t transport_proto;
+  vl_api_address_t lcl_ip;
+  vl_api_address_t rmt_ip;
+  u16 lcl_port;
+  u16 rmt_port;
+
+  u8 session_state;
+  u8 tcp_state;
+  u8 tcp_recovery_state;
+  bool timestamp_negotiated;
+
+  u32 snd_una;
+  u32 snd_nxt;
+  u32 rcv_nxt;
+  u32 cwnd;
+  u32 ssthresh;
+  u32 rto_usecs;
+  u32 receive_rtt_usecs;
+  u32 retransmits;
+  u32 high_seq;
+  u32 recovery_point;
+
+  u16 info_version;
+  vl_api_session_connection_info_status_t info_status;
+  vl_api_session_connection_info_field_t valid_fields;
+};
+
+/** \brief Final summary/completion for one session_table_dump request
+
+    Sent once, after every session_table_details message for this request.
+    This is the formal reply of the session_table_dump/session_table_details
+    stream service below: a client library waits for exactly this message,
+    not a separate control-ping, to know the dump is complete.
+
+    @param context - sender context, to match reply w/ request
+    @param retval - request-level result. Nonzero means no
+           session_table_details message for this request is valid evidence
+           of table state, even if some were sent before the failure was
+           detected
+    @param returned_count - number of session_table_details messages sent
+           for this request
+    @param scanned_count - number of session pool entries examined while the
+           worker barrier was held, for barrier-cost diagnostics; it does
+           not expose pool pointers or identify individual sessions
+    @param truncated - true if at least one additional matching session
+           exists beyond returned_count. The returned records remain
+           internally consistent with each other, but together they are not
+           the complete table
+ */
+define session_table_dump_reply
+{
+  u32 context;
+  i32 retval;
+  u32 returned_count;
+  u32 scanned_count;
+  bool truncated;
+};
+
+service {
+  rpc session_table_dump returns session_table_dump_reply
+    stream session_table_details;
 };
 
 /*

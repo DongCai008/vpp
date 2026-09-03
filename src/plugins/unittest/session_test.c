@@ -19,10 +19,14 @@
 #include <vlibmemory/vl_memory_api_h.h>
 #undef vl_typedefs
 
+#include <vnet/session/session.api_enum.h>
+#include <vnet/session/session.api_types.h>
+
 extern int vcl_test_preclosed_connected (svm_msg_q_t *mq, u32 client_index,
 					  session_handle_t vpp_handle);
 extern int vcl_test_preclosed_connect_error (void);
 extern void vl_api_memclnt_delete_t_handler (vl_api_memclnt_delete_t *mp);
+extern void vl_api_session_table_dump_t_handler (vl_api_session_table_dump_t *mp);
 
 #define SESSION_TEST_I(_cond, _comment, _args...)		\
 ({								\
@@ -3781,6 +3785,805 @@ session_test_table_iteration (vlib_main_t *vm, unformat_input_t *input)
   return 0;
 }
 
+/*
+ * session_table_dump binary API tests
+ *
+ * These drive the real vl_api_session_table_dump_t_handler () directly, the
+ * same technique session_test_preconnect_cancel () already uses for
+ * vl_api_memclnt_delete_t_handler (): a real shmem-registered API client
+ * whose input queue receives the exact wire-format messages the handler
+ * sends, decoded back into host order the way any real client would.
+ * Synthetic sessions live in worker pools beyond vlib_num_workers () so
+ * nothing here can collide with session state any other test leaves behind.
+ */
+
+typedef struct
+{
+  u32 api_index;
+  svm_queue_t *q;
+} session_test_dump_client_t;
+
+static int
+session_test_dump_client_init (session_test_dump_client_t *c, char *name)
+{
+  clib_memset (c, 0, sizeof (*c));
+  /* Sized to hold the largest single synchronous burst this test drives:
+   * up to SESSION_TABLE_DUMP_MAX_RECORDS (session_api.c) details plus one
+   * reply, all queued by one direct handler call before this test ever
+   * drains the queue. A too-small queue here would deadlock: the send
+   * would block for space that only draining -- which cannot run until the
+   * handler call returns -- would free. */
+  c->q = svm_queue_alloc_and_init (8192, sizeof (uword), getpid ());
+  if (!c->q)
+    return -1;
+  c->api_index = vl_api_memclnt_create_internal (name, c->q);
+  if (c->api_index == (u32) ~0 || !vl_api_client_index_to_registration (c->api_index))
+    return -1;
+  return 0;
+}
+
+/* Pop one queued message, unpoisoned and ready to read; the caller owns it
+ * and must vl_msg_api_free () it. Returns 0 if the queue is empty. */
+static void *
+session_test_dump_client_recv (session_test_dump_client_t *c)
+{
+  void *msg = 0;
+  if (svm_queue_sub (c->q, (u8 *) &msg, SVM_Q_NOWAIT, 0))
+    return 0;
+  VL_MSG_API_UNPOISON (msg);
+  return msg;
+}
+
+/* Make c's registration disappear (vl_api_client_index_to_registration ()
+ * starts returning 0 for it) without allocating or freeing any binary API
+ * message. Only pool bookkeeping, deliberately -- this is called from
+ * inside session_test_mock_get_connection_info () below, itself invoked
+ * from inside session_table_iteration () while the worker barrier is held.
+ * The real vl_api_memclnt_delete_t_handler () path (allocate a request,
+ * dispatch it, free it) is proven safe everywhere else in this file, but
+ * not from that specific nested, barrier-held context; this narrower
+ * primitive sidesteps the API message heap entirely to stay safe there.
+ * The registration struct itself and the caller's svm_queue_t are
+ * deliberately left alone: the caller still owns and frees its queue, and
+ * ASAN leak detection is disabled for these tests. */
+static void
+session_test_dump_client_evict (session_test_dump_client_t *c)
+{
+  api_main_t *am = vlibapi_get_main ();
+  vl_api_registration_t **regpp;
+  u32 index;
+
+  if (c->api_index == (u32) ~0 || !vl_api_client_index_to_registration (c->api_index))
+    return;
+
+  index = vl_msg_api_handle_get_index (c->api_index);
+  regpp = pool_elt_at_index (am->vl_clients, index);
+  *regpp = 0;
+  pool_put_index (am->vl_clients, index);
+}
+
+static void
+session_test_dump_client_delete (session_test_dump_client_t *c)
+{
+  vl_api_memclnt_delete_t *mp;
+
+  if (c->api_index == (u32) ~0 || !vl_api_client_index_to_registration (c->api_index))
+    return;
+
+  mp = vl_msg_api_alloc_or_null (sizeof (*mp));
+  if (!mp)
+    return;
+  *mp = (vl_api_memclnt_delete_t){ .index = c->api_index };
+  vl_api_memclnt_delete_t_handler (mp);
+  /* Deliberately not freed: session_test_preconnect_cancel ()'s own
+   * memclnt_delete cleanup, above, does not free its request message
+   * either. ASAN leak detection is disabled for these tests. */
+}
+
+static void
+session_test_dump_client_free (session_test_dump_client_t *c)
+{
+  void *msg;
+
+  if (c->api_index != (u32) ~0 && vl_api_client_index_to_registration (c->api_index))
+    session_test_dump_client_delete (c);
+
+  /* drain anything left (e.g. the delete reply) so svm_queue_free () does
+   * not free a queue still holding live pointers */
+  while ((msg = session_test_dump_client_recv (c)))
+    vl_msg_api_free (msg);
+
+  if (c->q)
+    svm_queue_free (c->q);
+  clib_memset (c, 0, sizeof (*c));
+}
+
+static void
+session_test_dump_send_request (session_test_dump_client_t *c, u32 thread_index,
+				u32 max_records, vl_api_transport_proto_t proto,
+				u8 flags, u16 reserved, u32 context)
+{
+  vl_api_session_table_dump_t *mp;
+
+  mp = vl_msg_api_alloc (sizeof (*mp));
+  clib_memset (mp, 0, sizeof (*mp));
+  mp->client_index = c->api_index;
+  mp->context = context;
+  mp->thread_index = clib_host_to_net_u32 (thread_index);
+  mp->max_records = clib_host_to_net_u32 (max_records);
+  mp->transport_proto = proto;
+  mp->flags = flags;
+  mp->reserved = clib_host_to_net_u16 (reserved);
+
+  vl_api_session_table_dump_t_handler (mp);
+  vl_msg_api_free (mp);
+}
+
+/* Host-order copy of one session_table_details message, decoded the way a
+ * real client would: every field un-swapped except context (never swapped
+ * on the wire, see api_helper_macros.h's REPLY_MACRO). */
+typedef struct
+{
+  u32 context;
+  u32 thread_index;
+  u32 session_index;
+  u32 connection_index;
+  u32 app_wrk_index;
+  vl_api_transport_proto_t transport_proto;
+  u8 lcl_af;
+  u8 lcl_ip4[4];
+  u8 rmt_af;
+  u8 rmt_ip4[4];
+  u16 lcl_port;
+  u16 rmt_port;
+  u8 session_state;
+  u8 tcp_state;
+  u8 tcp_recovery_state;
+  u8 timestamp_negotiated;
+  u32 snd_una, snd_nxt, rcv_nxt, cwnd, ssthresh, rto_usecs, receive_rtt_usecs;
+  u32 retransmits, high_seq, recovery_point;
+  u16 info_version;
+  vl_api_session_connection_info_status_t info_status;
+  u32 valid_fields;
+} session_test_dump_detail_t;
+
+static void
+session_test_dump_decode_detail (vl_api_session_table_details_t *rmp,
+				 session_test_dump_detail_t *d)
+{
+  clib_memset (d, 0, sizeof (*d));
+  d->context = rmp->context;
+  d->thread_index = clib_net_to_host_u32 (rmp->thread_index);
+  d->session_index = clib_net_to_host_u32 (rmp->session_index);
+  d->connection_index = clib_net_to_host_u32 (rmp->connection_index);
+  d->app_wrk_index = clib_net_to_host_u32 (rmp->app_wrk_index);
+  d->transport_proto = rmp->transport_proto;
+  d->lcl_af = rmp->lcl_ip.af;
+  clib_memcpy_fast (d->lcl_ip4, rmp->lcl_ip.un.ip4, sizeof (d->lcl_ip4));
+  d->rmt_af = rmp->rmt_ip.af;
+  clib_memcpy_fast (d->rmt_ip4, rmp->rmt_ip.un.ip4, sizeof (d->rmt_ip4));
+  /* transport_endpoint_t ports are carried net order end-to-end; convert
+   * back once here, symmetric with the mock provider below setting them
+   * with clib_host_to_net_u16 (). */
+  d->lcl_port = clib_net_to_host_u16 (rmp->lcl_port);
+  d->rmt_port = clib_net_to_host_u16 (rmp->rmt_port);
+  d->session_state = rmp->session_state;
+  d->tcp_state = rmp->tcp_state;
+  d->tcp_recovery_state = rmp->tcp_recovery_state;
+  d->timestamp_negotiated = rmp->timestamp_negotiated;
+  d->snd_una = clib_net_to_host_u32 (rmp->snd_una);
+  d->snd_nxt = clib_net_to_host_u32 (rmp->snd_nxt);
+  d->rcv_nxt = clib_net_to_host_u32 (rmp->rcv_nxt);
+  d->cwnd = clib_net_to_host_u32 (rmp->cwnd);
+  d->ssthresh = clib_net_to_host_u32 (rmp->ssthresh);
+  d->rto_usecs = clib_net_to_host_u32 (rmp->rto_usecs);
+  d->receive_rtt_usecs = clib_net_to_host_u32 (rmp->receive_rtt_usecs);
+  d->retransmits = clib_net_to_host_u32 (rmp->retransmits);
+  d->high_seq = clib_net_to_host_u32 (rmp->high_seq);
+  d->recovery_point = clib_net_to_host_u32 (rmp->recovery_point);
+  d->info_version = clib_net_to_host_u16 (rmp->info_version);
+  d->info_status = rmp->info_status;
+  d->valid_fields = clib_net_to_host_u32 (rmp->valid_fields);
+}
+
+typedef struct
+{
+  session_test_dump_detail_t *details; /* vec */
+  u8 got_summary;
+  u32 summary_context;
+  i32 retval;
+  u32 returned_count;
+  u32 scanned_count;
+  u8 truncated;
+  u32 unexpected_msgs; /* any message id neither details nor summary */
+} session_test_dump_result_t;
+
+static void
+session_test_dump_result_free (session_test_dump_result_t *r)
+{
+  vec_free (r->details);
+  clib_memset (r, 0, sizeof (*r));
+}
+
+/* Send one session_table_dump request and drain every reply the handler
+ * queued for it: zero or more session_table_details, then exactly one
+ * session_table_dump_summary. Decodes each into host order and frees the
+ * wire messages as it goes. */
+static void
+session_test_dump_run (session_test_dump_client_t *c, u32 thread_index,
+		       u32 max_records, vl_api_transport_proto_t proto,
+		       u8 flags, u16 reserved, u32 context,
+		       session_test_dump_result_t *out)
+{
+  void *msg;
+  u16 msg_id;
+  session_test_dump_detail_t d;
+  vl_api_session_table_dump_reply_t *smp;
+
+  clib_memset (out, 0, sizeof (*out));
+  session_test_dump_send_request (c, thread_index, max_records, proto, flags,
+				  reserved, context);
+
+  while (!out->got_summary && (msg = session_test_dump_client_recv (c)))
+    {
+      msg_id = clib_net_to_host_u16 (*(u16 *) msg) - session_main.msg_id_base;
+      if (msg_id == VL_API_SESSION_TABLE_DETAILS)
+	{
+	  session_test_dump_decode_detail (msg, &d);
+	  vec_add1 (out->details, d);
+	}
+      else if (msg_id == VL_API_SESSION_TABLE_DUMP_REPLY)
+	{
+	  smp = msg;
+	  out->got_summary = 1;
+	  out->summary_context = smp->context;
+	  out->retval = (i32) clib_net_to_host_u32 ((u32) smp->retval);
+	  out->returned_count = clib_net_to_host_u32 (smp->returned_count);
+	  out->scanned_count = clib_net_to_host_u32 (smp->scanned_count);
+	  out->truncated = smp->truncated;
+	}
+      else
+	out->unexpected_msgs++;
+      vl_msg_api_free (msg);
+    }
+}
+
+static void
+session_test_dump_free_all (clib_thread_index_t wrk)
+{
+  u32 *to_free = 0, i;
+
+  pool_foreach_index (i, session_main.wrk[wrk].sessions)
+    vec_add1 (to_free, i);
+  for (i = 0; i < vec_len (to_free); i++)
+    session_free (pool_elt_at_index (session_main.wrk[wrk].sessions, to_free[i]));
+  vec_free (to_free);
+}
+
+/* Selects the connection-information provider mock's behavior for one
+ * synthetic session, keyed off the connection_index the collector passes
+ * through unchanged. */
+typedef enum
+{
+  SESSION_TEST_MOCK_OK = 1,
+  SESSION_TEST_MOCK_NOT_FOUND,
+  SESSION_TEST_MOCK_BAD_VERSION,
+  SESSION_TEST_MOCK_BAD_BYTES_ZERO,
+  SESSION_TEST_MOCK_BAD_BYTES_TOO_BIG,
+  SESSION_TEST_MOCK_BAD_PROTO,
+  SESSION_TEST_MOCK_BAD_RESERVED,
+  SESSION_TEST_MOCK_BAD_STATUS,
+  SESSION_TEST_MOCK_NEGATIVE_RETURN,
+  SESSION_TEST_MOCK_DISCONNECT_CLIENT,
+} session_test_mock_scenario_t;
+
+/* Set only for the duration of the disconnect scenario below. */
+static session_test_dump_client_t *session_test_mock_disconnect_client;
+
+static int
+session_test_mock_get_connection_info (u32 connection_index,
+				       clib_thread_index_t thread_index,
+				       u32 expected_session_index,
+				       session_connection_info_t *info)
+{
+  switch (connection_index)
+    {
+    case SESSION_TEST_MOCK_OK:
+      info->version = SESSION_CONNECTION_INFO_VERSION;
+      info->bytes = sizeof (*info);
+      info->transport_proto = TRANSPORT_PROTO_TCP;
+      info->status = SESSION_CONNECTION_INFO_OK;
+      info->valid_fields =
+	SESSION_CONNECTION_INFO_F_ENDPOINTS | SESSION_CONNECTION_INFO_F_TCP_STATE |
+	SESSION_CONNECTION_INFO_F_TCP_RECOVERY | SESSION_CONNECTION_INFO_F_TCP_SEQUENCES |
+	SESSION_CONNECTION_INFO_F_TCP_CONGESTION | SESSION_CONNECTION_INFO_F_TCP_TIMING |
+	SESSION_CONNECTION_INFO_F_TCP_RECOVERY_DATA |
+	SESSION_CONNECTION_INFO_F_TCP_TIMESTAMPS;
+      info->lcl.is_ip4 = 1;
+      info->lcl.ip.ip4.as_u32 = clib_host_to_net_u32 (0x0a000001);
+      info->lcl.port = clib_host_to_net_u16 (11000);
+      info->rmt.is_ip4 = 1;
+      info->rmt.ip.ip4.as_u32 = clib_host_to_net_u32 (0x0a000002);
+      info->rmt.port = clib_host_to_net_u16 (22000);
+      info->data.tcp.tcp_state = 5;
+      info->data.tcp.recovery_state = 2;
+      info->data.tcp.timestamp_negotiated = 1;
+      info->data.tcp.snd_una = 111;
+      info->data.tcp.snd_nxt = 222;
+      info->data.tcp.rcv_nxt = 333;
+      info->data.tcp.cwnd = 444;
+      info->data.tcp.ssthresh = 555;
+      info->data.tcp.rto_usecs = 666;
+      info->data.tcp.receive_rtt_usecs = 777;
+      info->data.tcp.retransmits = 3;
+      info->data.tcp.high_seq = 888;
+      info->data.tcp.recovery_point = 999;
+      return 0;
+
+    case SESSION_TEST_MOCK_NOT_FOUND:
+      info->version = SESSION_CONNECTION_INFO_VERSION;
+      info->bytes = sizeof (*info);
+      info->transport_proto = TRANSPORT_PROTO_TCP;
+      info->status = SESSION_CONNECTION_INFO_NOT_FOUND;
+      /* stray, unreported value: the encoder must gate every TCP field on
+       * valid_fields, never on status or on the field merely being set. */
+      info->data.tcp.snd_una = 0xdeadbeef;
+      info->valid_fields = 0;
+      return 0;
+
+    case SESSION_TEST_MOCK_BAD_VERSION:
+      info->version = 0;
+      info->bytes = sizeof (*info);
+      info->transport_proto = TRANSPORT_PROTO_TCP;
+      info->status = SESSION_CONNECTION_INFO_OK;
+      return 0;
+
+    case SESSION_TEST_MOCK_BAD_BYTES_ZERO:
+      info->version = SESSION_CONNECTION_INFO_VERSION;
+      info->bytes = 0;
+      info->transport_proto = TRANSPORT_PROTO_TCP;
+      info->status = SESSION_CONNECTION_INFO_OK;
+      return 0;
+
+    case SESSION_TEST_MOCK_BAD_BYTES_TOO_BIG:
+      info->version = SESSION_CONNECTION_INFO_VERSION;
+      info->bytes = sizeof (*info) + 1;
+      info->transport_proto = TRANSPORT_PROTO_TCP;
+      info->status = SESSION_CONNECTION_INFO_OK;
+      return 0;
+
+    case SESSION_TEST_MOCK_BAD_PROTO:
+      info->version = SESSION_CONNECTION_INFO_VERSION;
+      info->bytes = sizeof (*info);
+      info->transport_proto = TRANSPORT_PROTO_UDP;
+      info->status = SESSION_CONNECTION_INFO_OK;
+      return 0;
+
+    case SESSION_TEST_MOCK_BAD_RESERVED:
+      info->version = SESSION_CONNECTION_INFO_VERSION;
+      info->bytes = sizeof (*info);
+      info->transport_proto = TRANSPORT_PROTO_TCP;
+      info->status = SESSION_CONNECTION_INFO_OK;
+      info->reserved = 7;
+      return 0;
+
+    case SESSION_TEST_MOCK_BAD_STATUS:
+      info->version = SESSION_CONNECTION_INFO_VERSION;
+      info->bytes = sizeof (*info);
+      info->transport_proto = TRANSPORT_PROTO_TCP;
+      info->status = (session_connection_info_status_t) 99;
+      return 0;
+
+    case SESSION_TEST_MOCK_NEGATIVE_RETURN:
+      /* the collector must discard this claim entirely on a negative
+       * return, not merely distrust individual fields. */
+      info->version = SESSION_CONNECTION_INFO_VERSION;
+      info->bytes = sizeof (*info);
+      info->transport_proto = TRANSPORT_PROTO_TCP;
+      info->status = SESSION_CONNECTION_INFO_OK;
+      return -1;
+
+    case SESSION_TEST_MOCK_DISCONNECT_CLIENT:
+      if (session_test_mock_disconnect_client)
+	session_test_dump_client_evict (session_test_mock_disconnect_client);
+      info->version = SESSION_CONNECTION_INFO_VERSION;
+      info->bytes = sizeof (*info);
+      info->transport_proto = TRANSPORT_PROTO_TCP;
+      info->status = SESSION_CONNECTION_INFO_NOT_SUPPORTED;
+      return 0;
+
+    default:
+      return -1;
+    }
+}
+
+static session_t *
+session_test_dump_alloc_tcp (clib_thread_index_t wrk, u32 connection_index,
+			     session_state_t state)
+{
+  session_t *s = session_alloc (wrk);
+  s->session_type = session_type_from_proto_and_ip (TRANSPORT_PROTO_TCP, 1);
+  s->connection_index = connection_index;
+  s->app_wrk_index = 3000 + connection_index;
+  s->session_state = state;
+  return s;
+}
+
+static int
+session_test_table_dump (vlib_main_t *vm, unformat_input_t *input)
+{
+  clib_thread_index_t wrk_empty = vlib_num_workers () + 61;
+  clib_thread_index_t wrk_mix = vlib_num_workers () + 62;
+  clib_thread_index_t wrk_limits = vlib_num_workers () + 63;
+  clib_thread_index_t wrk_status = vlib_num_workers () + 64;
+  clib_thread_index_t wrk_discon = vlib_num_workers () + 65;
+  session_test_dump_client_t c, c2;
+  session_test_dump_result_t r;
+  session_t *s;
+  u32 i, n_extra;
+  u32 idx_tcp[5], idx_udp;
+
+  if (unformat_check_input (input) != UNFORMAT_END_OF_INPUT)
+    return -1;
+
+  vec_validate (session_main.wrk, wrk_discon);
+
+  if (session_test_dump_client_init (&c, "table_dump_test") < 0)
+    {
+      SESSION_TEST_I (0, "table-dump: could not create a test API client");
+      return 1;
+    }
+
+  /* -- request validation: reserved, flags, transport filter, thread index */
+  session_test_dump_run (&c, 0, 0, TRANSPORT_PROTO_API_TCP, 0, 1 /* reserved */,
+			 101, &r);
+  SESSION_TEST_I (r.got_summary && r.retval != 0 && r.returned_count == 0 &&
+		    vec_len (r.details) == 0 && r.summary_context == 101,
+		  "table-dump: nonzero reserved is rejected with no details");
+  session_test_dump_result_free (&r);
+
+  session_test_dump_run (&c, 0, 0, TRANSPORT_PROTO_API_TCP, 1 /* flags */, 0,
+			 102, &r);
+  SESSION_TEST_I (r.got_summary && r.retval != 0 && r.returned_count == 0,
+		  "table-dump: a nonzero flag bit is rejected with no details");
+  session_test_dump_result_free (&r);
+
+  session_test_dump_run (&c, 0, 0, TRANSPORT_PROTO_API_UDP, 0, 0, 103, &r);
+  SESSION_TEST_I (r.got_summary && r.retval != 0 && r.returned_count == 0,
+		  "table-dump: an unsupported transport filter is rejected");
+  session_test_dump_result_free (&r);
+
+  session_test_dump_run (&c, vec_len (session_main.wrk), 0, TRANSPORT_PROTO_API_NONE,
+			 0, 0, 104, &r);
+  SESSION_TEST_I (r.got_summary && r.retval != 0 && r.returned_count == 0,
+		  "table-dump: an out-of-range thread_index is rejected");
+  session_test_dump_result_free (&r);
+
+  /* -- empty table */
+  session_test_dump_run (&c, wrk_empty, 0, TRANSPORT_PROTO_API_NONE, 0, 0, 105,
+			 &r);
+  SESSION_TEST_I (r.got_summary && r.retval == 0 && r.returned_count == 0 &&
+		    r.scanned_count == 0 && !r.truncated &&
+		    vec_len (r.details) == 0,
+		  "table-dump: an empty worker table returns zero records");
+  session_test_dump_result_free (&r);
+
+  /* -- transport filter, missing-provider status, and envelope fields on a
+   * mixed TCP/UDP worker with no get_connection_info registered anywhere */
+  for (i = 0; i < 5; i++)
+    {
+      s = session_test_dump_alloc_tcp (wrk_mix, 500 + i, SESSION_STATE_READY);
+      idx_tcp[i] = s->session_index;
+    }
+  s = session_alloc (wrk_mix);
+  s->session_type = session_type_from_proto_and_ip (TRANSPORT_PROTO_UDP, 1);
+  s->connection_index = 600;
+  s->session_state = SESSION_STATE_READY;
+  idx_udp = s->session_index;
+
+  session_test_dump_run (&c, wrk_mix, 0, TRANSPORT_PROTO_API_TCP, 0, 0, 106, &r);
+  SESSION_TEST_I (r.got_summary && r.retval == 0 && r.returned_count == 5 &&
+		    r.scanned_count == 6 && !r.truncated &&
+		    vec_len (r.details) == 5,
+		  "table-dump: the TCP filter excludes the UDP session but "
+		  "still scans it (%u returned, %u scanned)",
+		  r.returned_count, r.scanned_count);
+  if (vec_len (r.details) == 5)
+    {
+      SESSION_TEST_I (
+	r.details[0].thread_index == wrk_mix &&
+	  r.details[0].session_index == idx_tcp[0] &&
+	  r.details[0].connection_index == 500 &&
+	  r.details[0].app_wrk_index == 3000 + 500 &&
+	  r.details[0].session_state == SESSION_STATE_READY &&
+	  r.details[0].transport_proto == TRANSPORT_PROTO_API_TCP &&
+	  r.details[0].info_status ==
+	    SESSION_CONNECTION_INFO_STATUS_API_NOT_SUPPORTED &&
+	  r.details[0].valid_fields == 0 && r.details[0].lcl_port == 0 &&
+	  r.details[0].context == 106,
+	"table-dump: envelope and no-provider status are correct with "
+	"padding left zero");
+      for (i = 0; i < 5; i++)
+	SESSION_TEST_I (r.details[i].session_index == idx_tcp[i] &&
+			   r.details[i].connection_index == 500 + i,
+			 "table-dump: record %d matches the session it was "
+			 "collected from",
+			 i);
+    }
+  session_test_dump_result_free (&r);
+
+  session_test_dump_run (&c, wrk_mix, 0, TRANSPORT_PROTO_API_NONE, 0, 0, 107,
+			 &r);
+  SESSION_TEST_I (r.got_summary && r.retval == 0 && r.returned_count == 6 &&
+		    r.scanned_count == 6,
+		  "table-dump: no filter includes the UDP session too "
+		  "(%u returned)",
+		  r.returned_count);
+  SESSION_TEST_I (vec_len (r.details) == 6 &&
+		    r.details[5].session_index == idx_udp &&
+		    r.details[5].connection_index == 600 &&
+		    r.details[5].transport_proto == TRANSPORT_PROTO_API_UDP,
+		  "table-dump: the UDP session's own record is included, "
+		  "unfiltered, with its own transport_proto");
+  session_test_dump_result_free (&r);
+
+  session_test_dump_free_all (wrk_mix);
+
+  /* -- limits and truncation: one pool sized past the hard maximum serves
+   * three requests (explicit small limit, default limit, oversized limit
+   * clamped to the hard maximum) without re-allocating between them */
+  n_extra = 4096 + 5; /* SESSION_TABLE_DUMP_MAX_RECORDS (session_api.c) + 5 */
+  for (i = 0; i < n_extra; i++)
+    session_test_dump_alloc_tcp (wrk_limits, 700 + i, SESSION_STATE_READY);
+
+  session_test_dump_run (&c, wrk_limits, 10, TRANSPORT_PROTO_API_TCP, 0, 0,
+			 108, &r);
+  SESSION_TEST_I (r.got_summary && r.retval == 0 && r.returned_count == 10 &&
+		    r.scanned_count == 11 && r.truncated &&
+		    vec_len (r.details) == 10,
+		  "table-dump: an explicit small max_records truncates "
+		  "after exactly one extra scan (%u returned, %u scanned)",
+		  r.returned_count, r.scanned_count);
+  session_test_dump_result_free (&r);
+
+  session_test_dump_run (&c, wrk_limits, 0, TRANSPORT_PROTO_API_TCP, 0, 0, 109,
+			 &r);
+  SESSION_TEST_I (r.got_summary && r.retval == 0 && r.returned_count == 256 &&
+		    r.scanned_count == 257 && r.truncated,
+		  "table-dump: max_records 0 truncates at the server default "
+		  "(%u returned, %u scanned)",
+		  r.returned_count, r.scanned_count);
+  session_test_dump_result_free (&r);
+
+  session_test_dump_run (&c, wrk_limits, 0xffffffff, TRANSPORT_PROTO_API_TCP, 0,
+			 0, 110, &r);
+  SESSION_TEST_I (r.got_summary && r.retval == 0 && r.returned_count == 4096 &&
+		    r.scanned_count == 4097 && r.truncated,
+		  "table-dump: an oversized max_records clamps to the hard "
+		  "maximum (%u returned, %u scanned)",
+		  r.returned_count, r.scanned_count);
+  session_test_dump_result_free (&r);
+
+  session_test_dump_free_all (wrk_limits);
+
+  /* -- provider status validation: version, bytes, protocol, reserved,
+   * status range and a negative return each become the documented status,
+   * and every unreported TCP field stays zero regardless of what a
+   * misbehaving provider tried to leave in them */
+  session_test_dump_alloc_tcp (wrk_status, SESSION_TEST_MOCK_OK, SESSION_STATE_READY);
+  session_test_dump_alloc_tcp (wrk_status, SESSION_TEST_MOCK_NOT_FOUND,
+			       SESSION_STATE_READY);
+  session_test_dump_alloc_tcp (wrk_status, SESSION_TEST_MOCK_BAD_VERSION,
+			       SESSION_STATE_READY);
+  session_test_dump_alloc_tcp (wrk_status, SESSION_TEST_MOCK_BAD_BYTES_ZERO,
+			       SESSION_STATE_READY);
+  session_test_dump_alloc_tcp (wrk_status, SESSION_TEST_MOCK_BAD_BYTES_TOO_BIG,
+			       SESSION_STATE_READY);
+  session_test_dump_alloc_tcp (wrk_status, SESSION_TEST_MOCK_BAD_PROTO,
+			       SESSION_STATE_READY);
+  session_test_dump_alloc_tcp (wrk_status, SESSION_TEST_MOCK_BAD_RESERVED,
+			       SESSION_STATE_READY);
+  session_test_dump_alloc_tcp (wrk_status, SESSION_TEST_MOCK_BAD_STATUS,
+			       SESSION_STATE_READY);
+  session_test_dump_alloc_tcp (wrk_status, SESSION_TEST_MOCK_NEGATIVE_RETURN,
+			       SESSION_STATE_READY);
+
+  tp_vfts[TRANSPORT_PROTO_TCP].get_connection_info =
+    session_test_mock_get_connection_info;
+
+  session_test_dump_run (&c, wrk_status, 0, TRANSPORT_PROTO_API_TCP, 0, 0, 111,
+			 &r);
+  SESSION_TEST_I (r.got_summary && r.retval == 0 && r.returned_count == 9 &&
+		    vec_len (r.details) == 9,
+		  "table-dump: nine status-validation records are all "
+		  "returned (%u)",
+		  r.returned_count);
+  if (vec_len (r.details) == 9)
+    {
+      SESSION_TEST_I (
+	r.details[0].info_status == SESSION_CONNECTION_INFO_STATUS_API_OK &&
+	  r.details[0].valid_fields != 0 && r.details[0].lcl_af == ADDRESS_IP4 &&
+	  r.details[0].lcl_ip4[0] == 10 && r.details[0].lcl_ip4[3] == 1 &&
+	  r.details[0].rmt_ip4[3] == 2 && r.details[0].lcl_port == 11000 &&
+	  r.details[0].rmt_port == 22000 && r.details[0].tcp_state == 5 &&
+	  r.details[0].tcp_recovery_state == 2 &&
+	  r.details[0].timestamp_negotiated == 1 &&
+	  r.details[0].snd_una == 111 && r.details[0].snd_nxt == 222 &&
+	  r.details[0].rcv_nxt == 333 && r.details[0].cwnd == 444 &&
+	  r.details[0].ssthresh == 555 && r.details[0].rto_usecs == 666 &&
+	  r.details[0].receive_rtt_usecs == 777 &&
+	  r.details[0].retransmits == 3 && r.details[0].high_seq == 888 &&
+	  r.details[0].recovery_point == 999,
+	"table-dump: a fully valid provider result round-trips every "
+	"field, in both directions, without a double byte swap");
+      SESSION_TEST_I (
+	r.details[1].info_status ==
+	    SESSION_CONNECTION_INFO_STATUS_API_NOT_FOUND &&
+	  r.details[1].valid_fields == 0 && r.details[1].snd_una == 0,
+	"table-dump: an unreported field stays zero even when the "
+	"provider left stray data in it (status-gated, not status-blind)");
+      SESSION_TEST_I (r.details[2].info_status ==
+			 SESSION_CONNECTION_INFO_STATUS_API_INVALID_DATA,
+		       "table-dump: version 0 is rejected as invalid data");
+      SESSION_TEST_I (r.details[3].info_status ==
+			 SESSION_CONNECTION_INFO_STATUS_API_INVALID_DATA,
+		       "table-dump: bytes 0 is rejected as invalid data");
+      SESSION_TEST_I (r.details[4].info_status ==
+			 SESSION_CONNECTION_INFO_STATUS_API_INVALID_DATA,
+		       "table-dump: bytes past sizeof (*info) is rejected");
+      SESSION_TEST_I (
+	r.details[5].info_status == SESSION_CONNECTION_INFO_STATUS_API_INVALID_DATA,
+	"table-dump: a provider-reported protocol mismatch is rejected");
+      SESSION_TEST_I (
+	r.details[6].info_status == SESSION_CONNECTION_INFO_STATUS_API_INVALID_DATA,
+	"table-dump: a nonzero reserved byte is rejected");
+      SESSION_TEST_I (
+	r.details[7].info_status == SESSION_CONNECTION_INFO_STATUS_API_INVALID_DATA,
+	"table-dump: an out-of-range status value is rejected");
+      SESSION_TEST_I (
+	r.details[8].info_status ==
+	    SESSION_CONNECTION_INFO_STATUS_API_INTERNAL_ERROR &&
+	  r.details[8].valid_fields == 0,
+	"table-dump: a negative provider return discards its claimed OK "
+	"status entirely");
+    }
+  session_test_dump_result_free (&r);
+
+  tp_vfts[TRANSPORT_PROTO_TCP].get_connection_info = 0;
+  session_test_dump_free_all (wrk_status);
+
+  /* -- all-worker selection: thread_index ~0 must cover every session
+   * worker in the one barrier interval, not just the lowest or a single
+   * one. Sessions are split across two distinct synthetic workers; both
+   * must show up in one request. Assertions on the aggregate counts use
+   * >= rather than == because a real worker's own table is outside this
+   * test's control, but the two synthetic workers' own records are matched
+   * by worker/connection_index identity, which is exact regardless. */
+  {
+    u32 n_mix_found = 0, n_status_found = 0, j;
+
+    session_test_dump_alloc_tcp (wrk_mix, 800, SESSION_STATE_READY);
+    session_test_dump_alloc_tcp (wrk_mix, 801, SESSION_STATE_READY);
+    session_test_dump_alloc_tcp (wrk_status, 900, SESSION_STATE_READY);
+    session_test_dump_alloc_tcp (wrk_status, 901, SESSION_STATE_READY);
+    session_test_dump_alloc_tcp (wrk_status, 902, SESSION_STATE_READY);
+
+    session_test_dump_run (&c, (u32) ~0, 0, TRANSPORT_PROTO_API_TCP, 0, 0, 114,
+			   &r);
+    SESSION_TEST_I (r.got_summary && r.retval == 0 &&
+		      r.returned_count >= 5 && r.scanned_count >= 5 &&
+		      vec_len (r.details) == r.returned_count,
+		    "table-dump: thread_index ~0 is accepted and returns at "
+		    "least every synthetic record (%u returned)",
+		    r.returned_count);
+    for (j = 0; j < vec_len (r.details); j++)
+      {
+	if (r.details[j].thread_index == wrk_mix &&
+	    (r.details[j].connection_index == 800 ||
+	     r.details[j].connection_index == 801))
+	  n_mix_found++;
+	else if (r.details[j].thread_index == wrk_status &&
+		 (r.details[j].connection_index == 900 ||
+		  r.details[j].connection_index == 901 ||
+		  r.details[j].connection_index == 902))
+	  n_status_found++;
+      }
+    SESSION_TEST_I (n_mix_found == 2 && n_status_found == 3,
+		    "table-dump: one all-worker request visits two distinct "
+		    "synthetic workers in the same barrier interval (%u + "
+		    "%u found)",
+		    n_mix_found, n_status_found);
+    session_test_dump_result_free (&r);
+
+    session_test_dump_free_all (wrk_mix);
+    session_test_dump_free_all (wrk_status);
+  }
+
+  /* -- client disconnect during collection: a second client's registration
+   * is evicted from inside the mock provider, at the point in the barrier
+   * interval where the real per-record work would happen. The handler's
+   * post-barrier registration re-check must then send nothing at all for
+   * this request: no session_table_details, no session_table_dump_reply. */
+  session_test_dump_alloc_tcp (wrk_discon, SESSION_TEST_MOCK_DISCONNECT_CLIENT,
+			       SESSION_STATE_READY);
+  session_test_dump_alloc_tcp (wrk_discon, SESSION_TEST_MOCK_OK,
+			       SESSION_STATE_READY);
+
+  if (session_test_dump_client_init (&c2, "table_dump_test_disconnect") < 0)
+    {
+      SESSION_TEST_I (0, "table-dump: could not create the disconnect test client");
+    }
+  else
+    {
+      void *msg;
+      u32 n_total = 0;
+
+      session_test_mock_disconnect_client = &c2;
+      tp_vfts[TRANSPORT_PROTO_TCP].get_connection_info =
+	session_test_mock_get_connection_info;
+
+      session_test_dump_send_request (&c2, wrk_discon, 0, TRANSPORT_PROTO_API_TCP,
+				      0, 0, 112);
+
+      tp_vfts[TRANSPORT_PROTO_TCP].get_connection_info = 0;
+      session_test_mock_disconnect_client = 0;
+
+      while ((msg = session_test_dump_client_recv (&c2)))
+	{
+	  n_total++;
+	  vl_msg_api_free (msg);
+	}
+      SESSION_TEST_I (n_total == 0,
+		       "table-dump: a client whose registration vanishes "
+		       "mid-collection gets no details and no summary "
+		       "(%u unexpected messages)",
+		       n_total);
+
+      /* already evicted by the mock; nothing left to delete */
+      c2.api_index = (u32) ~0;
+      session_test_dump_client_free (&c2);
+    }
+
+  session_test_dump_free_all (wrk_discon);
+
+  /* -- client already gone before the request is ever made: no barrier is
+   * taken and the handler must not crash */
+  {
+    session_test_dump_client_t c3;
+
+    if (session_test_dump_client_init (&c3, "table_dump_test_gone") == 0)
+      {
+	u32 stale_index = c3.api_index;
+	vl_api_session_table_dump_t *mp;
+
+	session_test_dump_client_delete (&c3);
+	c3.api_index = (u32) ~0;
+	session_test_dump_client_free (&c3);
+
+	mp = vl_msg_api_alloc (sizeof (*mp));
+	clib_memset (mp, 0, sizeof (*mp));
+	mp->client_index = stale_index;
+	mp->context = 113;
+	mp->max_records = clib_host_to_net_u32 (1);
+	mp->transport_proto = TRANSPORT_PROTO_API_NONE;
+	vl_api_session_table_dump_t_handler (mp);
+	vl_msg_api_free (mp);
+      }
+  }
+
+  /* -- barrier cleanup: every scenario above completed a real
+   * barrier_sync ()/barrier_release () pair inside the handler; prove none
+   * of them left the barrier held by taking and releasing it here too */
+  vlib_worker_thread_barrier_sync (vm);
+  vlib_worker_thread_barrier_release (vm);
+  SESSION_TEST_I (1, "table-dump: the worker barrier is free after every "
+		     "prior request, successful or not");
+
+  session_test_dump_client_free (&c);
+
+  return 0;
+}
+
 static clib_error_t *
 session_test (vlib_main_t * vm,
 	      unformat_input_t * input, vlib_cli_command_t * cmd_arg)
@@ -3805,6 +4608,8 @@ session_test (vlib_main_t * vm,
 	res = session_test_tuple_result (vm, input);
       else if (unformat (input, "table-iteration"))
 	res = session_test_table_iteration (vm, input);
+      else if (unformat (input, "table-dump"))
+	res = session_test_table_dump (vm, input);
       else if (unformat (input, "proxy"))
 	res = session_test_proxy (vm, input);
       else if (unformat (input, "endpt-cfg"))
@@ -3836,6 +4641,8 @@ session_test (vlib_main_t * vm,
 	  if ((res = session_test_tuple_result (vm, input)))
 	    goto done;
 	  if ((res = session_test_table_iteration (vm, input)))
+	    goto done;
+	  if ((res = session_test_table_dump (vm, input)))
 	    goto done;
 	  if ((res = session_test_proxy (vm, input)))
 	    goto done;
