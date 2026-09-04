@@ -417,6 +417,27 @@ api_session_rules_v2_dump (vat_main_t *vam)
   return -1;
 }
 
+static void
+vl_api_session_table_dump_reply_t_handler (vl_api_session_table_dump_reply_t *mp)
+{
+  vat_main_t *vam = session_test_main.vat_main;
+  i32 retval = ntohl (mp->retval);
+  if (vam->async_mode)
+    vam->async_errors += (retval < 0);
+  else
+    {
+      vam->retval = retval;
+      vam->result_ready = 1;
+    }
+}
+
+static int
+api_session_table_dump (vat_main_t *vam)
+{
+  (void) vam;
+  return -1;
+}
+
 #include <vnet/session/session.api_test.c>
 
 /*
