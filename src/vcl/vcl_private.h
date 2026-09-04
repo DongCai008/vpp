@@ -135,6 +135,10 @@ typedef enum vcl_session_flags_
   VCL_SESSION_F_PENDING_LISTEN = 1 << 8,
   VCL_SESSION_F_APP_CLOSING = 1 << 9,
   VCL_SESSION_F_LISTEN_NO_MQ = 1 << 10,
+  /* A regular vppcom_session_connect request is outstanding. This is
+   * deliberately distinct from VCL_STATE_UPDATED, which is also used by
+   * worker-update and transport-cleanup paths. */
+  VCL_SESSION_F_PENDING_CONNECT = 1 << 11,
 } __clib_packed vcl_session_flags_t;
 
 typedef enum
@@ -433,6 +437,7 @@ vcl_session_free (vcl_worker_t * wrk, vcl_session_t * s)
 {
   /* Debug level set to 1 to avoid debug messages while ldp is cleaning up */
   VDBG (1, "session %u [0x%llx] removed", s->session_index, s->vpp_handle);
+  s->flags &= ~VCL_SESSION_F_PENDING_CONNECT;
   vcl_session_detach_fifos (s);
   if (s->ext_config)
     clib_mem_free (s->ext_config);
