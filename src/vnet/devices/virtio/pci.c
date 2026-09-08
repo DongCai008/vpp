@@ -470,6 +470,8 @@ virtio_pci_enable_gso (vlib_main_t * vm, virtio_if_t * vif)
   u64 offloads = VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_CSUM)
     | VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_TSO4)
     | VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_TSO6);
+  if (vif->features & VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_ECN))
+    offloads |= VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_ECN);
   clib_memcpy (gso_hdr.data, &offloads, sizeof (offloads));
 
   status = virtio_pci_send_ctrl_msg (vm, vif, &gso_hdr, sizeof (offloads));
@@ -501,9 +503,14 @@ virtio_pci_offloads (vlib_main_t * vm, virtio_if_t * vif, int gso_enabled,
 	    {
 	      vif->gso_enabled = 1;
 	      vif->csum_offload_enabled = 1;
-	      cc.val = cc.mask =
-		VNET_HW_IF_CAP_TCP_GSO | VNET_HW_IF_CAP_TX_TCP_CKSUM |
-		VNET_HW_IF_CAP_TX_UDP_CKSUM | VNET_HW_IF_CAP_TX_FIXED_OFFSET;
+	      cc.val = VNET_HW_IF_CAP_TCP_GSO | VNET_HW_IF_CAP_TX_TCP_CKSUM |
+		       VNET_HW_IF_CAP_TX_UDP_CKSUM |
+		       VNET_HW_IF_CAP_TX_FIXED_OFFSET;
+	      if (vif->features & VIRTIO_FEATURE (VIRTIO_NET_F_HOST_ECN))
+		cc.val |= VNET_HW_IF_CAP_TCP_GSO_ECN;
+	      cc.mask = VNET_HW_IF_CAP_TCP_GSO | VNET_HW_IF_CAP_TCP_GSO_ECN |
+		VNET_HW_IF_CAP_TX_TCP_CKSUM | VNET_HW_IF_CAP_TX_UDP_CKSUM |
+		VNET_HW_IF_CAP_TX_FIXED_OFFSET;
 	    }
 	}
       else if (csum_offload_enabled
@@ -520,9 +527,9 @@ virtio_pci_offloads (vlib_main_t * vm, virtio_if_t * vif, int gso_enabled,
 	      cc.val = VNET_HW_IF_CAP_TX_TCP_CKSUM |
 		       VNET_HW_IF_CAP_TX_UDP_CKSUM |
 		       VNET_HW_IF_CAP_TX_FIXED_OFFSET;
-	      cc.mask = VNET_HW_IF_CAP_TCP_GSO | VNET_HW_IF_CAP_TX_TCP_CKSUM |
-			VNET_HW_IF_CAP_TX_UDP_CKSUM |
-			VNET_HW_IF_CAP_TX_FIXED_OFFSET;
+	      cc.mask = VNET_HW_IF_CAP_TCP_GSO | VNET_HW_IF_CAP_TCP_GSO_ECN |
+		VNET_HW_IF_CAP_TX_TCP_CKSUM | VNET_HW_IF_CAP_TX_UDP_CKSUM |
+		VNET_HW_IF_CAP_TX_FIXED_OFFSET;
 	    }
 	}
       else
@@ -537,7 +544,7 @@ virtio_pci_offloads (vlib_main_t * vm, virtio_if_t * vif, int gso_enabled,
 	      vif->gso_enabled = 0;
 	      cc.val = 0;
 	      cc.mask = VNET_HW_IF_CAP_TX_CKSUM | VNET_HW_IF_CAP_TCP_GSO |
-			VNET_HW_IF_CAP_TX_FIXED_OFFSET;
+		VNET_HW_IF_CAP_TCP_GSO_ECN | VNET_HW_IF_CAP_TX_FIXED_OFFSET;
 	    }
 	}
     }
@@ -1161,8 +1168,10 @@ virtio_negotiate_features (vlib_main_t * vm, virtio_if_t * vif,
     VIRTIO_FEATURE (VIRTIO_NET_F_CTRL_GUEST_OFFLOADS) | VIRTIO_FEATURE (VIRTIO_NET_F_MTU) |
     VIRTIO_FEATURE (VIRTIO_NET_F_MAC) | VIRTIO_FEATURE (VIRTIO_NET_F_GSO) |
     VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_TSO4) | VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_TSO6) |
+    VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_ECN) |
     VIRTIO_FEATURE (VIRTIO_NET_F_GUEST_UFO) | VIRTIO_FEATURE (VIRTIO_NET_F_HOST_TSO4) |
-    VIRTIO_FEATURE (VIRTIO_NET_F_HOST_TSO6) | VIRTIO_FEATURE (VIRTIO_NET_F_HOST_UFO) |
+    VIRTIO_FEATURE (VIRTIO_NET_F_HOST_TSO6) |
+    VIRTIO_FEATURE (VIRTIO_NET_F_HOST_ECN) | VIRTIO_FEATURE (VIRTIO_NET_F_HOST_UFO) |
     VIRTIO_FEATURE (VIRTIO_NET_F_MRG_RXBUF) | VIRTIO_FEATURE (VIRTIO_NET_F_STATUS) |
     VIRTIO_FEATURE (VIRTIO_NET_F_CTRL_VQ) | VIRTIO_FEATURE (VIRTIO_NET_F_CTRL_RX) |
     VIRTIO_FEATURE (VIRTIO_NET_F_MQ) | VIRTIO_FEATURE (VIRTIO_NET_F_CTRL_MAC_ADDR) |

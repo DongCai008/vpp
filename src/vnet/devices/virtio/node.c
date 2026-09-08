@@ -121,20 +121,27 @@ static_always_inline void
 fill_gso_buffer_flags (vlib_buffer_t *b0, vnet_virtio_net_hdr_v1_t *hdr,
 		       u8 l4_proto, u8 l4_hdr_sz)
 {
-  if (hdr->gso_type == VIRTIO_NET_HDR_GSO_TCPV4)
+  u8 gso_type = hdr->gso_type & ~VIRTIO_NET_HDR_GSO_ECN;
+
+  if (gso_type == VIRTIO_NET_HDR_GSO_TCPV4)
     {
       ASSERT (hdr->flags & VIRTIO_NET_HDR_F_NEEDS_CSUM);
       vnet_buffer2 (b0)->gso_size = hdr->gso_size;
       vnet_buffer2 (b0)->gso_l4_hdr_sz = l4_hdr_sz;
       b0->flags |= VNET_BUFFER_F_GSO | VNET_BUFFER_F_IS_IP4;
     }
-  if (hdr->gso_type == VIRTIO_NET_HDR_GSO_TCPV6)
+  if (gso_type == VIRTIO_NET_HDR_GSO_TCPV6)
     {
       ASSERT (hdr->flags & VIRTIO_NET_HDR_F_NEEDS_CSUM);
       vnet_buffer2 (b0)->gso_size = hdr->gso_size;
       vnet_buffer2 (b0)->gso_l4_hdr_sz = l4_hdr_sz;
       b0->flags |= VNET_BUFFER_F_GSO | VNET_BUFFER_F_IS_IP6;
     }
+
+  if (gso_type == VIRTIO_NET_HDR_GSO_TCPV4 ||
+      gso_type == VIRTIO_NET_HDR_GSO_TCPV6)
+    vnet_buffer2 (b0)->gso_flags =
+      hdr->gso_type & VIRTIO_NET_HDR_GSO_ECN ? VNET_BUFFER_GSO_F_TCP_CWR : 0;
 }
 
 static_always_inline u16

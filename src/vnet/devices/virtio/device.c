@@ -359,6 +359,8 @@ set_gso_offsets (vlib_buffer_t *b, vnet_virtio_net_hdr_v1_t *hdr,
       ip4_header_t *ip4;
       hdr->flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
       hdr->gso_type = VIRTIO_NET_HDR_GSO_TCPV4;
+      if (vnet_buffer2 (b)->gso_flags & VNET_BUFFER_GSO_F_TCP_CWR)
+	hdr->gso_type |= VIRTIO_NET_HDR_GSO_ECN;
       hdr->hdr_len = l4_hdr_offset + vnet_buffer2 (b)->gso_l4_hdr_sz;
       hdr->gso_size = vnet_buffer2 (b)->gso_size;
       hdr->csum_start = l4_hdr_offset;
@@ -375,6 +377,8 @@ set_gso_offsets (vlib_buffer_t *b, vnet_virtio_net_hdr_v1_t *hdr,
     {
       hdr->flags = VIRTIO_NET_HDR_F_NEEDS_CSUM;
       hdr->gso_type = VIRTIO_NET_HDR_GSO_TCPV6;
+      if (vnet_buffer2 (b)->gso_flags & VNET_BUFFER_GSO_F_TCP_CWR)
+	hdr->gso_type |= VIRTIO_NET_HDR_GSO_ECN;
       hdr->hdr_len = l4_hdr_offset + vnet_buffer2 (b)->gso_l4_hdr_sz;
       hdr->gso_size = vnet_buffer2 (b)->gso_size;
       hdr->csum_start = l4_hdr_offset;
@@ -407,7 +411,15 @@ add_buffer_to_slot (vlib_main_t *vm, vlib_node_runtime_t *node,
   if (b->flags & VNET_BUFFER_F_GSO)
     {
       if (do_gso)
-	set_gso_offsets (b, hdr, 1);
+	{
+	  if (vnet_buffer2 (b)->gso_flags & VNET_BUFFER_GSO_F_TCP_CWR &&
+	      !(vif->features & VIRTIO_FEATURE (VIRTIO_NET_F_HOST_ECN)))
+	    {
+	      drop_inline = VIRTIO_TX_ERROR_GSO_PACKET_DROP;
+	      goto done;
+	    }
+	  set_gso_offsets (b, hdr, 1);
+	}
       else
 	{
 	  drop_inline = VIRTIO_TX_ERROR_GSO_PACKET_DROP;
@@ -585,7 +597,15 @@ add_buffer_to_slot_packed (vlib_main_t *vm, vlib_node_runtime_t *node,
   if (b->flags & VNET_BUFFER_F_GSO)
     {
       if (do_gso)
-	set_gso_offsets (b, hdr, 1);
+	{
+	  if (vnet_buffer2 (b)->gso_flags & VNET_BUFFER_GSO_F_TCP_CWR &&
+	      !(vif->features & VIRTIO_FEATURE (VIRTIO_NET_F_HOST_ECN)))
+	    {
+	      drop_inline = VIRTIO_TX_ERROR_GSO_PACKET_DROP;
+	      goto done;
+	    }
+	  set_gso_offsets (b, hdr, 1);
+	}
       else
 	{
 	  drop_inline = VIRTIO_TX_ERROR_GSO_PACKET_DROP;

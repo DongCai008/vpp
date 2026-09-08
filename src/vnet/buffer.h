@@ -442,6 +442,8 @@ vnet_buffer_get_opaque (vlib_buffer_t *b)
 #define VNET_BUFFER_OPAQUE_SIZE                                               \
   (sizeof (vnet_buffer ((vlib_buffer_t *) 0)->unused))
 
+#define VNET_BUFFER_GSO_F_TCP_CWR (1 << 0)
+
 /* 56 bytes of additional space */
 typedef struct
 {
@@ -509,7 +511,7 @@ typedef struct
 
   u8 loop_counter;
 
-  u8 unused8;
+  u8 gso_flags;
   u32 unused[6];
 } vnet_buffer_opaque2_t;
 

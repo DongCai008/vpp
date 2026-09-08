@@ -27,6 +27,7 @@ typedef struct _gso_test_data
   u32 l4_hdr_len;
   u8 is_l2;
   u8 is_ip6;
+  u8 tcp_cwr;
   struct _gso_test_data *next;
 } gso_test_data_t;
 
@@ -73,6 +74,17 @@ GSO_TEST_REGISTER_DATA (gso_ipv4_tcp, static) = {
   .l4_hdr_len = sizeof (tcp_header_t),
   .is_l2 = 1,
   .is_ip6 = 0,
+};
+
+GSO_TEST_REGISTER_DATA (gso_ipv4_tcp_cwr, static) = {
+  .name = "ipv4-tcp-cwr",
+  .description = "IPv4 TCP CWR",
+  .data = gso_ipv4_tcp_data,
+  .data_size = sizeof (gso_ipv4_tcp_data),
+  .l4_hdr_len = sizeof (tcp_header_t),
+  .is_l2 = 1,
+  .is_ip6 = 0,
+  .tcp_cwr = 1,
 };
 
 // ipv6
@@ -240,6 +252,15 @@ fill_buffers (vlib_main_t *vm, u32 *buffer_indices,
 	  b->flags |= VNET_BUFFER_F_GSO;
 	  vnet_buffer2 (b)->gso_size = gso_size;
 	  vnet_buffer2 (b)->gso_l4_hdr_sz = l4_hdr_len;
+	  vnet_buffer2 (b)->gso_flags = 0;
+	  if (gso_test_data->tcp_cwr)
+	    {
+	      tcp_header_t *tcp =
+		(tcp_header_t *) (b->data + vnet_buffer (b)->l4_hdr_offset);
+
+	      tcp->flags |= TCP_FLAG_CWR;
+	      vnet_buffer2 (b)->gso_flags = VNET_BUFFER_GSO_F_TCP_CWR;
+	    }
 	}
       b->total_length_not_including_first_buffer = len;
       b->flags |= VLIB_BUFFER_TOTAL_LENGTH_VALID;
@@ -260,6 +281,37 @@ gso_segment_buffer_test (vlib_main_t *vm, u32 bi,
     }
 
   return n_tx_bytes;
+}
+
+static clib_error_t *
+gso_validate_tcp_cwr (vlib_main_t *vm, vnet_interface_per_thread_data_t *ptd)
+{
+  uword n_buffers = vec_len (ptd->split_buffers);
+  uword n_cwr = 0;
+
+  if (n_buffers < 2)
+    return clib_error_return (0, "CWR GSO packet was not segmented");
+
+  for (uword i = 0; i < n_buffers; i++)
+    {
+      vlib_buffer_t *b =
+	vlib_get_buffer (vm, ptd->split_buffers[i]);
+      tcp_header_t *tcp = (tcp_header_t *)
+	(vlib_buffer_get_current (b) + vnet_buffer (b)->l4_hdr_offset -
+	 b->current_data);
+      u8 cwr = tcp->flags & TCP_FLAG_CWR;
+
+      n_cwr += cwr != 0;
+      if (cwr != (i == 0 ? TCP_FLAG_CWR : 0))
+	return clib_error_return (0, "TCP CWR is set on GSO segment %u",
+				  (u32) i);
+    }
+
+  if (n_cwr != 1)
+    return clib_error_return (0, "TCP CWR is set on %u GSO segments",
+			      (u32) n_cwr);
+
+  return 0;
 }
 
 static u32
@@ -375,6 +427,9 @@ test_gso_perf (vlib_main_t *vm, gso_test_main_t *gtm)
 				       actual_length, expected_length);
 	      goto done;
 	    }
+	  if (gso_test_data->tcp_cwr &&
+	      (err = gso_validate_tcp_cwr (vm, &ptd[j])))
+	    goto done;
 	}
 
       for (j = 0; j < n_filled; j++)

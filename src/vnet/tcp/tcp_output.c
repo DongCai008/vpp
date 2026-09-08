@@ -2176,6 +2176,10 @@ tcp_check_if_gso (tcp_connection_t * tc, vlib_buffer_t * b)
       vnet_buffer2 (b)->gso_l4_hdr_sz =
 	sizeof (tcp_header_t) + tc->snd_opts_len;
       vnet_buffer2 (b)->gso_size = tc->snd_mss;
+      vnet_buffer2 (b)->gso_flags =
+	tcp_cwr ((tcp_header_t *) (b->data + vnet_buffer (b)->l4_hdr_offset)) ?
+	  VNET_BUFFER_GSO_F_TCP_CWR :
+	  0;
     }
 }
 

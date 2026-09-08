@@ -174,6 +174,14 @@ tso_segment_vxlan_tunnel_fixup (vlib_main_t *vm,
     }
 }
 
+static_always_inline int
+gso_tcp_cwr_needs_segmentation (vlib_buffer_t *b, u32 caps)
+{
+  return (b->flags & VNET_BUFFER_F_GSO) &&
+	 (vnet_buffer2 (b)->gso_flags & VNET_BUFFER_GSO_F_TCP_CWR) &&
+	 !(caps & VNET_HW_IF_CAP_TCP_GSO_ECN);
+}
+
 static_always_inline u16
 tso_alloc_tx_bufs (vlib_main_t * vm,
 		   vnet_interface_per_thread_data_t * ptd,
@@ -337,7 +345,9 @@ tso_segment_buffer (vlib_main_t * vm, vnet_interface_per_thread_data_t * ptd,
   u16 gso_size = vnet_buffer2 (sb0)->gso_size;
 
   u8 save_tcp_flags = 0;
+  u8 save_tcp_flags_no_cwr = 0;
   u8 tcp_flags_no_fin_psh = 0;
+  u8 tcp_flags_no_fin_psh_no_cwr = 0;
   u32 next_tcp_seq = 0;
 
   tcp_header_t *tcp =
@@ -345,7 +355,14 @@ tso_segment_buffer (vlib_main_t * vm, vnet_interface_per_thread_data_t * ptd,
   next_tcp_seq = clib_net_to_host_u32 (tcp->seq_number);
   /* store original flags for last packet and reset FIN and PSH */
   save_tcp_flags = tcp->flags;
+  save_tcp_flags_no_cwr = save_tcp_flags;
   tcp_flags_no_fin_psh = tcp->flags & ~(TCP_FLAG_FIN | TCP_FLAG_PSH);
+  tcp_flags_no_fin_psh_no_cwr = tcp_flags_no_fin_psh;
+  if (vnet_buffer2 (sb0)->gso_flags & VNET_BUFFER_GSO_F_TCP_CWR)
+    {
+      save_tcp_flags_no_cwr &= ~TCP_FLAG_CWR;
+      tcp_flags_no_fin_psh_no_cwr &= ~TCP_FLAG_CWR;
+    }
   tcp->checksum = 0;
 
   u32 default_bflags =
@@ -429,7 +446,8 @@ tso_segment_buffer (vlib_main_t * vm, vnet_interface_per_thread_data_t * ptd,
 	  if (0 == dst_left && total_src_left)
 	    {
 	      n_tx_bytes += cdb0->current_length;
-	      tso_fixup_segmented_buf (vm, cdb0, tcp_flags_no_fin_psh, is_l2,
+	      tso_fixup_segmented_buf (vm, cdb0,
+				       tcp_flags_no_fin_psh_no_cwr, is_l2,
 				       is_ip6, gho);
 	      ASSERT (dbi < vec_len (ptd->split_buffers));
 	      cdb0 = vlib_get_buffer (vm, ptd->split_buffers[dbi++]);
@@ -439,7 +457,8 @@ tso_segment_buffer (vlib_main_t * vm, vnet_interface_per_thread_data_t * ptd,
 	    }
 	}
 
-      tso_fixup_segmented_buf (vm, cdb0, save_tcp_flags, is_l2, is_ip6, gho);
+      tso_fixup_segmented_buf (vm, cdb0, save_tcp_flags_no_cwr, is_l2,
+			       is_ip6, gho);
 
       n_tx_bytes += cdb0->current_length;
     }
@@ -532,27 +551,39 @@ vnet_gso_node_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	    if (PREDICT_FALSE (hi->sw_if_index != swif0))
 	      {
 		hi0 = vnet_get_sup_hw_interface (vnm, swif0);
-		if ((hi0->caps & supported_caps) != supported_caps)
+		if ((hi0->caps & supported_caps) != supported_caps ||
+		    gso_tcp_cwr_needs_segmentation (b[0], hi0->caps))
 		  break;
 	      }
+	    else if (gso_tcp_cwr_needs_segmentation (b[0], hi->caps))
+	      break;
 	    if (PREDICT_FALSE (hi->sw_if_index != swif1))
 	      {
 		hi1 = vnet_get_sup_hw_interface (vnm, swif1);
-		if ((hi1->caps & supported_caps) != supported_caps)
+		if ((hi1->caps & supported_caps) != supported_caps ||
+		    gso_tcp_cwr_needs_segmentation (b[1], hi1->caps))
 		  break;
 	      }
+	    else if (gso_tcp_cwr_needs_segmentation (b[1], hi->caps))
+	      break;
 	    if (PREDICT_FALSE (hi->sw_if_index != swif2))
 	      {
 		hi2 = vnet_get_sup_hw_interface (vnm, swif2);
-		if ((hi2->caps & supported_caps) != supported_caps)
+		if ((hi2->caps & supported_caps) != supported_caps ||
+		    gso_tcp_cwr_needs_segmentation (b[2], hi2->caps))
 		  break;
 	      }
+	    else if (gso_tcp_cwr_needs_segmentation (b[2], hi->caps))
+	      break;
 	    if (PREDICT_FALSE (hi->sw_if_index != swif3))
 	      {
 		hi3 = vnet_get_sup_hw_interface (vnm, swif3);
-		if ((hi3->caps & supported_caps) != supported_caps)
+		if ((hi3->caps & supported_caps) != supported_caps ||
+		    gso_tcp_cwr_needs_segmentation (b[3], hi3->caps))
 		  break;
 	      }
+	    else if (gso_tcp_cwr_needs_segmentation (b[3], hi->caps))
+	      break;
 
 	    if (b[0]->flags & VLIB_BUFFER_IS_TRACED)
 	      {
@@ -632,7 +663,9 @@ vnet_gso_node_inline (vlib_main_t *vm, vlib_node_runtime_t *node,
 	  else
 	    do_segmentation0 = do_segmentation;
 
-	  if (do_segmentation0)
+	  if (gso_tcp_cwr_needs_segmentation (b[0], caps))
+	    do_segmentation0 = 1;
+	  else if (do_segmentation0)
 	    {
 	      u8 oflags = vnet_buffer (b[0])->oflags;
 	      if ((caps & VNET_HW_IF_CAP_TCP_GSO) == VNET_HW_IF_CAP_TCP_GSO)

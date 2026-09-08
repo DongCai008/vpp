@@ -62,6 +62,8 @@ gso_init_bufs_from_template_base (vlib_buffer_t **bufs, vlib_buffer_t *b0,
 
       clib_memcpy_fast (&bufs[0]->opaque2, &b0->opaque2, sizeof (b0->opaque2));
       clib_memcpy_fast (&bufs[1]->opaque2, &b0->opaque2, sizeof (b0->opaque2));
+      vnet_buffer2 (bufs[0])->gso_flags = 0;
+      vnet_buffer2 (bufs[1])->gso_flags = 0;
 
       /* copying data */
       clib_memcpy_fast (bufs[0]->data, vlib_buffer_get_current (b0), hdr_sz);
@@ -99,6 +101,7 @@ gso_init_bufs_from_template_base (vlib_buffer_t **bufs, vlib_buffer_t *b0,
       bufs[0]->trace_handle = b0->trace_handle;
       bufs[0]->total_length_not_including_first_buffer = 0;
       clib_memcpy_fast (&bufs[0]->opaque2, &b0->opaque2, sizeof (b0->opaque2));
+      vnet_buffer2 (bufs[0])->gso_flags = 0;
 
       /* copying data */
       clib_memcpy_fast (bufs[0]->data, vlib_buffer_get_current (b0), hdr_sz);
@@ -200,6 +203,7 @@ gso_segment_buffer_inline (vlib_main_t *vm,
   u16 l4_hdr_sz = vnet_buffer2 (b)->gso_l4_hdr_sz;
 
   u8 tcp_flags = 0, tcp_flags_no_fin_psh = 0;
+  u8 tcp_flags_no_fin_psh_no_cwr = 0, tcp_flags_no_cwr = 0;
   u32 default_bflags =
     b->flags & ~(VNET_BUFFER_F_GSO | VLIB_BUFFER_NEXT_PRESENT);
   u16 hdr_sz = (l4_hdr_offset - b->current_data) + l4_hdr_sz;
@@ -230,6 +234,13 @@ gso_segment_buffer_inline (vlib_main_t *vm,
   /* store original flags for last packet and reset FIN and PSH */
   tcp_flags = tcp->flags;
   tcp_flags_no_fin_psh = tcp->flags & ~(TCP_FLAG_FIN | TCP_FLAG_PSH);
+  tcp_flags_no_fin_psh_no_cwr = tcp_flags_no_fin_psh;
+  tcp_flags_no_cwr = tcp_flags;
+  if (vnet_buffer2 (b)->gso_flags & VNET_BUFFER_GSO_F_TCP_CWR)
+    {
+      tcp_flags_no_fin_psh_no_cwr &= ~TCP_FLAG_CWR;
+      tcp_flags_no_cwr &= ~TCP_FLAG_CWR;
+    }
   tcp->checksum = 0;
 
   gso_init_bufs_from_template_base (bufs, b, default_bflags, n_bufs, hdr_sz);
@@ -274,7 +285,10 @@ gso_segment_buffer_inline (vlib_main_t *vm,
 
 	  n_tx_bytes += bufs[i]->current_length;
 	  gso_fixup_segmented_buf (vm, bufs[i], tcp_seq, is_l2, oflags, hdr_sz,
-				   l4_hdr_sz, &c, tcp_flags_no_fin_psh, 1,
+				   l4_hdr_sz, &c,
+				   i ? tcp_flags_no_fin_psh_no_cwr :
+				       tcp_flags_no_fin_psh,
+				   1,
 				   bufs[i + 1]);
 	  i++;
 	  dst_left = size;
@@ -289,7 +303,7 @@ gso_segment_buffer_inline (vlib_main_t *vm,
   ASSERT ((i + 1) == n_alloc);
   n_tx_bytes += bufs[i]->current_length;
   gso_fixup_segmented_buf (vm, bufs[i], tcp_seq, is_l2, oflags, hdr_sz,
-			   l4_hdr_sz, &c, tcp_flags, 0, NULL);
+			   l4_hdr_sz, &c, tcp_flags_no_cwr, 0, NULL);
 
   vec_free (bufs);
   return n_tx_bytes;

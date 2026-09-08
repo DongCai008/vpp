@@ -628,6 +628,7 @@ typedef enum vnet_hw_interface_flags_t_
   _ (17, IP_TNL_GSO, "ip-tnl-gso")                                            \
   _ (18, TCP_LRO, "tcp-lro")                                                  \
   _ (19, TX_FIXED_OFFSET, "fixed-offset") /* virtual interfaces */            \
+  _ (20, TCP_GSO_ECN, "tcp-tso-ecn")                                          \
   _ (30, INT_MODE, "int-mode")                                                \
   _ (31, MAC_FILTER, "mac-filter")
 

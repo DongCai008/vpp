@@ -27,6 +27,7 @@ typedef struct
   u16 gso_l4_header_size;
   u8 gso_enabled;
   u8 gso_type;
+  u8 gso_flags;
   u8 offload_flags;
 } vnet_buffer_shinfo_t;
 

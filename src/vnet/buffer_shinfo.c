@@ -75,6 +75,7 @@ vnet_buffer_shinfo_gso (vlib_buffer_t *root, vnet_buffer_shinfo_t *shinfo)
   shinfo->gso_enabled = 1;
   shinfo->gso_size = vnet_buffer2 (root)->gso_size;
   shinfo->gso_l4_header_size = vnet_buffer2 (root)->gso_l4_hdr_sz;
+  shinfo->gso_flags = vnet_buffer2 (root)->gso_flags;
   return 0;
 }
 
