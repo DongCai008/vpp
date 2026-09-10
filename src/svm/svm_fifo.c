@@ -363,6 +363,7 @@ svm_fifo_init (svm_fifo_t * f, u32 size)
   f->segment_index = SVM_FIFO_INVALID_INDEX;
   f->refcnt = 1;
   f->shr->head = f->shr->tail = f->flags = 0;
+  f->shr->tx_flush_head = f->shr->tx_flush_tail = 0;
   f->shr->head_chunk = f->shr->tail_chunk = f->shr->start_chunk;
   f->ooo_deq = f->ooo_enq = 0;
   f->signals = &f->shr->signals;

@@ -22,6 +22,7 @@ STATIC_ASSERT ((FS_MAX_LOG2_CHUNK_SZ - FS_MIN_LOG2_CHUNK_SZ) ==
 
 #define SVM_FIFO_TRACE 			(0)
 #define SVM_FIFO_MAX_EVT_SUBSCRIBERS	7
+#define SVM_FIFO_MAX_TX_FLUSH_BOUNDARIES 64
 
 typedef struct fifo_segment_header_ fifo_segment_header_t;
 typedef uword fs_sptr_t;
@@ -93,6 +94,11 @@ typedef struct svm_fifo_shr_
   CLIB_CACHE_LINE_ALIGN_MARK (producer);
   fs_sptr_t tail_chunk; /**< tracks chunk where tail lands */
   u32 tail;		/**< fifo tail position/byte */
+
+  /* Absolute producer positions at which stream writes requested a flush. */
+  volatile u32 tx_flush_head;
+  volatile u32 tx_flush_tail;
+  u32 tx_flush_boundaries[SVM_FIFO_MAX_TX_FLUSH_BOUNDARIES];
 } svm_fifo_shared_t;
 
 struct _svm_fifo;

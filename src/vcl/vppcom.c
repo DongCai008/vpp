@@ -2619,7 +2619,8 @@ vcl_fifo_is_writeable (svm_fifo_t * f, u32 len, u8 is_dgram)
 
 always_inline int
 vppcom_session_write_inline (vcl_worker_t *wrk, vcl_session_t *s, void *buf,
-			     size_t n, u8 is_flush, u8 is_dontwait, u8 is_dgram)
+			     size_t n, u8 is_flush, u8 is_eor,
+			     u8 is_dontwait, u8 is_dgram)
 {
   int n_write, is_nonblocking;
   session_evt_type_t et;
@@ -2658,24 +2659,26 @@ vppcom_session_write_inline (vcl_worker_t *wrk, vcl_session_t *s, void *buf,
   tx_fifo = s->tx_fifo;
   is_nonblocking = vcl_session_has_attr (s, VCL_SESS_ATTR_NONBLOCK) || is_dontwait;
 
-  if (!vcl_fifo_is_writeable (tx_fifo, n, is_dgram))
+  if (!vcl_fifo_is_writeable (tx_fifo, n, is_dgram) ||
+      (is_eor && !is_dgram && svm_fifo_tx_flush_queue_full (tx_fifo)))
     {
-      if (is_nonblocking)
-	{
-	  return VPPCOM_EWOULDBLOCK;
-	}
-      while (!vcl_fifo_is_writeable (tx_fifo, n, is_dgram))
-	{
-	  svm_fifo_add_want_deq_ntf (tx_fifo, SVM_FIFO_WANT_DEQ_NOTIF);
-	  if (vcl_session_is_closing (s))
-	    return vcl_session_closing_error (s);
-	  if (s->flags & VCL_SESSION_F_APP_CLOSING)
-	    return vcl_session_closed_error (s);
+	  if (is_nonblocking)
+	    {
+	      return VPPCOM_EWOULDBLOCK;
+	    }
+	  while (!vcl_fifo_is_writeable (tx_fifo, n, is_dgram) ||
+		 (is_eor && !is_dgram && svm_fifo_tx_flush_queue_full (tx_fifo)))
+	    {
+	      svm_fifo_add_want_deq_ntf (tx_fifo, SVM_FIFO_WANT_DEQ_NOTIF);
+	      if (vcl_session_is_closing (s))
+		return vcl_session_closing_error (s);
+	      if (s->flags & VCL_SESSION_F_APP_CLOSING)
+		return vcl_session_closed_error (s);
 
-	  s = vcl_worker_wait_mq (wrk, vcl_session_handle (s),
+	      s = vcl_worker_wait_mq (wrk, vcl_session_handle (s),
 				  VCL_WRK_WAIT_IO_TX);
-	  vcl_worker_flush_mq_events (wrk);
-	}
+	      vcl_worker_flush_mq_events (wrk);
+	    }
     }
 
   et = SESSION_IO_EVT_TX;
@@ -2693,6 +2696,9 @@ vppcom_session_write_inline (vcl_worker_t *wrk, vcl_session_t *s, void *buf,
     {
       n_write = app_send_stream_raw (tx_fifo, s->vpp_evt_q, buf, n, et,
 				     0 /* do_evt */, SVM_Q_WAIT);
+      if ((size_t) n_write == n && is_eor)
+	ASSERT (svm_fifo_add_tx_flush_boundary (tx_fifo, tx_fifo->shr->tail) ==
+		0);
     }
 
   if (svm_fifo_set_event (s->tx_fifo))
@@ -2785,8 +2791,9 @@ vppcom_session_write (uint32_t session_handle, void *buf, size_t n)
   if (PREDICT_FALSE (!s))
     return VPPCOM_EBADFD;
 
-  return vppcom_session_write_inline (wrk, s, buf, n, 0 /* is_flush */, 0 /* is_dontwait */,
-				      s->is_dgram ? 1 : 0);
+  return vppcom_session_write_inline (wrk, s, buf, n, 0 /* is_flush */,
+				     0 /* is_eor */, 0 /* is_dontwait */,
+				     s->is_dgram ? 1 : 0);
 }
 
 int
@@ -2799,8 +2806,9 @@ vppcom_session_write_msg (uint32_t session_handle, void *buf, size_t n)
   if (PREDICT_FALSE (!s))
     return VPPCOM_EBADFD;
 
-  return vppcom_session_write_inline (wrk, s, buf, n, 1 /* is_flush */, 0 /* is_dontwait */,
-				      s->is_dgram ? 1 : 0);
+  return vppcom_session_write_inline (wrk, s, buf, n, 1 /* is_flush */,
+				     0 /* is_eor */, 0 /* is_dontwait */,
+				     s->is_dgram ? 1 : 0);
 }
 
 #define vcl_fifo_rx_evt_valid_or_break(_s)                                    \
@@ -5097,8 +5105,9 @@ vppcom_session_sendto (uint32_t session_handle, void *buffer,
   is_dontwait = flags & MSG_DONTWAIT;
   is_flush = !(flags & MSG_MORE) || (flags & MSG_EOR);
 
-  return vppcom_session_write_inline (wrk, s, buffer, buflen, is_flush, is_dontwait,
-				      s->is_dgram ? 1 : 0);
+  return vppcom_session_write_inline (wrk, s, buffer, buflen, is_flush,
+				     flags & MSG_EOR, is_dontwait,
+				     s->is_dgram ? 1 : 0);
 }
 
 int

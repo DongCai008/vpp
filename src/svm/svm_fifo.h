@@ -19,6 +19,7 @@
 #define OOO_SEGMENT_INVALID_INDEX 	((u32)~0)
 #define SVM_FIFO_INVALID_SESSION_INDEX 	((u32)~0)
 #define SVM_FIFO_INVALID_INDEX		((u32)~0)
+#define SVM_FIFO_TX_FLUSH_NONE		((u32)~0)
 
 typedef enum svm_fifo_deq_ntf_
 {
@@ -498,6 +499,69 @@ svm_fifo_max_dequeue (svm_fifo_t * f)
   u32 tail, head;
   f_load_head_tail_all_acq (f, &head, &tail);
   return f_cursize (f, head, tail);
+}
+
+/**
+ * Check whether the producer-side EOR boundary queue is full.
+ *
+ * The queue contains absolute FIFO tail positions, so a consumer can
+ * identify the exact byte at which each MSG_EOR write ends even when several
+ * writes are coalesced before the VPP worker handles the notification.
+ */
+static inline u8
+svm_fifo_tx_flush_queue_full (svm_fifo_t *f)
+{
+  u32 head = clib_atomic_load_acq_n (&f->shr->tx_flush_head);
+  u32 tail = f->shr->tx_flush_tail;
+
+  return tail - head >= SVM_FIFO_MAX_TX_FLUSH_BOUNDARIES;
+}
+
+/**
+ * Record an EOR boundary after the producer has advanced the FIFO tail.
+ */
+static inline int
+svm_fifo_add_tx_flush_boundary (svm_fifo_t *f, u32 boundary)
+{
+  u32 head = clib_atomic_load_acq_n (&f->shr->tx_flush_head);
+  u32 tail = f->shr->tx_flush_tail;
+
+  if (tail - head >= SVM_FIFO_MAX_TX_FLUSH_BOUNDARIES)
+    return -1;
+
+  f->shr->tx_flush_boundaries[tail % SVM_FIFO_MAX_TX_FLUSH_BOUNDARIES] =
+    boundary;
+  clib_atomic_store_rel_n (&f->shr->tx_flush_tail, tail + 1);
+  return 0;
+}
+
+/**
+ * Return bytes from the FIFO head through the next EOR boundary.
+ */
+static inline u32
+svm_fifo_tx_flush_bytes (svm_fifo_t *f)
+{
+  u32 head = f->shr->tx_flush_head;
+  u32 tail = clib_atomic_load_acq_n (&f->shr->tx_flush_tail);
+  u32 boundary;
+
+  if (head == tail)
+    return SVM_FIFO_TX_FLUSH_NONE;
+
+  boundary = f->shr->tx_flush_boundaries[
+    head % SVM_FIFO_MAX_TX_FLUSH_BOUNDARIES];
+  return boundary - f->shr->head;
+}
+
+/**
+ * Consume the next EOR boundary after the TCP writer reaches it.
+ */
+static inline void
+svm_fifo_tx_flush_boundary_done (svm_fifo_t *f)
+{
+  u32 head = f->shr->tx_flush_head;
+
+  clib_atomic_store_rel_n (&f->shr->tx_flush_head, head + 1);
 }
 
 /**
