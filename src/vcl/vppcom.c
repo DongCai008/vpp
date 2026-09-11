@@ -4150,6 +4150,11 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
   if (!session)
     return VPPCOM_EBADFD;
 
+  /* Drain transport notifications before reporting queued read data. This
+   * makes a peer FIN visible as EOF after the application drains data. */
+  if (op == VPPCOM_ATTR_GET_NREAD)
+    vcl_worker_flush_mq_events (wrk);
+
   switch (op)
     {
     case VPPCOM_ATTR_GET_NREAD:
