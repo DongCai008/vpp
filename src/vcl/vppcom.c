@@ -867,6 +867,10 @@ vcl_session_disconnected_handler (vcl_worker_t * wrk,
   if (session->session_state != VCL_STATE_DISCONNECT)
     session->session_state = VCL_STATE_VPP_CLOSING;
 
+  /* A peer FIN is a clean read shutdown. Preserve the POSIX EOF state while
+   * allowing already queued application data to be drained first. */
+  session->flags |= VCL_SESSION_F_RD_SHUTDOWN;
+
   return session;
 }
 
