@@ -1281,6 +1281,9 @@ vcl_handle_mq_event (vcl_worker_t * wrk, session_event_t * e)
 	  !(s->session_state == VCL_STATE_LISTEN))
 	{
 	  s->session_state = VCL_STATE_VPP_CLOSING;
+	  /* A peer FIN is a clean read shutdown. Make EOF observable while
+	   * allowing already queued application data to be drained first. */
+	  s->flags |= VCL_SESSION_F_RD_SHUTDOWN;
 	  s->flags |= VCL_SESSION_F_PENDING_DISCONNECT;
 	  vec_add2 (wrk->unhandled_evts_vector, ecpy, 1);
 	  *ecpy = *e;
