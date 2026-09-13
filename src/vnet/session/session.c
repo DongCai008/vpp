@@ -1169,6 +1169,13 @@ session_transport_closed_notify (transport_connection_t * tc)
 void
 session_transport_reset_notify (transport_connection_t * tc)
 {
+  session_transport_reset_notify_with_error (tc, 0);
+}
+
+void
+session_transport_reset_notify_with_error (transport_connection_t *tc,
+					   i32 error)
+{
   app_worker_t *app_wrk;
   session_t *s;
 
@@ -1180,6 +1187,7 @@ session_transport_reset_notify (transport_connection_t * tc)
       session_set_state (s, SESSION_STATE_TRANSPORT_CLOSING);
       return;
     }
+  s->transport_error = error;
   session_set_state (s, SESSION_STATE_TRANSPORT_CLOSING);
   app_wrk = app_worker_get (s->app_wrk_index);
   app_worker_reset_notify (app_wrk, s);

@@ -721,6 +721,8 @@ void session_half_open_migrate_notify (transport_connection_t *tc);
 int session_half_open_migrated_notify (transport_connection_t *tc);
 void session_transport_closed_notify (transport_connection_t * tc);
 void session_transport_reset_notify (transport_connection_t * tc);
+void session_transport_reset_notify_with_error (transport_connection_t *tc,
+						 i32 error);
 int session_stream_accept (transport_connection_t *tc, u32 listener_index,
 			   clib_thread_index_t thread_index, u8 notify);
 int session_dgram_accept (transport_connection_t *tc, u32 listener_index,

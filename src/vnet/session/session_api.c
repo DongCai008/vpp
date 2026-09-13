@@ -357,7 +357,12 @@ mq_send_session_reset_cb (session_t * s)
   app_worker_t *app_wrk = app_worker_get (s->app_wrk_index);
   session_handle_t sh = session_handle (s);
 
-  mq_send_session_close_evt (app_wrk, sh, SESSION_CTRL_EVT_RESET);
+  session_reset_msg_t m = { 0 };
+  m.handle = sh;
+  /* Reset messages have no caller context. Preserve a transport errno in
+   * the existing context field for VCL; zero retains ECONNRESET semantics. */
+  m.context = (u32) (s->transport_error & 0xffff);
+  app_wrk_send_ctrl_evt (app_wrk, SESSION_CTRL_EVT_RESET, &m, sizeof (m));
 
   if (svm_fifo_n_subscribers (s->rx_fifo))
     mq_notify_close_subscribers (app_wrk->app_index, sh, s->rx_fifo,

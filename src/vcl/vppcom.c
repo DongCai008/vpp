@@ -635,6 +635,12 @@ vcl_flag_accepted_session (vcl_session_t * session, u64 handle, u32 flags)
   return 0;
 }
 
+static inline u32
+vcl_reset_errno (u32 context)
+{
+  return context & 0xffff ? context & 0xffff : ECONNRESET;
+}
+
 static u32
 vcl_session_reset_handler (vcl_worker_t * wrk,
 			   session_reset_msg_t * reset_msg)
@@ -664,7 +670,7 @@ vcl_session_reset_handler (vcl_worker_t * wrk,
   if (session->session_state != VCL_STATE_CLOSED)
     session->session_state = VCL_STATE_DISCONNECT;
 
-  session->socket_error = ECONNRESET;
+  session->socket_error = vcl_reset_errno (reset_msg->context);
   session->flags |= (VCL_SESSION_F_RD_SHUTDOWN | VCL_SESSION_F_WR_SHUTDOWN);
   VDBG (0, "session %u [0x%llx]: reset", sid, reset_msg->handle);
   return sid;
@@ -1313,7 +1319,7 @@ vcl_handle_mq_event (vcl_worker_t * wrk, session_event_t * e)
 	{
 	  s->flags |= VCL_SESSION_F_PENDING_DISCONNECT;
 	  s->session_state = VCL_STATE_DISCONNECT;
-	  s->socket_error = ECONNRESET;
+	  s->socket_error = vcl_reset_errno (((session_reset_msg_t *) e->data)->context);
 	  s->flags |= (VCL_SESSION_F_RD_SHUTDOWN | VCL_SESSION_F_WR_SHUTDOWN);
 	  vec_add2 (wrk->unhandled_evts_vector, ecpy, 1);
 	  *ecpy = *e;
@@ -2933,7 +2939,7 @@ vcl_select_handle_mq_event (vcl_worker_t * wrk, session_event_t * e,
 	{
 	  sid = e->session_index;
 	  s = vcl_session_get (wrk, sid);
-	  s->socket_error = ECONNRESET;
+	  s->socket_error = vcl_reset_errno (((session_reset_msg_t *) e->data)->context);
 	  s->flags &= ~VCL_SESSION_F_PENDING_DISCONNECT;
 	}
       if (vcl_session_is_closed (s))
@@ -3712,7 +3718,7 @@ vcl_epoll_wait_handle_mq_event (vcl_worker_t * wrk, session_event_t * e,
 	{
 	  sid = e->session_index;
 	  s = vcl_session_get (wrk, sid);
-	  s->socket_error = ECONNRESET;
+	  s->socket_error = vcl_reset_errno (((session_reset_msg_t *) e->data)->context);
 	  s->flags &= ~VCL_SESSION_F_PENDING_DISCONNECT;
 	}
       if (vcl_session_is_closed (s) || !vcl_ep_session_needs_evt (s, EPOLLHUP))

@@ -286,6 +286,9 @@ typedef struct session_
   /** Opaque, for general use */
   u32 opaque;
 
+  /** Transport errno associated with a reset notification, if any */
+  i32 transport_error;
+
     CLIB_CACHE_LINE_ALIGN_MARK (pad);
 } session_t;
 
