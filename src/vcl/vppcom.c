@@ -4780,6 +4780,9 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
 	  rv = VPPCOM_EINVAL;
 	  break;
 	}
+      tea.type = TRANSPORT_ENDPT_ATTR_TCP_USER_TIMEOUT;
+      if (!vcl_session_transport_attr (wrk, session, 1 /* is_get */, &tea))
+	session->tcp_user_timeout = tea.tcp_user_timeout;
       *(u32 *) buffer = session->tcp_user_timeout;
       *buflen = sizeof (u32);
       break;
@@ -4795,7 +4798,11 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
 	  rv = VPPCOM_EINVAL;
 	  break;
 	}
-      session->tcp_user_timeout = *(u32 *) buffer;
+      tea.type = TRANSPORT_ENDPT_ATTR_TCP_USER_TIMEOUT;
+      tea.tcp_user_timeout = *(u32 *) buffer;
+      rv = vcl_session_transport_attr (wrk, session, 0 /* is_get */, &tea);
+      if (!rv)
+	session->tcp_user_timeout = tea.tcp_user_timeout;
       break;
 
     case VPPCOM_ATTR_GET_TCP_INFO:
