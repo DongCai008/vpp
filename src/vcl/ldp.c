@@ -1989,24 +1989,11 @@ recvmmsg (int fd, struct mmsghdr *vmessages,
 }
 #endif
 
-static u8
-ldp_vppcom_tcp_state_to_linux (u32 state)
-{
-  switch (state)
-    {
-    case VPPCOM_TCP_STATE_LISTEN:
-      return TCP_LISTEN;
-    case VPPCOM_TCP_STATE_SYN_SENT:
-      return TCP_SYN_SENT;
-    case VPPCOM_TCP_STATE_ESTABLISHED:
-      return TCP_ESTABLISHED;
-    case VPPCOM_TCP_STATE_CLOSING:
-      return TCP_CLOSING;
-    default:
-      return TCP_CLOSE;
-    }
-}
-
+/* Note: since the VPPCOM_ATTR_GET_TCP_INFO now issues a synchronous
+ * transport_attr RPC to VPP for a session that has completed a handshake,
+ * and can block for up to ~1s if VPP is unresponsive
+ * (see vcl_session_transport_attr()). Callers that poll getsockopt(TCP_INFO)
+ * in a hot loop should account for that control-plane round trip. */
 static int
 ldp_vls_tcp_info (vls_handle_t vlsh, void *optval, socklen_t *optlen)
 {
@@ -2023,7 +2010,29 @@ ldp_vls_tcp_info (vls_handle_t vlsh, void *optval, socklen_t *optlen)
   if (rv)
     return rv;
 
-  info.tcpi_state = ldp_vppcom_tcp_state_to_linux (vpp_info.state);
+  if (vpp_info_len < sizeof (vpp_info) ||
+      vpp_info.version != VPPCOM_TCP_INFO_VERSION ||
+      vpp_info.length < sizeof (vpp_info))
+    return VPPCOM_EINVAL;
+
+  info.tcpi_state = vpp_info.tcpi_state;
+  info.tcpi_ca_state = vpp_info.tcpi_ca_state;
+  info.tcpi_retransmits = vpp_info.tcpi_retransmits;
+  info.tcpi_backoff = vpp_info.tcpi_backoff;
+  info.tcpi_rto = vpp_info.tcpi_rto;
+  info.tcpi_snd_mss = vpp_info.tcpi_snd_mss;
+  info.tcpi_rcv_mss = vpp_info.tcpi_rcv_mss;
+  info.tcpi_unacked = vpp_info.tcpi_unacked;
+  info.tcpi_sacked = vpp_info.tcpi_sacked;
+  info.tcpi_lost = vpp_info.tcpi_lost;
+  info.tcpi_retrans = vpp_info.tcpi_retrans;
+  info.tcpi_rtt = vpp_info.tcpi_rtt;
+  info.tcpi_rttvar = vpp_info.tcpi_rttvar;
+  info.tcpi_snd_ssthresh = vpp_info.tcpi_snd_ssthresh;
+  info.tcpi_snd_cwnd = vpp_info.tcpi_snd_cwnd;
+  info.tcpi_reordering = vpp_info.tcpi_reordering;
+  info.tcpi_total_retrans = vpp_info.tcpi_total_retrans;
+
   copy_len = *optlen < sizeof (info) ? *optlen : sizeof (info);
   clib_memcpy (optval, &info, copy_len);
   *optlen = copy_len;

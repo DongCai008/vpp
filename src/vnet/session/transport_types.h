@@ -454,6 +454,44 @@ typedef struct transport_endpt_ext_cfgs_
     .len = 0, .tail_offset = 0, .data = 0,                                    \
   }
 
+/*
+ * Compact TCP_INFO state returned through TRANSPORT_ENDPT_ATTR_TCP_INFO.
+ * This is a value-only, versioned control-path payload. Keep the field names
+ * and units aligned with the corresponding Linux struct tcp_info fields so
+ * compatibility layers can translate it without exposing that structure in
+ * a VPP control message. The outstanding, sacked, lost, and retransmitted
+ * fields are VPP segment equivalents: byte ranges are rounded up using the
+ * current send MSS because this ABI does not carry packet-boundary state.
+ * tcpi_total_retrans is the exact VPP retransmitted-segment counter.
+ */
+#define TRANSPORT_TCP_INFO_VERSION 1
+
+typedef struct transport_tcp_info_
+{
+  u16 version;
+  u16 length;
+  u8 tcpi_state;
+  u8 tcpi_ca_state;
+  u8 tcpi_retransmits;
+  u8 tcpi_backoff;
+  u32 tcpi_rto;
+  u32 tcpi_snd_mss;
+  u32 tcpi_rcv_mss;
+  u32 tcpi_unacked;
+  u32 tcpi_sacked;
+  u32 tcpi_lost;
+  u32 tcpi_retrans;
+  u32 tcpi_rtt;
+  u32 tcpi_rttvar;
+  u32 tcpi_snd_ssthresh;
+  u32 tcpi_snd_cwnd;
+  u32 tcpi_reordering;
+  u32 tcpi_total_retrans;
+} transport_tcp_info_t;
+
+STATIC_ASSERT (sizeof (transport_tcp_info_t) == 60,
+               "transport TCP info ABI size mismatch");
+
 #define foreach_transport_attr_fields                                                              \
   _ (u64, next_output_node, NEXT_OUTPUT_NODE)                                                      \
   _ (u16, mss, MSS)                                                                                \
@@ -464,7 +502,8 @@ typedef struct transport_endpt_ext_cfgs_
   _ (tls_alpn_proto_t, tls_alpn, TLS_ALPN)                                                         \
   _ (tls_profile_info_t, tls_profile_info, TLS_PROFILE_INFO)                                       \
   _ (u64, next_transport, NEXT_TRANSPORT)                                                          \
-  _ (u64, app_proto_err_code, APP_PROTO_ERR_CODE)
+  _ (u64, app_proto_err_code, APP_PROTO_ERR_CODE)                                                  \
+  _ (transport_tcp_info_t, tcp_info, TCP_INFO)
 
 typedef enum transport_endpt_attr_type_
 {
@@ -483,6 +522,9 @@ typedef struct transport_endpt_attr_
 #undef _
   };
 } transport_endpt_attr_t;
+
+STATIC_ASSERT (sizeof (transport_endpt_attr_t) == 72,
+               "transport endpoint attribute ABI size mismatch");
 
 typedef void *transport_cleanup_cb_fn;
 

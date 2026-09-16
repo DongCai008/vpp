@@ -193,7 +193,7 @@ typedef enum
    */
   VPPCOM_ATTR_GET_TCP_USER_TIMEOUT,
   VPPCOM_ATTR_SET_TCP_USER_TIMEOUT,
-  /* TCP stream only. vppcom_tcp_info_t is a copied, read-only snapshot. */
+  /* TCP stream only. vppcom_tcp_info_t is a versioned transport snapshot. */
   VPPCOM_ATTR_GET_TCP_INFO,
 } vppcom_attr_op_t;
 
@@ -201,43 +201,46 @@ typedef enum
 typedef char vppcom_attr_op_stability_check[
   VPPCOM_ATTR_SET_APP_PROTO_ERR_CODE == 51 ? 1 : -1];
 
-typedef enum vppcom_tcp_state_
-{
-  VPPCOM_TCP_STATE_UNKNOWN = 0,
-  VPPCOM_TCP_STATE_CLOSED,
-  VPPCOM_TCP_STATE_LISTEN,
-  VPPCOM_TCP_STATE_SYN_SENT,
-  VPPCOM_TCP_STATE_ESTABLISHED,
-  VPPCOM_TCP_STATE_CLOSING,
-  VPPCOM_TCP_STATE_ERROR,
-} vppcom_tcp_state_t;
-
 #define VPPCOM_TCP_INFO_VERSION 1
 
 /*
- * Stable VCL TCP state snapshot. All byte counts are in bytes and
- * tcp_user_timeout is in milliseconds. GET_TCP_INFO requires buffer to point
- * to this complete structure and returns VPPCOM_EINVAL for a shorter buffer,
- * VPPCOM_ENOPROTOOPT for a non-TCP session, and VPPCOM_EBADFD for an invalid
- * session. The snapshot contains no internal pointers and is valid in every
- * TCP session phase; unavailable FIFO-derived counts are reported as zero.
+ * TCP stream only. Versioned, value-only TCP state carrying the Linux
+ * TCP_INFO recovery and congestion fields. All timings use the units of the
+ * matching Linux struct tcp_info fields. tcpi_state uses Linux tcpi_state
+ * numbering. The outstanding, sacked, lost, and retransmitted fields are
+ * current-MSS-rounded VPP segment equivalents, not exact Linux packet
+ * counters. tcpi_total_retrans is the exact VPP retransmitted-segment
+ * counter. The length is the number of bytes returned for the advertised
+ * version. GET_TCP_INFO requires buffer to point to this complete structure
+ * and returns VPPCOM_EINVAL for a shorter buffer, VPPCOM_ENOPROTOOPT for a
+ * non-TCP session, and VPPCOM_EBADFD for an invalid session. The snapshot
+ * contains no internal pointers and is valid in every TCP session phase;
+ * fields that are unavailable (e.g. before the transport has completed a
+ * handshake) are reported as zero, except tcpi_state which is always
+ * populated.
  */
 typedef struct vppcom_tcp_info_
 {
-  uint32_t version;
-  uint32_t length;
-  uint32_t state;
-  uint32_t tcp_user_timeout;
-  uint32_t sndbuf_bytes;
-  uint32_t rcvbuf_bytes;
-  uint32_t readable_bytes;
-  uint32_t writable_bytes;
-  uint32_t write_queue_bytes;
-  uint32_t socket_error;
+  uint16_t version;
+  uint16_t length;
+  uint8_t tcpi_state;
+  uint8_t tcpi_ca_state;
+  uint8_t tcpi_retransmits;
+  uint8_t tcpi_backoff;
+  uint32_t tcpi_rto;
+  uint32_t tcpi_snd_mss;
+  uint32_t tcpi_rcv_mss;
+  uint32_t tcpi_unacked;
+  uint32_t tcpi_sacked;
+  uint32_t tcpi_lost;
+  uint32_t tcpi_retrans;
+  uint32_t tcpi_rtt;
+  uint32_t tcpi_rttvar;
+  uint32_t tcpi_snd_ssthresh;
+  uint32_t tcpi_snd_cwnd;
+  uint32_t tcpi_reordering;
+  uint32_t tcpi_total_retrans;
 } vppcom_tcp_info_t;
-
-typedef char vppcom_tcp_info_size_check[
-  sizeof (vppcom_tcp_info_t) == 40 ? 1 : -1];
 
 typedef enum {
   VPPCOM_STREAM_F_UNIDIRECTIONAL = 1 << 0,

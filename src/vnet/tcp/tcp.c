@@ -1025,6 +1025,113 @@ tcp_set_attribute (tcp_connection_t *tc, transport_endpt_attr_t *attr)
   return rv;
 }
 
+static u8
+tcp_info_state (tcp_state_t state)
+{
+  /* Values are the Linux TCP_INFO tcpi_state values. */
+  switch (state)
+    {
+    case TCP_STATE_ESTABLISHED:
+      return 1; /* TCP_ESTABLISHED */
+    case TCP_STATE_SYN_SENT:
+      return 2; /* TCP_SYN_SENT */
+    case TCP_STATE_SYN_RCVD:
+      return 3; /* TCP_SYN_RECV */
+    case TCP_STATE_FIN_WAIT_1:
+      return 4; /* TCP_FIN_WAIT1 */
+    case TCP_STATE_FIN_WAIT_2:
+      return 5; /* TCP_FIN_WAIT2 */
+    case TCP_STATE_TIME_WAIT:
+      return 6; /* TCP_TIME_WAIT */
+    case TCP_STATE_CLOSED:
+      return 7; /* TCP_CLOSE */
+    case TCP_STATE_CLOSE_WAIT:
+      return 8; /* TCP_CLOSE_WAIT */
+    case TCP_STATE_LAST_ACK:
+      return 9; /* TCP_LAST_ACK */
+    case TCP_STATE_LISTEN:
+      return 10; /* TCP_LISTEN */
+    case TCP_STATE_CLOSING:
+      return 11; /* TCP_CLOSING */
+    default:
+      return 0;
+    }
+}
+
+static u8
+tcp_info_ca_state (tcp_connection_t *tc)
+{
+  /* Values are the Linux TCP_INFO tcpi_ca_state values. */
+  if (tcp_in_fastrecovery (tc))
+    return 3; /* TCP_CA_Recovery */
+  if (tcp_in_recovery (tc) || tc->rto_boff)
+    return 4; /* TCP_CA_Loss */
+  if (tc->sack_sb.lost_bytes)
+    return 4; /* TCP_CA_Loss: scoreboard loss outside recovery */
+  if (tc->rcv_dupacks)
+    return 1; /* TCP_CA_Disorder */
+  return 0; /* TCP_CA_Open */
+}
+
+static u32
+tcp_info_segment_equivalents (u32 bytes, u32 mss)
+{
+  if (!bytes || !mss)
+    return 0;
+  return (bytes + mss - 1) / mss;
+}
+
+static u32
+tcp_info_u32 (u64 value)
+{
+  return value > 0xffffffffULL ? ~0 : (u32) value;
+}
+
+static u32
+tcp_info_time (u32 ticks)
+{
+  return tcp_info_u32 ((u64) ticks * 1000000ULL / THZ);
+}
+
+static int
+tcp_get_info_attribute (tcp_connection_t *tc, transport_tcp_info_t *info)
+{
+  u32 mss = tc->snd_mss;
+  u32 retrans_bytes;
+
+  if (!mss)
+    return -1;
+
+  clib_memset (info, 0, sizeof (*info));
+  info->version = TRANSPORT_TCP_INFO_VERSION;
+  info->length = sizeof (*info);
+  info->tcpi_state = tcp_info_state (tc->state);
+  info->tcpi_ca_state = tcp_info_ca_state (tc);
+  info->tcpi_retransmits = clib_min (
+    tcp_info_u32 ((u64) tc->fr_occurences + tc->tr_occurences), (u32) 255);
+  info->tcpi_backoff = clib_min (tc->rto_boff, (u32) 255);
+  info->tcpi_rto = tcp_info_time (tc->rto);
+  info->tcpi_snd_mss = tc->snd_mss;
+  info->tcpi_rcv_mss = tc->rcv_opts.mss ? tc->rcv_opts.mss : tc->mss;
+  info->tcpi_unacked = tcp_info_segment_equivalents (tc->snd_nxt - tc->snd_una,
+                                                      mss);
+  info->tcpi_sacked = tcp_info_segment_equivalents (tc->sack_sb.sacked_bytes,
+                                                     mss);
+  info->tcpi_lost = tcp_info_segment_equivalents (tc->sack_sb.lost_bytes, mss);
+  retrans_bytes = tc->snd_rxt_bytes > tc->rxt_delivered
+			  ? tc->snd_rxt_bytes - tc->rxt_delivered
+			  : 0;
+  info->tcpi_retrans = tcp_info_segment_equivalents (retrans_bytes, mss);
+  info->tcpi_rtt = tcp_info_time (tc->srtt);
+  info->tcpi_rttvar = tcp_info_time (tc->rttvar);
+  info->tcpi_snd_ssthresh =
+    tcp_info_segment_equivalents (tc->ssthresh, mss);
+  info->tcpi_snd_cwnd = tcp_info_segment_equivalents (tc->cwnd, mss);
+  info->tcpi_reordering = tc->sack_sb.reorder;
+  info->tcpi_total_retrans = tcp_info_u32 (tc->segs_retrans);
+  return 0;
+}
+
 static int
 tcp_get_attribute (tcp_connection_t *tc, transport_endpt_attr_t *attr)
 {
@@ -1051,6 +1158,9 @@ tcp_get_attribute (tcp_connection_t *tc, transport_endpt_attr_t *attr)
       break;
     case TRANSPORT_ENDPT_ATTR_CC_ALGO:
       attr->cc_algo = tc->cc_algo - tcp_main.cc_algos;
+      break;
+    case TRANSPORT_ENDPT_ATTR_TCP_INFO:
+      rv = tcp_get_info_attribute (tc, &attr->tcp_info);
       break;
     default:
       rv = -1;

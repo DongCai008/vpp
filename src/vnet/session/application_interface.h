@@ -555,6 +555,11 @@ typedef struct session_transport_attr_reply_msg_
   u8 is_get;
 } __clib_packed session_transport_attr_reply_msg_t;
 
+STATIC_ASSERT (sizeof (session_transport_attr_msg_t) <= SESSION_CTRL_MSG_MAX_SIZE,
+               "transport attribute request exceeds control message size");
+STATIC_ASSERT (sizeof (session_transport_attr_reply_msg_t) <= SESSION_CTRL_MSG_MAX_SIZE,
+               "transport attribute reply exceeds control message size");
+
 typedef struct app_session_event_
 {
   svm_msg_q_msg_t msg;

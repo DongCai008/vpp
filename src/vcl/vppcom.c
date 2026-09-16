@@ -4088,51 +4088,84 @@ vcl_session_socket_error_take (vcl_session_t *session)
   return socket_error;
 }
 
-static vppcom_tcp_state_t
-vcl_session_tcp_state (vcl_session_t *session)
+/* Linux tcpi_state numbering (see src/vnet/tcp/tcp.c's tcp_info_state()):
+ * ESTABLISHED = 1, SYN_SENT = 2, LISTEN = 10, CLOSING = 11, CLOSE = 7. */
+static u8
+vcl_session_tcp_info_state (vcl_session_t *session)
 {
   if (session->vpp_error != SESSION_E_NONE)
-    return VPPCOM_TCP_STATE_ERROR;
+    return 7; /* TCP_CLOSE */
 
   switch (session->session_state)
     {
-    case VCL_STATE_CLOSED:
-      return VPPCOM_TCP_STATE_CLOSED;
-    case VCL_STATE_LISTEN:
-      return VPPCOM_TCP_STATE_LISTEN;
     case VCL_STATE_READY:
-      return VPPCOM_TCP_STATE_ESTABLISHED;
+      return 1; /* TCP_ESTABLISHED */
+    case VCL_STATE_LISTEN:
+      return 10; /* TCP_LISTEN */
     case VCL_STATE_VPP_CLOSING:
     case VCL_STATE_DISCONNECT:
-      return VPPCOM_TCP_STATE_CLOSING;
+      return 11; /* TCP_CLOSING */
+    case VCL_STATE_CLOSED:
     default:
-      return VPPCOM_TCP_STATE_UNKNOWN;
+      return 7; /* TCP_CLOSE */
     }
 }
 
+/* vppcom_tcp_info_t and transport_tcp_info_t are the same fields, in the
+ * same order, with the same widths (both statically asserted to their ABI
+ * size) -- a bulk copy is valid and cheaper than a field-by-field one. */
+STATIC_ASSERT (sizeof (vppcom_tcp_info_t) == sizeof (transport_tcp_info_t),
+	       "vppcom/transport tcp_info ABI mismatch");
+
 static void
-vcl_session_tcp_info (vcl_session_t *session, vppcom_tcp_info_t *info)
+vcl_session_tcp_info (vcl_worker_t *wrk, vcl_session_t *session,
+		      vppcom_tcp_info_t *info)
 {
-  memset (info, 0, sizeof (*info));
+  transport_endpt_attr_t tea = {};
+  u8 got_attr = 0;
+
+  /* Only sessions whose transport has completed a handshake (and so has an
+   * mss) can plausibly answer a TCP_INFO RPC. Any other session (never
+   * connected, listening, already closed) falls through to the all-zero
+   * fields below, with tcpi_state as the one meaningful value -- this
+   * matches Linux getsockopt(TCP_INFO) on an unconnected/closed socket and
+   * is not an error. vpp_evt_q must also be set: vcl_session_transport_attr()
+   * silently returns success without touching its output when the session
+   * has no event queue yet (e.g. a non-blocking connect that was RST'd
+   * before the CONNECTED reply attached vpp_evt_q), and trusting that
+   * untouched, request-seeded tea would clobber tcpi_state with 0. */
+  if (session->vpp_evt_q &&
+      (session->session_state == VCL_STATE_READY ||
+       session->session_state == VCL_STATE_VPP_CLOSING ||
+       session->session_state == VCL_STATE_DISCONNECT))
+    {
+      tea.type = TRANSPORT_ENDPT_ATTR_TCP_INFO;
+      tea.tcp_info.version = TRANSPORT_TCP_INFO_VERSION;
+      tea.tcp_info.length = sizeof (tea.tcp_info);
+
+      got_attr = !vcl_session_transport_attr (wrk, session, 1 /* is_get */,
+					      &tea) &&
+		 tea.tcp_info.version == TRANSPORT_TCP_INFO_VERSION &&
+		 tea.tcp_info.length == sizeof (tea.tcp_info);
+    }
+
+  /* Zeroing is only needed here: the got_attr copy below overwrites every
+   * field anyway, so memset'ing first on that path would just be wasted
+   * work. On the fallback path it prevents stale/uninitialized bytes in
+   * the caller's buffer (e.g. a reused polling buffer) from being reported
+   * as current TCP state. */
+  if (got_attr)
+    {
+      clib_memcpy_fast (info, &tea.tcp_info, sizeof (*info));
+    }
+  else
+    {
+      memset (info, 0, sizeof (*info));
+      info->tcpi_state = vcl_session_tcp_info_state (session);
+    }
+
   info->version = VPPCOM_TCP_INFO_VERSION;
   info->length = sizeof (*info);
-  info->state = vcl_session_tcp_state (session);
-  info->tcp_user_timeout = session->tcp_user_timeout;
-  info->sndbuf_bytes = session->sndbuf_size ? session->sndbuf_size :
-		       session->tx_fifo	    ? svm_fifo_size (session->tx_fifo) :
-					      vcm->cfg.tx_fifo_size;
-  info->rcvbuf_bytes = session->rcvbuf_size ? session->rcvbuf_size :
-		       session->rx_fifo	    ? svm_fifo_size (session->rx_fifo) :
-					      vcm->cfg.rx_fifo_size;
-  info->socket_error = vcl_session_socket_error (session);
-
-  if (session->tx_fifo && vcl_session_is_open (session))
-    {
-      info->writable_bytes = vcl_session_write_ready (session);
-      info->write_queue_bytes = svm_fifo_max_dequeue (session->tx_fifo);
-    }
-  if (session->rx_fifo && vcl_session_is_open (session))
-    info->readable_bytes = vcl_session_read_ready (session);
 }
 
 int
@@ -4770,7 +4803,7 @@ vppcom_session_attr (uint32_t session_handle, uint32_t op,
 	  rv = VPPCOM_EINVAL;
 	  break;
 	}
-      vcl_session_tcp_info (session, buffer);
+      vcl_session_tcp_info (wrk, session, buffer);
       *buflen = sizeof (vppcom_tcp_info_t);
       break;
 
