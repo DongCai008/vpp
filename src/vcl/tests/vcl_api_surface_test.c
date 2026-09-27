@@ -203,7 +203,7 @@ test_tcp_info_abi_and_control_path (void)
   uint32_t buflen;
   int session_handle;
 
-  assert (sizeof (vppcom_tcp_info_t) == 60);
+  assert (sizeof (vppcom_tcp_info_t) == 64);
   assert (VPPCOM_TCP_INFO_VERSION == 1);
 
   wrk = vcl_worker_get_current ();

@@ -240,6 +240,7 @@ typedef struct vppcom_tcp_info_
   uint32_t tcpi_snd_cwnd;
   uint32_t tcpi_reordering;
   uint32_t tcpi_total_retrans;
+  uint32_t tcpi_probes;
 } vppcom_tcp_info_t;
 
 typedef enum {

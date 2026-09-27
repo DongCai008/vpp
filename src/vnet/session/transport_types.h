@@ -487,9 +487,10 @@ typedef struct transport_tcp_info_
   u32 tcpi_snd_cwnd;
   u32 tcpi_reordering;
   u32 tcpi_total_retrans;
+  u32 tcpi_probes;
 } transport_tcp_info_t;
 
-STATIC_ASSERT (sizeof (transport_tcp_info_t) == 60,
+STATIC_ASSERT (sizeof (transport_tcp_info_t) == 64,
                "transport TCP info ABI size mismatch");
 
 #define foreach_transport_attr_fields                                                              \
@@ -503,7 +504,7 @@ STATIC_ASSERT (sizeof (transport_tcp_info_t) == 60,
   _ (tls_profile_info_t, tls_profile_info, TLS_PROFILE_INFO)                                       \
   _ (u64, next_transport, NEXT_TRANSPORT)                                                          \
   _ (u64, app_proto_err_code, APP_PROTO_ERR_CODE)                                                  \
-  _ (transport_tcp_info_t, tcp_info, TCP_INFO)                                                     \
+  _ (transport_tcp_info_t, tcp_info, TCP_INFO)                                                      \
   _ (u32, tcp_user_timeout, TCP_USER_TIMEOUT)
 
 typedef enum transport_endpt_attr_type_

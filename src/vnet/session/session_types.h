@@ -286,6 +286,10 @@ typedef struct session_
   /** Opaque, for general use */
   u32 opaque;
 
+  /** Final TCP_INFO snapshot retained for post-reset attribute queries. */
+  u8 transport_tcp_info_valid;
+  transport_tcp_info_t transport_tcp_info;
+
   /** Transport errno associated with a reset notification, if any */
   i32 transport_error;
 
